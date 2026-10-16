@@ -5,6 +5,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.callbackFlow
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.BufferedReader
 import java.io.File
@@ -49,10 +50,16 @@ class BootstrapManager(private val ctx: Context) {
         fun majorVersion(v: String = ALPINE_VERSION): String =
             v.split('.').take(2).joinToString(".")
 
-        fun archName(): String = when (android.os.Build.SUPPORTED_ABIS.firstOrNull()) {
-            "arm64-v8a", "armeabi-v7a" -> if (android.os.Build.SUPPORTED_ABIS.contains("arm64-v8a")) "aarch64" else "armv7"
-            "x86_64" -> "x86_64"
-            else -> "armhf" // best effort fallback; users can override in settings
+        fun archName(): String = when {
+            // IMPORTANT: check arm64 FIRST. On 64-bit ARM devices SUPPORTED_ABIS is
+            // ["arm64-v8a","armeabi-v7a","armeabi"] and the old `when(first)` form
+            // could resolve to the wrong branch on some ROMs, producing a 404 URL
+            // (armhf) → bootstrap failure with no visible error.
+            android.os.Build.SUPPORTED_ABIS.contains("arm64-v8a") -> "aarch64"
+            android.os.Build.SUPPORTED_ABIS.contains("armeabi-v7a") -> "armv7"
+            android.os.Build.SUPPORTED_ABIS.contains("x86_64") -> "x86_64"
+            android.os.Build.SUPPORTED_ABIS.contains("x86") -> "x86"
+            else -> "armv7" // best effort fallback; users can override via Settings mirror
         }
 
         fun rootfsUrl(distro: String = DEFAULT_DISTRO, version: String = ALPINE_VERSION): String =
@@ -61,8 +68,19 @@ class BootstrapManager(private val ctx: Context) {
 
     /** Streams download+extract progress as a Flow so UI can render a single bar. */
     fun bootstrapFlow(): Flow<Result<Unit>> = callbackFlow {
+        // Run the whole download+extract on an IO thread. v0.1.1 ran it on the UI
+        // dispatcher (callbackFlow's default), so every tap of "Install" froze and
+        // then force-closed the app — Android kills ANR'd apps instantly, which is
+        // exactly the "Settings/boottap crashes" symptom reported for this build.
+        val ioScope = kotlinx.coroutines.CoroutineScope(
+            Dispatchers.IO + (coroutineContext[kotlinx.coroutines.Job] ?: kotlinx.coroutines.SupervisorJob()))
+        ioScope.launch { runBootstrapInternal { res -> trySend(res) } }
+        awaitClose { }
+    }
+
+    private suspend fun runBootstrapInternal(emit: (Result<Unit>) -> Unit) {
         try {
-            send(Result.failure(BootstrapProgress("Resolving mirror", -1)))
+            emit(Result.failure(BootstrapProgress("Resolving mirror", -1)))
             val dest = FsLayout.linuxRoot(ctx)
             if (dest.exists()) dest.deleteRecursively()
             check(dest.mkdirs() || dest.isDirectory) { "Cannot create ${dest.absolutePath}" }
@@ -82,11 +100,19 @@ class BootstrapManager(private val ctx: Context) {
             var lastErr: Throwable? = null
             var downloaded = false
             for (base in bases) {
-                val clean = base.trimEnd('/')
-                val url = URL("${clean.removeSuffix("/v")}/$pathSuffix")
-                trySend(Result.failure(BootstrapProgress("Downloading rootfs (${url.host})", -1)))
+                // Robust normalization: accept "…/alpine", "…/alpine/v", "…/alpine/v3.20"
+                // or a full tarball URL from Settings → mirror, and always produce
+                // <alpineBase>/<major>/releases/<arch>/<file>.
+                val clean = base.trim().trimEnd('/')
+                val url: URL = when {
+                    clean.endsWith(".tar.gz") -> URL(clean)               // full file URL — use verbatim
+                    clean.endsWith("/v") -> URL("$clean$pathSuffix")      // "…/alpine/v" + "3.20/releases/…"
+                    Regex("/v[0-9]").containsMatchIn(clean) -> URL("$clean/$DEFAULT_DISTRO-$ver-${archName()}.tar.gz")
+                    else -> URL("$clean/${majorVersion(ver)}/releases/${archName()}/$DEFAULT_DISTRO-$ver-${archName()}.tar.gz")
+                }
+                emit(Result.failure(BootstrapProgress("Downloading rootfs (${url.host})", -1)))
                 try {
-                    downloadTo(url, tmp) { pct -> trySend(Result.failure(BootstrapProgress("Downloading rootfs", pct))) }
+                    downloadTo(url, tmp) { pct -> emit(Result.failure(BootstrapProgress("Downloading rootfs", pct))) }
                     downloaded = true
                     break
                 } catch (e: Throwable) {
@@ -94,7 +120,12 @@ class BootstrapManager(private val ctx: Context) {
                     tmp.delete()
                 }
             }
-            if (!downloaded) throw RuntimeException("All mirrors failed; last error: ${lastErr?.message}")
+            if (!downloaded) {
+                // Surface the actual HTTP failure (incl. response code) so users can act on it.
+                val detail = (lastErr as? java.net.HttpURLConnection)?.let { "HTTP ${it.responseCode}" }
+                    ?: lastErr?.toString() ?: "no attempt made"
+                throw RuntimeException("All mirrors failed ($detail). Check Wi-Fi/mobile data and retry.", lastErr)
+            }
 
             // Sanity-check what we downloaded: an HTML error page would otherwise
             // surface as a confusing "tar failed" message.
@@ -104,21 +135,20 @@ class BootstrapManager(private val ctx: Context) {
                 throw RuntimeException("Mirror returned non-gzip data (${tmp.length()} bytes) — check network/mirror URL")
             }
 
-            trySend(Result.failure(BootstrapProgress("Extracting rootfs", -1)))
+            emit(Result.failure(BootstrapProgress("Extracting rootfs", -1)))
             extractTarGz(tmp, dest)
             tmp.delete()
 
-            trySend(Result.failure(BootstrapProgress("Linking /data/data paths", -1)))
+            emit(Result.failure(BootstrapProgress("Linking /data/data paths", -1)))
             linkAndroidRuntime(dest)
             postInstall(dest)
             installHelperScripts(dest)
 
             FsLayout.markBootstrapped(ctx)
-            trySend(Result.success(Unit))
+            emit(Result.success(Unit))
         } catch (e: Throwable) {
-            trySend(Result.failure(e))
+            emit(Result.failure(e))
         }
-        awaitClose { }
     }
 
     suspend fun bootstrap(): Result<Unit> = withContext(Dispatchers.IO) {
@@ -148,7 +178,7 @@ class BootstrapManager(private val ctx: Context) {
                 var done = 0L
                 while (true) {
                     val n = input.read(buf)
-                    if (n <= 0) break
+                    if (n < 0) break          // real EOF; n==0 is legal, don't stop early
                     os.write(buf, 0, n)
                     done += n
                     if (total > 0) onPct(((done * 100) / total).toInt())
@@ -160,21 +190,95 @@ class BootstrapManager(private val ctx: Context) {
         if (out.length() == 0L) throw RuntimeException("Downloaded 0 bytes from $url")
     }
 
-    /** Use system tar (toybox) — avoids pulling a JVM gzip buffer into memory. */
+    /**
+     * Extract the rootfs. v0.1.1 used `tar -xzf` directly — but many Android toybox
+     * builds either lack `-z`, reject combined short flags, or are restricted for
+     * unprivileged apps, which made extraction fail silently ("bootstrap failed,
+     * nothing happens"). Now we try three strategies in order:
+     *   1. sh pipeline: gzip -dc … | tar -x …  (works on every toybox/busybox)
+     *   2. plain `tar -xzf`                     (full-featured tar, e.g. LineageOS)
+     *   3. pure-Java GZIPInputStream + TarInputStream (no external binaries at all)
+     */
     private fun extractTarGz(tgz: File, dest: File) {
-        // Probe for tar; some OEM ROMs ship toybox tar restricted for apps → give a
-        // clear error instead of an opaque exit-code message.
-        val p = runCatching {
-            ProcessBuilder("tar", "-xzf", tgz.absolutePath, "-C", dest.absolutePath)
-                .redirectErrorStream(true).start()
-        }.getOrElse {
-            throw RuntimeException("Device has no /system/bin/tar — cannot extract rootfs")
+        val cmds = listOf(
+            arrayOf("/system/bin/sh", "-c", "gzip -dc '${tgz.absolutePath}' | tar -x -C '${dest.absolutePath}'"),
+            arrayOf("tar", "-xzf", tgz.absolutePath, "-C", dest.absolutePath),
+        )
+        var lastErr = ""
+        for (argv in cmds) {
+            val r = runCatching {
+                val p = ProcessBuilder(*argv).redirectErrorStream(true).start()
+                val out = StringBuilder()
+                BufferedReader(InputStreamReader(p.inputStream)).forEachLine { out.append(it).append('\n') }
+                val code = p.waitFor()
+                code to out.toString()
+            }
+            // `continue` inside runCatching's inline lambda isn't allowed pre-2.2 —
+            // handle the failure branch explicitly instead.
+            if (r.isFailure) { lastErr = "spawn failed: ${r.exceptionOrNull()?.message}"; continue }
+            val (code, out) = r.getOrThrow()
+            if (code == 0 && File(dest, "etc").exists()) return
+            lastErr = "exit $code: ${out.take(200)}"
         }
-        val out = StringBuilder()
-        BufferedReader(InputStreamReader(p.inputStream)).forEachLine { out.append(it).append('\n') }
-        val code = p.waitFor()
-        if (code != 0) throw RuntimeException("tar failed ($code): ${out.take(300)}")
+        // Strategy 3: no external binaries — stream through Java.
+        runCatching { extractJava(tgz, dest) }
+            .onFailure { throw RuntimeException("Extraction failed on this device. tar: $lastErr; java: ${it.message}") }
+        if (!File(dest, "etc").exists()) throw RuntimeException("Extraction produced an incomplete rootfs (tar: $lastErr)")
     }
+
+    /** Minimal streaming tar reader (ustar + gnu long names good enough for Alpine). */
+    private fun extractJava(tgz: File, dest: File) {
+        java.util.zip.GZIPInputStream(java.io.BufferedInputStream(FileInputStream(tgz), 64 * 1024))
+            .buffered(64 * 1024).use { gz ->
+            val hdr = ByteArray(512)
+            var pendingLongName: String? = null
+            while (true) {
+                var read = 0
+                while (read < 512) { val n = gz.read(hdr, read, 512 - read); if (n < 0) return; read += n }
+                if (String(hdr, 0, 100).all { it == '\u0000' }) break // end-of-archive block
+                val name0 = String(hdr, 0, 100).trim('\\', '\u0000')
+                val sizeStr = String(hdr, 124, 12).trim('\\', '\u0000', ' ')
+                val size = sizeStr.toLongOrNull(8) ?: 0L
+                val type = hdr[156].toInt().toChar()
+                val prefix = String(hdr, 345, 155).trim('\\', '\u0000')
+                val name = pendingLongName ?: (if (prefix.isNotEmpty()) "$prefix/$name0" else name0)
+                pendingLongName = null
+                val target = File(dest, name).canonicalFile
+                if (!target.path.startsWith(dest.canonicalFile.path + File.separator) && target != dest.canonicalFile) {
+                    // path traversal guard (Alpine tars are clean, but be safe)
+                    skip(gz, size); continue
+                }
+                when {
+                    name0 == "././@LongLink" || name0 == "./@LongLink" /* GNU long name */ -> {
+                        val long = ByteArray(size.toInt()); var o = 0
+                        while (o < long.size) { val n = gz.read(long, o, long.size - o); if (n < 0) break; o += n }
+                        pendingLongName = String(long, 0, o).trim('\u0000', '\n')
+                        skip(gz, (512 - (size % 512)) % 512)
+                        continue // the NEXT header carries this long name
+                    }
+                    type == '5' || name.endsWith("/") -> target.mkdirs()
+                    type == '2' -> { /* symlink via android.system.Os (API 21+), best-effort */
+                        val link = String(hdr, 157, 100).trim('\u0000')
+                        target.parentFile?.mkdirs()
+                        runCatching { android.system.Os.symlink(link, target.path) }
+                        skip(gz, size)
+                    }
+                    type == '0' || type == '\u0000' || type == '1' -> {
+                        target.parentFile?.mkdirs()
+                        target.outputStream().use { os -> var left = size; val buf = ByteArray(64 * 1024)
+                            while (left > 0) { val n = gz.read(buf, 0, minOf(buf.size.toLong(), left).toInt()); if (n < 0) break; os.write(buf, 0, n); left -= n } }
+                        if (type == '1') { /* hardlink: copy content from earlier entry not tracked; rare in minirootfs */ }
+                        val mode = String(hdr, 100, 8).trim('\u0000', ' ').toIntOrNull(8) ?: 0
+                        target.setExecutable(mode and 0x40 != 0, false)
+                        skip(gz, (512 - (size % 512)) % 512)
+                    }
+                    else -> skip(gz, size)
+                }
+            }
+        }
+    }
+    private fun skip(gz: java.io.InputStream, n: Long) { var left = n; val b = ByteArray(8192)
+        while (left > 0) { val k = gz.read(b, 0, minOf(left, b.size.toLong()).toInt()); if (k < 0) break; left -= k } }
 
     /**
      * Copy the helper scripts from APK assets into the rootfs and make them

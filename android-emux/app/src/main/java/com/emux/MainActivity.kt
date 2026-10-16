@@ -188,39 +188,61 @@ class MainActivity : AppCompatActivity() {
         if (showUi) watchBootstrapProgress()
     }
 
+    /**
+     * v0.1.1 bug: watchBootstrapProgress only ever ran from onCreate when the env was
+     * NOT bootstrapped. If the background WorkManager attempt had already failed, or
+     * bootstrap finished while the app was closed, tapping "Install Linux" enqueued a
+     * worker but NOTHING observed it → "nothing happens". Now every tap runs the flow
+     * in-process with progress UI AND cancels the duplicate worker.
+     */
     private fun watchBootstrapProgress() {
         b.bootstrapBar.visibility = android.view.View.VISIBLE
         b.bootstrapBar.isIndeterminate = true
         b.btnInstall.visibility = android.view.View.GONE
+        b.bootstrapLabel.visibility = android.view.View.VISIBLE
+        b.bootstrapLabel.text = getString(R.string.bootstrap_starting)
+        // Cancel the queued worker so we don't download twice in parallel.
+        runCatching {
+            androidx.work.WorkManager.getInstance(this).cancelUniqueWork("emux-bootstrap-now")
+        }
         lifecycleScope.launch {
             val mgr = com.emux.core.BootstrapManager(this@MainActivity)
-            mgr.bootstrapFlow().collect { res ->
-                val e = res.exceptionOrNull()
-                when {
-                    e is com.emux.core.BootstrapProgress -> {
+            val res = try {
+                var last: Result<Unit> = Result.failure(Exception("no result"))
+                mgr.bootstrapFlow().collect { r ->
+                    val e = r.exceptionOrNull()
+                    if (e is com.emux.core.BootstrapProgress) {
                         b.bootstrapBar.isIndeterminate = e.pct < 0
                         if (e.pct >= 0) b.bootstrapBar.progress = e.pct
                         b.bootstrapLabel.text = e.step
                         b.bootstrapLabel.visibility = android.view.View.VISIBLE
                     }
-                    res.isSuccess -> {
-                        b.bootstrapBar.visibility = android.view.View.GONE
-                        b.bootstrapLabel.visibility = android.view.View.GONE
-                        b.btnInstall.visibility = android.view.View.GONE
-                        // Environment just became available → make sure a live shell
-                        // is attached so the user immediately sees a prompt instead of
-                        // a blank screen ("nothing happens").
-                        ensureSessionAttached()
+                    last = r
+                }
+                last
+            } catch (e: Throwable) { Result.failure(e) }
+            when {
+                res.isSuccess -> {
+                    b.bootstrapBar.visibility = android.view.View.GONE
+                    b.bootstrapLabel.visibility = android.view.View.GONE
+                    b.btnInstall.visibility = android.view.View.GONE
+                    // Environment just became available → make sure a live shell
+                    // is attached so the user immediately sees a prompt instead of
+                    // a blank screen ("nothing happens").
+                    ensureSessionAttached()
+                }
+                else -> {
+                    // Show the REAL reason (HTTP code, tar output, missing asset…)
+                    // instead of a generic "Bootstrap failed".
+                    val cause = res.exceptionOrNull()
+                    val msg = buildString {
+                        append(cause?.message ?: cause?.javaClass?.simpleName ?: "unknown error")
+                        cause?.cause?.let { append(" — ").append(it.message) }
                     }
-                    else -> {
-                        // Show the REAL reason (HTTP code, tar output, missing asset…)
-                        // instead of a generic "Bootstrap failed".
-                        val msg = e?.message ?: e?.javaClass?.simpleName ?: "unknown error"
-                        b.bootstrapLabel.text = getString(R.string.bootstrap_failed_reason, msg)
-                        b.bootstrapLabel.visibility = android.view.View.VISIBLE
-                        b.bootstrapBar.visibility = android.view.View.GONE
-                        b.btnInstall.visibility = android.view.View.VISIBLE
-                    }
+                    b.bootstrapLabel.text = getString(R.string.bootstrap_failed_reason, msg)
+                    b.bootstrapLabel.visibility = android.view.View.VISIBLE
+                    b.bootstrapBar.visibility = android.view.View.GONE
+                    b.btnInstall.visibility = android.view.View.VISIBLE
                 }
             }
         }

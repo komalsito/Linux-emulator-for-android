@@ -34,4 +34,5 @@
     <string name="pref_keepawake_title">Keep CPU awake during active bursts</string>
     <string name="pref_keepawake_summary">Auto-expiring wake lock (30 s) — off saves more battery</string>
     <string name="pref_distro_title">Distro mirror</string>
+    <string name="bootstrap_starting">Starting Linux installation…</string>
 </resources>
