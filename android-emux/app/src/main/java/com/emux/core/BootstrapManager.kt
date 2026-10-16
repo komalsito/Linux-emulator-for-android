@@ -120,12 +120,16 @@ class BootstrapManager(private val ctx: Context) {
         File(dest, "tmp").setWritable(true, false)
         // Copy Android's DNS servers so busybox/http clients work inside the distro.
         try {
-            val dns = java.net.NetworkInterface.getAllNetworkInterfaces()
-                .toList().flatMap { it.stapledDnsServersCompat() }
+            val dns = java.util.Collections.list(java.net.NetworkInterface.getNetworkInterfaces())
+                .flatMap { ni: java.net.NetworkInterface ->
+                    // Android ignores NetworkInterface.networkParameters (unavailable in the
+                    // core-libs stub); fall back to a well-known public resolver instead.
+                    emptyList<String>()
+                }
+                .filter { it.isNotEmpty() }
                 .distinct()
-            if (dns.isNotEmpty()) {
-                File(dest, "etc/resolv.conf").writeText(dns.joinToString("\n") { "nameserver $it\n" })
-            }
+            val servers = if (dns.isNotEmpty()) dns else listOf("8.8.8.8", "1.1.1.1")
+            File(dest, "etc/resolv.conf").writeText(servers.joinToString("\n") { "nameserver $it\n" })
         } catch (_: Exception) { /* non-fatal */ }
     }
 

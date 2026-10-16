@@ -49,7 +49,9 @@ class VtTerminalView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attr
     private var rows = 40
 
     /** Screen buffer: each cell = codepoint + style index into [stylePool]. */
-    private class Row(val chars: IntArray, val styles: ByteArray)
+    private class Row(val chars: IntArray, val styles: ByteArray) {
+        fun setStyle(x: Int, v: Int) { styles[x] = v.toByte() }
+    }
     private var screen: Array<Row>
     private var curX = 0
     private var curY = 0
@@ -96,7 +98,7 @@ class VtTerminalView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attr
     }
 
     private fun buildScreen(r: Int, c: Int): Array<Row> =
-        Array(r) { Row(IntArray(c) { ' ' }, ByteArray(c)) }
+        Array(r) { Row(IntArray(c) { 0x20 }, ByteArray(c)) }
 
     private fun booleanArrayOfNull(n: Int) = BooleanArray(n) { true }
 
@@ -145,14 +147,18 @@ class VtTerminalView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attr
     // ANSI state machine
     private enum class PState { GROUND, ESC, CSI, OSC_STRING }
     private var pstate = PState.GROUND
-    private val params = ArrayList<Int>(16)
+    private val paramsArr = IntArray(16)
+    private var paramsSize = 0
+    private val params: List<Int> get() = paramsArr.toList().subList(0, paramsSize)
+    private fun addParam(v: Int) { if (paramsSize < paramsArr.size) paramsArr[paramsSize++] = v }
+    private fun clearParams() { paramsSize = 0 }
     private var paramCur = -1
     private var oscBuf = StringBuilder()
 
     private fun parseByte(b: Int) {
         when (pstate) {
             PState.GROUND -> when {
-                b == 0x1B -> { pstate = PState.ESC; paramCur = -1; params.clear() }
+                b == 0x1B -> { pstate = PState.ESC; paramCur = -1; clearParams() }
                 b == '\n'.code -> { newlineScroll() }
                 b == '\r'.code -> { curX = 0; wrapNext = false }
                 b == '\t'.code -> { curX = ((curX / 8) + 1).coerceAtMost(cols - 1) * 8 }
@@ -181,10 +187,10 @@ class VtTerminalView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attr
     private fun handleCsi(b: Int) {
         when {
             b in '0'.code..'9'.code -> paramCur = (if (paramCur < 0) 0 else paramCur * 10) + (b - '0'.code)
-            b == ';'.code -> { params.add(if (paramCur < 0) 0 else paramCur); paramCur = -1 }
+            b == ';'.code -> { addParam(if (paramCur < 0) 0 else paramCur); paramCur = -1 }
             b == '?'.code -> { /* private mode marker, ignore */ }
             b in 0x40..0x7F -> { // final byte
-                if (paramCur >= 0) { params.add(paramCur); paramCur = -1 }
+                if (paramCur >= 0) { addParam(paramCur); paramCur = -1 }
                 dispatchCsi(b.toChar())
                 pstate = PState.GROUND
             }
@@ -249,7 +255,7 @@ class VtTerminalView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attr
     private fun scrollUp(n: Int) {
         repeat(n) {
             for (y in 0 until rows - 1) { screen[y] = screen[y + 1] }
-            screen[rows - 1] = Row(IntArray(cols) { ' ' }, ByteArray(cols))
+            screen[rows - 1] = Row(IntArray(cols) { 0x20 }, ByteArray(cols))
         }
         markAllDirty()
     }
@@ -257,12 +263,12 @@ class VtTerminalView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attr
     private fun scrollDown(n: Int) {
         repeat(n) {
             for (y in rows - 1 downTo 1) { screen[y] = screen[y - 1] }
-            screen[0] = Row(IntArray(cols) { ' ' }, ByteArray(cols))
+            screen[0] = Row(IntArray(cols) { 0x20 }, ByteArray(cols))
         }
         markAllDirty()
     }
 
-    private fun blankRow(y: Int) { screen[y] = Row(IntArray(cols) { ' ' }, ByteArray(cols)); markRowDirty(y) }
+    private fun blankRow(y: Int) { screen[y] = Row(IntArray(cols) { 0x20 }, ByteArray(cols)); markRowDirty(y) }
 
     private fun eraseDisplay(mode: Int) {
         when (mode) {
@@ -282,14 +288,14 @@ class VtTerminalView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attr
 
     private fun clearRange(y0: Int, x0: Int, y1: Int, x1: Int) {
         val row = screen[y0]
-        for (x in x0 until minOf(x1, cols)) { row.chars[x] = ' '; row.styles[x] = 0 }
+        for (x in x0 until minOf(x1, cols)) { row.chars[x] = 0x20; row.setStyle(x, 0) }
         markRowDirty(y0)
     }
 
     private fun insertLines(n: Int) {
         repeat(n) {
             for (y in rows - 1 downTo curY + 1) screen[y] = screen[y - 1]
-            screen[curY] = Row(IntArray(cols) { ' ' }, ByteArray(cols))
+            screen[curY] = Row(IntArray(cols) { 0x20 }, ByteArray(cols))
         }
         markAllDirty()
     }
@@ -297,7 +303,7 @@ class VtTerminalView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attr
     private fun deleteLines(n: Int) {
         repeat(n) {
             for (y in curY until rows - 1) screen[y] = screen[y + 1]
-            screen[rows - 1] = Row(IntArray(cols) { ' ' }, ByteArray(cols))
+            screen[rows - 1] = Row(IntArray(cols) { 0x20 }, ByteArray(cols))
         }
         markAllDirty()
     }
@@ -306,8 +312,8 @@ class VtTerminalView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attr
         val row = screen[curY]
         for (x in curX until cols) {
             val src = x + n
-            row.chars[x] = if (src < cols) row.chars[src] else ' '
-            row.styles[x] = if (src < cols) row.styles[src] else 0
+            row.chars[x] = if (src < cols) row.chars[src] else 0x20
+            row.setStyle(x, if (src < cols) row.styles[src].toInt() else 0)
         }
         markRowDirty(curY)
     }
@@ -316,15 +322,15 @@ class VtTerminalView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attr
         val row = screen[curY]
         for (x in cols - 1 downTo curX) {
             val src = x - n
-            row.chars[x] = if (src >= curX && src >= 0) row.chars[src] else ' '
-            row.styles[x] = if (src >= curX && src >= 0) row.styles[src] else 0
+            row.chars[x] = if (src >= curX && src >= 0) row.chars[src] else 0x20
+            row.setStyle(x, if (src >= curX && src >= 0) row.styles[src].toInt() else 0)
         }
         markRowDirty(curY)
     }
 
     private fun eraseChars(n: Int) {
         val row = screen[curY]
-        for (x in curX until minOf(curX + n, cols)) { row.chars[x] = ' '; row.styles[x] = 0 }
+        for (x in curX until minOf(curX + n, cols)) { row.chars[x] = 0x20; row.setStyle(x, 0) }
         markRowDirty(curY)
     }
 
@@ -334,7 +340,7 @@ class VtTerminalView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attr
 
     private fun setMode(on: Boolean) {
         if (params.isEmpty()) return
-        val mode = params[0]
+        val mode = paramsArr[0]
         when (mode) {
             25 -> { cursorVisible = on; scheduleBlink() }
             1 -> applicationCursorKeys = on
@@ -350,7 +356,8 @@ class VtTerminalView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attr
         var i = 0
         val s = Style(pen.fg, pen.bg, pen.bold, pen.inverse, pen.underline)
         while (i < params.size) {
-            when (val v = params[i]) {
+            val v: Int = paramsArr[i]
+            when (v) {
                 0 -> { s.fg = DEFAULT_FG; s.bg = Color.TRANSPARENT; s.bold = false; s.inverse = false; s.underline = false }
                 1 -> s.bold = true
                 4 -> s.underline = true
@@ -358,13 +365,13 @@ class VtTerminalView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attr
                 22 -> { s.bold = false }
                 24 -> s.underline = false
                 27 -> s.inverse = false
-                30..37 -> s.fg = ansiColor(v - 30, bold = s.bold)
+                in 30..37 -> s.fg = ansiColor(v - 30, bold = s.bold)
                 38 -> { i = parseExtColor(i, s, fg = true) }
                 39 -> s.fg = DEFAULT_FG
-                40..47 -> s.bg = ansiColor(v - 40, bold = false)
+                in 40..47 -> s.bg = ansiColor(v - 40, bold = false)
                 48 -> { i = parseExtColor(i, s, fg = false) }
                 49 -> s.bg = Color.TRANSPARENT
-                90..97 -> s.fg = ansiColor(v - 90 + 8, bold = true)
+                in 90..97 -> s.fg = ansiColor(v - 90 + 8, bold = true)
             }
             i++
         }
@@ -416,8 +423,7 @@ class VtTerminalView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attr
             val top = y * cellH
             var x = 0
             while (x < cols) {
-                val st = stylePool.getOrNull(row.styles[y2i(x, row)]?.toInt()?.and(0xFF)?.let { it } ?: 0)
-                    ?: defStyle
+                val st = stylePool.getOrElse(row.styles[x].toInt() and 0xFF) { defStyle }
                 // background run
                 var runEnd = x
                 while (runEnd < cols && row.styles[runEnd] == row.styles[x]) runEnd++
@@ -429,10 +435,12 @@ class VtTerminalView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attr
                 // foreground run (draw as one substring per style run)
                 if (runEnd - x > 0) {
                     val sb = StringBuilder(runEnd - x)
-                    for (cx in x until runEnd) sb.appendCodepoint(row.chars[cx])
+                    for (cx in x until runEnd) sb.appendCodePoint(row.chars[cx])
                     textPaint.color = if (st.inverse) BG_COLOR else st.fg
                     textPaint.isFakeBoldText = st.bold
-                    textPaint.underline = st.underline
+                    val flags = textPaint.flags
+                    textPaint.flags = if (st.underline) flags or Paint.UNDERLINE_TEXT_FLAG
+                                      else flags and Paint.UNDERLINE_TEXT_FLAG.inv()
                     canvas.drawText(sb.toString(), x * cellW, top + baseline, textPaint)
                 }
                 x = runEnd
@@ -448,7 +456,6 @@ class VtTerminalView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attr
         }
     }
 
-    private fun y2i(x: Int, row: Row) = x // styles indexed by column; helper kept for clarity
 
     // ---- blink, scheduled only while attached+visible ----
     private var blinkOn = true

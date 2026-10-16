@@ -84,7 +84,8 @@ class DesktopView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attrs) 
     private var longPressFired = false
 
     private val scaleDetector = ScaleGestureDetector(ctx, object : ScaleGestureDetector.SimpleOnScaleGestureListener() {
-        override fun onScale(d: ScaleGestureDetector?): Boolean {
+        override fun onScale(detector: ScaleGestureDetector): Boolean {
+            val d = detector
             d ?: return false
             scale = (scale * d.scaleFactor).coerceIn(1f, 6f)
             invalidate(); return true

@@ -1,6 +1,7 @@
 package com.emux
 
 import android.Manifest
+import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
@@ -49,7 +50,7 @@ class MainActivity : AppCompatActivity() {
         wireExtraKeys()
         requestNotificationIfNeeded()
         observeSessions()
-        observeBootstrap()
+        if (!com.emux.core.FsLayout.isBootstrapped(this)) startBootstrapNow(showUi = true)
         maybeAskBatteryExemption()
 
         b.btnInstall.setOnClickListener { startBootstrapNow(showUi = true) }
@@ -114,8 +115,6 @@ class MainActivity : AppCompatActivity() {
         val view = termView ?: VtTerminalView(this).also {
             b.termContainer.addView(it, android.widget.FrameLayout.LayoutParams(-1, -1))
             termView = it
-        }.apply {
-            currentSessionSink = { bytes -> session?.write(bytes) }
         }
         lifecycleScope.launch {
             repeatOnLifecycle(Lifecycle.State.STARTED) {

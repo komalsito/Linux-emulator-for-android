@@ -73,7 +73,7 @@ class ExtraKeysView(ctx: Context, attrs: AttributeSet? = null) : HorizontalScrol
                     else -> k.bytes
                 }
                 listener?.onKey(k)
-                if (out.isNotEmpty()) currentSessionSink?.accept(out)
+                if (out.isNotEmpty()) currentSessionSink?.invoke(out)
                 if (ctrlDown || altDown) { ctrlDown = false; altDown = false; refreshLatches() }
             }
         }

@@ -68,7 +68,7 @@ class TerminalService : LifecycleService() {
                 }
             }
         }
-        return START_STICKY_NOT_ALARM // like Termux: survive task-swipe but don't force-restart forever
+        return android.app.Service.START_STICKY // like Termux: survive task-swipe, restart only if killed
     }
 
     private fun newSession(command: String) {

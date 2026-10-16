@@ -34,7 +34,7 @@ class TerminalSession(
     val id: Int,
     private val ctx: Context,
     private val root: RootManager,
-    initialCommand: String = "bash -l",
+    val initialCommand: String = "bash -l",
 ) {
     companion object {
         const val IDLE_WAKE_MS = 30_000L
