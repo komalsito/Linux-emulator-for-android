@@ -133,11 +133,28 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    /** Forward PTY output to the VT parser on the main thread (cheap parse+draw). */
     private fun pumpOutput(view: VtTerminalView, s: com.emux.terminal.TerminalSession) {
+        // NOTE: previously this collected `scrollback` — a Channel that *closes* when
+        // the session dies. On a dead/closed channel `for (chunk in ch)` just falls
+        // through immediately, so nothing was ever fed to the terminal and the screen
+        // stayed blank ("nothing happens"). Now we keep pumping until the session
+        // transitions to DEAD, and print an explicit notice on death/exit.
         lifecycleScope.launch {
             repeatOnLifecycle(Lifecycle.State.STARTED) {
-                for (chunk in s.scrollback) view.feed(chunk)
+                launch {
+                    for (chunk in s.scrollback) view.feed(chunk)
+                }
+                launch {
+                    if (s.state.value == com.emux.terminal.TerminalSession.State.DEAD) {
+                        view.feed("[emux] session #${s.id} already exited — tap Install to re-bootstrap.\n".toByteArray())
+                    } else {
+                        s.state.collect { st ->
+                            if (st == com.emux.terminal.TerminalSession.State.DEAD) {
+                                view.feed("\n[emux] process exited — press ENTER for a new shell.\n".toByteArray())
+                            }
+                        }
+                    }
+                }
             }
         }
     }
@@ -190,9 +207,16 @@ class MainActivity : AppCompatActivity() {
                         b.bootstrapBar.visibility = android.view.View.GONE
                         b.bootstrapLabel.visibility = android.view.View.GONE
                         b.btnInstall.visibility = android.view.View.GONE
+                        // Environment just became available → make sure a live shell
+                        // is attached so the user immediately sees a prompt instead of
+                        // a blank screen ("nothing happens").
+                        ensureSessionAttached()
                     }
                     else -> {
-                        b.bootstrapLabel.text = getString(R.string.bootstrap_failed)
+                        // Show the REAL reason (HTTP code, tar output, missing asset…)
+                        // instead of a generic "Bootstrap failed".
+                        val msg = e?.message ?: e?.javaClass?.simpleName ?: "unknown error"
+                        b.bootstrapLabel.text = getString(R.string.bootstrap_failed_reason, msg)
                         b.bootstrapLabel.visibility = android.view.View.VISIBLE
                         b.bootstrapBar.visibility = android.view.View.GONE
                         b.btnInstall.visibility = android.view.View.VISIBLE

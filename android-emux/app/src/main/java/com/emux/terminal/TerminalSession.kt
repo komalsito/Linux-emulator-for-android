@@ -98,14 +98,22 @@ class TerminalSession(
 
     private fun buildCommandLine(cmd: String): String {
         val rootfs = FsLayout.linuxRoot(ctx).absolutePath
+        // Alpine minirootfs ships ash only (no bash) — use /bin/sh so the session
+        // doesn't die instantly with "bash: not found" on a fresh bootstrap.
+        val shellCmd = cmd.replace("bash -l", "/bin/sh -l")
         return if (root.mode != RootMode.NONE && userWantsChroot()) {
             // True chroot under root: fastest possible (zero syscall translation).
-            "su -c 'chroot $rootfs /bin/su -s /bin/sh -c \"cd && exec $cmd\"'"
+            "su -c 'chroot $rootfs /bin/su -s /bin/sh -c \\\"cd && exec $shellCmd\\\"'"
         } else {
             // Unprivileged fallback: run distro binaries directly with patched
             // interpreter paths (musl loader supports --load-interp-name style
             // via LD_LIBRARY_PATH + explicit ld-musl invocation done in init.sh).
-            "$rootfs/emux-init.sh $cmd"
+            // The init script is installed by BootstrapManager at rootfs/emux-init.sh;
+            // if it's missing (e.g. app updated over an old partial bootstrap), fall
+            // back to plain Android sh so the terminal still works.
+            val init = File(rootfs, "emux-init.sh")
+            if (init.canExecute()) "$rootfs/emux-init.sh $shellCmd"
+            else "/system/bin/sh -l"
         }
     }
 

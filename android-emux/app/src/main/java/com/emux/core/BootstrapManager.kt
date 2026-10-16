@@ -29,8 +29,21 @@ class BootstrapManager(private val ctx: Context) {
 
     companion object {
         const val DEFAULT_DISTRO = "alpine-minirootfs"
-        const val ALPINE_VERSION = "3.20"
-        const val MIRROR = "https://dlcdn.alpinelinux.org/alpine/v"
+        // NOTE: Alpine publishes point releases as .0 only (3.20.0, 3.20.3 …);
+        // a bare "3.20" produces a 404 URL — that was the bootstrap failure.
+        const val ALPINE_VERSION = "3.20.3"
+
+        /** Mirrors tried in order — dlcdn occasionally has DNS/CDN hiccups. */
+        val MIRRORS = listOf(
+            "https://dlcdn.alpinelinux.org/alpine/v",
+            "https://mirror.leaseweb.com/alpine/v",
+            "https://ftp.halifax.rwth-aachen.de/alpine/v",
+        )
+        const val MIRROR = MIRRORS[0]
+
+        /** "3.20.3" → "3.20" for the mirror's versioned directory layout. */
+        fun majorVersion(v: String = ALPINE_VERSION): String =
+            v.split('.').take(2).joinToString(".")
 
         fun archName(): String = when (android.os.Build.SUPPORTED_ABIS.firstOrNull()) {
             "arm64-v8a", "armeabi-v7a" -> if (android.os.Build.SUPPORTED_ABIS.contains("arm64-v8a")) "aarch64" else "armv7"
@@ -39,7 +52,7 @@ class BootstrapManager(private val ctx: Context) {
         }
 
         fun rootfsUrl(distro: String = DEFAULT_DISTRO, version: String = ALPINE_VERSION): String =
-            "$MIRROR/$version/releases/${archName()}/${distro}-$version-${archName()}.tar.gz"
+            "$MIRROR/${majorVersion(version)}/releases/${archName()}/${distro}-$version-${archName()}.tar.gz"
     }
 
     /** Streams download+extract progress as a Flow so UI can render a single bar. */
@@ -48,11 +61,43 @@ class BootstrapManager(private val ctx: Context) {
             send(Result.failure(BootstrapProgress("Resolving mirror", -1)))
             val dest = FsLayout.linuxRoot(ctx)
             if (dest.exists()) dest.deleteRecursively()
-            dest.mkdirs()
+            check(dest.mkdirs() || dest.isDirectory) { "Cannot create ${dest.absolutePath}" }
 
-            val url = URL(rootfsUrl())
+            // Build candidate URLs: user's custom mirror (Settings → "mirror") first,
+            // then the built-in fallback list. Correct layout is
+            // <base>/<major>/releases/<arch>/<distro>-<full-version>-<arch>.tar.gz
+            // (a bare "3.20" 404s — Alpine publishes point releases like 3.20.3).
+            val ver = ALPINE_VERSION
+            val pathSuffix = "${majorVersion(ver)}/releases/${archName()}/$DEFAULT_DISTRO-$ver-${archName()}.tar.gz"
+            val custom = androidx.preference.PreferenceManager
+                .getDefaultSharedPreferences(ctx)
+                .getString("mirror", null)?.trim()?.takeIf { it.isNotBlank() }
+            val bases = listOfNotNull(custom) + MIRRORS
             val tmp = File(FsLayout.tmp(ctx), "rootfs.tar.gz")
-            downloadTo(url, tmp) { pct -> trySend(Result.failure(BootstrapProgress("Downloading rootfs", pct))) }
+
+            var lastErr: Throwable? = null
+            var downloaded = false
+            for (base in bases) {
+                val clean = base.trimEnd('/')
+                val url = URL("${clean.removeSuffix("/v")}/$pathSuffix")
+                trySend(Result.failure(BootstrapProgress("Downloading rootfs (${url.host})", -1)))
+                try {
+                    downloadTo(url, tmp) { pct -> trySend(Result.failure(BootstrapProgress("Downloading rootfs", pct))) }
+                    downloaded = true
+                    break
+                } catch (e: Throwable) {
+                    lastErr = e
+                    tmp.delete()
+                }
+            }
+            if (!downloaded) throw RuntimeException("All mirrors failed; last error: ${lastErr?.message}")
+
+            // Sanity-check what we downloaded: an HTML error page would otherwise
+            // surface as a confusing "tar failed" message.
+            val head = ByteArray(2).also { tmp.inputStream().use { it.read(it) } }
+            if (head[0] != 0x1f.toByte() || head[1] != 0x8.toByte()) {
+                throw RuntimeException("Mirror returned non-gzip data (${tmp.length()} bytes) — check network/mirror URL")
+            }
 
             trySend(Result.failure(BootstrapProgress("Extracting rootfs", -1)))
             extractTarGz(tmp, dest)
@@ -61,6 +106,7 @@ class BootstrapManager(private val ctx: Context) {
             trySend(Result.failure(BootstrapProgress("Linking /data/data paths", -1)))
             linkAndroidRuntime(dest)
             postInstall(dest)
+            installHelperScripts(dest)
 
             FsLayout.markBootstrapped(ctx)
             trySend(Result.success(Unit))
@@ -81,6 +127,15 @@ class BootstrapManager(private val ctx: Context) {
         conn.connectTimeout = 15_000
         conn.readTimeout = 30_000
         conn.instanceFollowRedirects = true
+        // Android's HttpURLConnection silently switches to GET on 3xx redirects; if
+        // the server replies with a body *and* we had POSTed nothing this is fine,
+        // but some captive-portal/mirror setups return 200+HTML. Surface real HTTP
+        // errors instead of writing an error page to disk.
+        val code = conn.responseCode
+        if (code !in 200..299) {
+            conn.disconnect()
+            throw RuntimeException("Mirror returned HTTP $code for $url")
+        }
         val total = conn.contentLength
         conn.inputStream.use { input ->
             out.outputStream().use { os ->
@@ -93,19 +148,56 @@ class BootstrapManager(private val ctx: Context) {
                     done += n
                     if (total > 0) onPct(((done * 100) / total).toInt())
                 }
+                os.flush()
             }
         }
         conn.disconnect()
+        if (out.length() == 0L) throw RuntimeException("Downloaded 0 bytes from $url")
     }
 
     /** Use system tar (toybox) — avoids pulling a JVM gzip buffer into memory. */
     private fun extractTarGz(tgz: File, dest: File) {
-        val p = ProcessBuilder("tar", "-xzf", tgz.absolutePath, "-C", dest.absolutePath)
-            .redirectErrorStream(true).start()
-        // drain so the child never blocks on a full pipe
-        BufferedReader(InputStreamReader(p.inputStream)).forEachLine { /* log */ }
+        // Probe for tar; some OEM ROMs ship toybox tar restricted for apps → give a
+        // clear error instead of an opaque exit-code message.
+        val p = runCatching {
+            ProcessBuilder("tar", "-xzf", tgz.absolutePath, "-C", dest.absolutePath)
+                .redirectErrorStream(true).start()
+        }.getOrElse {
+            throw RuntimeException("Device has no /system/bin/tar — cannot extract rootfs")
+        }
+        val out = StringBuilder()
+        BufferedReader(InputStreamReader(p.inputStream)).forEachLine { out.append(it).append('\n') }
         val code = p.waitFor()
-        if (code != 0) throw RuntimeException("tar failed ($code); device may lack toybox tar")
+        if (code != 0) throw RuntimeException("tar failed ($code): ${out.take(300)}")
+    }
+
+    /**
+     * Copy the helper scripts from APK assets into the rootfs and make them
+     * executable. Without this, TerminalSession's launch command
+     * (`$rootfs/emux-init.sh …`) points at a non-existent file and every shell
+     * dies instantly — which looked like "bootstrap succeeded but nothing happens".
+     */
+    private fun installHelperScripts(dest: File) {
+        listOf("emux-init.sh", "emux-x11", "emux-capture").forEach { name ->
+            try {
+                ctx.assets.open("bin/$name").use { input ->
+                    val out = File(dest, name)
+                    out.outputStream().use { input.copyTo(it) }
+                    out.setExecutable(true, false)
+                    out.setReadable(true, false)
+                }
+            } catch (e: Exception) {
+                throw RuntimeException("Missing asset bin/$name in APK", e)
+            }
+        }
+        // Also stage them under $HOME so they're on PATH-ish locations for users.
+        try {
+            val home = FsLayout.home(ctx)
+            listOf("emux-x11", "emux-capture").forEach { name ->
+                val src = File(dest, name)
+                if (src.exists()) src.copyTo(File(home, name), overwrite = true)
+            }
+        } catch (_: Exception) { /* convenience only, non-fatal */ }
     }
 
     /**

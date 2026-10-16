@@ -9,6 +9,7 @@
     <string name="bootstrap_prompt">Install the Linux environment (Alpine minirootfs, ~3 MB)? Runs once; scheduled when charging or idle.</string>
     <string name="bootstrap_install">Install now</string>
     <string name="bootstrap_failed">Bootstrap failed — tap Install now to retry.</string>
+    <string name="bootstrap_failed_reason">Bootstrap failed: %1$s\nTap Install to retry.</string>
 
     <string name="root_none">root: not available</string>
     <string name="root_available">root: %1$s (accelerator on)</string>
