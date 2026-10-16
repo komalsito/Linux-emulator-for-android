@@ -13,6 +13,14 @@
         <item name="android:navigationBarColor">@color/emux_bg</item>
     </style>
 
+    <!-- Settings host theme: Material3 pref screen style + explicit preferenceTheme
+         so PreferenceFragmentCompat can never crash on attribute resolution. -->
+    <style name="EmuX.Prefs" parent="Theme.Material3.Dark.NoActionBar">
+        <item name="colorPrimary">@color/emux_accent</item>
+        <item name="android:windowBackground">@color/emux_bg</item>
+        <item name="preferenceTheme">@style/PreferenceThemeOverlay</item>
+    </style>
+
     <style name="EmuX.Translucent">
         <item name="android:windowIsTranslucent">true</item>
         <item name="android:windowBackground">@android:color/transparent</item>

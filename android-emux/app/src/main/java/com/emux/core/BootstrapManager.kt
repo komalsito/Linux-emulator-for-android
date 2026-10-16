@@ -8,6 +8,7 @@ import kotlinx.coroutines.flow.callbackFlow
 import kotlinx.coroutines.withContext
 import java.io.BufferedReader
 import java.io.File
+import java.io.FileInputStream
 import java.io.InputStreamReader
 import java.net.HttpURLConnection
 import java.net.URL
@@ -39,7 +40,10 @@ class BootstrapManager(private val ctx: Context) {
             "https://mirror.leaseweb.com/alpine/v",
             "https://ftp.halifax.rwth-aachen.de/alpine/v",
         )
-        const val MIRROR = MIRRORS[0]
+        // Kept for compatibility with older call sites; the actual bootstrap loop
+        // iterates over MIRRORS with fallback. Must be a compile-time constant,
+        // so it cannot reference MIRRORS[0].
+        const val MIRROR = "https://dlcdn.alpinelinux.org/alpine/v"
 
         /** "3.20.3" → "3.20" for the mirror's versioned directory layout. */
         fun majorVersion(v: String = ALPINE_VERSION): String =
@@ -94,7 +98,8 @@ class BootstrapManager(private val ctx: Context) {
 
             // Sanity-check what we downloaded: an HTML error page would otherwise
             // surface as a confusing "tar failed" message.
-            val head = ByteArray(2).also { tmp.inputStream().use { it.read(it) } }
+            val head = ByteArray(2)
+            FileInputStream(tmp).use { it.read(head) }
             if (head[0] != 0x1f.toByte() || head[1] != 0x8.toByte()) {
                 throw RuntimeException("Mirror returned non-gzip data (${tmp.length()} bytes) — check network/mirror URL")
             }
