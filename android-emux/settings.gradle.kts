@@ -12,7 +12,6 @@ dependencyResolutionManagement {
         google()
         mavenCentral()
         // Termux native terminal emulator library (libtermux) + termux-api
-        maven("https://packagecloud.io/termux/package/maven")
         maven("https://www.jitpack.io")
     }
 }

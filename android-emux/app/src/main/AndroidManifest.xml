@@ -37,7 +37,7 @@
         android:supportsRtl="true"
         android:largeHeap="false"
         android:hardwareAccelerated="true"
-        android:theme="@style/Theme.EmuX"
+        android:theme="@style/EmuX"
         tools:targetApi="34">
 
         <activity
@@ -78,7 +78,7 @@
             android:exported="true"
             android:launchMode="singleTop"
             android:excludeFromRecents="true"
-            android:theme="@style/Theme.EmuX.Translucent">
+            android:theme="@style/EmuX.Translucent">
             <intent-filter>
                 <action android:name="android.hardware.usb.action.USB_DEVICE_ATTACHED" />
             </intent-filter>

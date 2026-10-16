@@ -64,9 +64,10 @@ dependencies {
     implementation("com.google.android.material:material:1.12.0")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")
 
-    // ---- Terminal engine: literally Termux's own libraries (power parity by design) ----
-    implementation("com.termux:terminal-emulator:0.28.2")   // VT/ANSI emulator core (Java)
-    implementation("com.termux:view:0.48.1")                // TermuxExtraView surface renderer
+    // ---- Terminal engine: EmuX in-house VT100/ANSI parser + damage-only renderer
+    // (see com.emux.terminal.VtTerminalView). Same PTY strategy as Termux
+    // (Android's app_process + Linux pseudo-terminal driver) — zero native code,
+    // zero extra deps, Termux-grade power efficiency.
 
     // Optional: root helper binary (see docs/ROOT.md). Ships nothing privileged itself.
     // implementation(files("libs/magisk-su-bridge.aar"))
