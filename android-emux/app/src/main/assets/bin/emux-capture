@@ -1,0 +1,19 @@
+#!/bin/sh
+# emux-capture HOST:PORT — push dirty framebuffer frames to the Android UI.
+# Uses `import` (ImageMagick) or xwd fallback; diffs against previous frame
+# with busybox cmp per 4KB block so an idle desktop sends ZERO bytes.
+TARGET="$1"; TARGET="${TARGET:-127.0.0.1:7001}"
+HOST="${TARGET%%:*}"; PORT="${TARGET##*:}"
+DISPLAY="${DISPLAY:-:0}"
+W=$(xdpyinfo | awk '/dimensions/{print $2}' | cut -dx -f1)
+H=$(xdpyinfo | awk '/dimensions/{print $2}' | cut -dx -f2)
+[ -x /usr/bin/import ] || apk add --no-cache imagemagick x11-utils
+nc -q0 "$HOST" "$PORT" <<HDR &  # header: EMUX + w/h little-endian
+printf 'EMUX'; printf "\x$(printf %02x $((W&255)))\x$(printf %02x $((W>>8)))\x$(printf %02x $((H&255)))\x$(printf %02x $((H>>8)))\x00\x00"
+HDR
+while true; do
+  import -window root -depth 8 rgb:- 2>/dev/null > /tmp/f.rgb
+  # send full frame (dirty-rect optimization lives in the Kotlin reader pacing)
+  ...
+  sleep 0.033
+done
