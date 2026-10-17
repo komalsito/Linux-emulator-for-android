@@ -68,21 +68,50 @@ class BootstrapManager(private val ctx: Context) {
 
     /** Streams download+extract progress as a Flow so UI can render a single bar. */
     fun bootstrapFlow(): Flow<Result<Unit>> = callbackFlow {
-        // Run the whole download+extract on an IO thread. v0.1.1 ran it on the UI
-        // dispatcher (callbackFlow's default), so every tap of "Install" froze and
-        // then force-closed the app — Android kills ANR'd apps instantly, which is
-        // exactly the "Settings/boottap crashes" symptom reported for this build.
+        // v0.1.9 CRASH FIX (the real Install-button one): runBootstrapInternal's
+        // outer try/catch already converts every failure into Result.failure —
+        // the ONLY things that could still escape were (a) NPE from a null
+        // cacheDir inside FsLayout.tmp() [fixed there], and (b) the detached
+        // ioScope having no parent Job, so an escaped Throwable went to the
+        // thread's UncaughtExceptionHandler and killed the whole process when
+        // Install was tapped. Now the launch is guarded twice: explicit
+        // supervisorContext for cancellation semantics + runCatching belt.
         val ioScope = kotlinx.coroutines.CoroutineScope(
-            Dispatchers.IO + (coroutineContext[kotlinx.coroutines.Job] ?: kotlinx.coroutines.SupervisorJob()))
-        ioScope.launch { runBootstrapInternal { res -> trySend(res) } }
-        awaitClose { }
+            kotlinx.coroutines.SupervisorJob() + Dispatchers.IO)
+        ioScope.launch {
+            runCatching { runBootstrapInternal { res -> trySend(res) } }
+                .onFailure { e ->
+                    com.emux.EmuXLog.e("bootstrap internal escape (guarded)", e)
+                    BootstrapReporter.publishError(
+                        ctx, "${e.javaClass.simpleName}: ${e.message ?: "no message"}")
+                    trySend(Result.failure(e))
+                }
+        }
+        awaitClose { ioScope.coroutineContext[kotlinx.coroutines.Job]?.cancel() }
     }
 
     private suspend fun runBootstrapInternal(emit: (Result<Unit>) -> Unit) {
+        // v0.1.8: the caller (BootstrapWorker) already runs us on Dispatchers.IO;
+        // progress is additionally mirrored to WorkManager via BootstrapReporter.
+        val ctx = this.ctx
+        fun report(step: String, pct: Int) {
+            BootstrapReporter.publish(ctx, step, pct)
+            emit(Result.failure(BootstrapProgress(step, pct)))
+        }
         try {
-            emit(Result.failure(BootstrapProgress("Resolving mirror", -1)))
+            // v0.1.9 CRASH FIX (the real Install-button one, found by tracing the
+            // shipped dex): `ctx.cacheDir` is @Nullable — on direct-boot-locked
+            // devices and some OEM ROMs it returns null. FsLayout.tmp() then threw
+            // KotlinNPE inside BootstrapWorker's withContext(IO); being a *child*
+            // scope, that exception escaped CoroutineWorker's own try/catch and hit
+            // the thread's UncaughtExceptionHandler → whole app killed the moment
+            // Install was tapped. Every path touching cache files now uses a
+            // non-null fallback.
             val dest = FsLayout.linuxRoot(ctx)
-            if (dest.exists()) dest.deleteRecursively()
+            val tmpFile = File(FsLayout.safeTmp(ctx), "rootfs.tar.gz")
+            report("Resolving mirror", -1)
+            if (dest.exists()) runCatching { dest.deleteRecursively() }
+            
             check(dest.mkdirs() || dest.isDirectory) { "Cannot create ${dest.absolutePath}" }
 
             // Build candidate URLs: user's custom mirror (Settings → "mirror") first,
@@ -91,11 +120,16 @@ class BootstrapManager(private val ctx: Context) {
             // (a bare "3.20" 404s — Alpine publishes point releases like 3.20.3).
             val ver = ALPINE_VERSION
             val pathSuffix = "${majorVersion(ver)}/releases/${archName()}/$DEFAULT_DISTRO-$ver-${archName()}.tar.gz"
-            val custom = androidx.preference.PreferenceManager
-                .getDefaultSharedPreferences(ctx)
-                .getString("mirror", null)?.trim()?.takeIf { it.isNotBlank() }
+            // v0.1.9: prefs read is also guarded — a corrupted shared_prefs XML
+            // throws on getSharedPreferences and previously escaped here in the
+            // worker's child scope (uncaught → process death).
+            val custom = runCatching {
+                androidx.preference.PreferenceManager
+                    .getDefaultSharedPreferences(ctx)
+                    .getString("mirror", null)?.trim()?.takeIf { it.isNotBlank() }
+            }.getOrNull()
             val bases = listOfNotNull(custom) + MIRRORS
-            val tmp = File(FsLayout.tmp(ctx), "rootfs.tar.gz")
+            val tmp = tmpFile
 
             var lastErr: Throwable? = null
             var downloaded = false
@@ -110,9 +144,9 @@ class BootstrapManager(private val ctx: Context) {
                     Regex("/v[0-9]").containsMatchIn(clean) -> URL("$clean/$DEFAULT_DISTRO-$ver-${archName()}.tar.gz")
                     else -> URL("$clean/${majorVersion(ver)}/releases/${archName()}/$DEFAULT_DISTRO-$ver-${archName()}.tar.gz")
                 }
-                emit(Result.failure(BootstrapProgress("Downloading rootfs (${url.host})", -1)))
+                report("Downloading rootfs (${url.host})", -1)
                 try {
-                    downloadTo(url, tmp) { pct -> emit(Result.failure(BootstrapProgress("Downloading rootfs", pct))) }
+                    downloadTo(url, tmp) { pct -> report("Downloading rootfs", pct) }
                     downloaded = true
                     break
                 } catch (e: Throwable) {
@@ -135,11 +169,11 @@ class BootstrapManager(private val ctx: Context) {
                 throw RuntimeException("Mirror returned non-gzip data (${tmp.length()} bytes) — check network/mirror URL")
             }
 
-            emit(Result.failure(BootstrapProgress("Extracting rootfs", -1)))
+            report("Extracting rootfs", -1)
             extractTarGz(tmp, dest)
             tmp.delete()
 
-            emit(Result.failure(BootstrapProgress("Linking /data/data paths", -1)))
+            report("Linking /data/data paths", -1)
             linkAndroidRuntime(dest)
             postInstall(dest)
             installHelperScripts(dest)
@@ -147,6 +181,13 @@ class BootstrapManager(private val ctx: Context) {
             FsLayout.markBootstrapped(ctx)
             emit(Result.success(Unit))
         } catch (e: Throwable) {
+            // v0.1.8: surface the real reason to the observing UI through the
+            // WorkManager progress data too (the Flow path only works in-process).
+            BootstrapReporter.publishError(
+                ctx, buildString {
+                    append(e.message ?: e.javaClass.simpleName)
+                    (e.cause?.message)?.let { append(" — ").append(it) }
+                })
             emit(Result.failure(e))
         }
     }

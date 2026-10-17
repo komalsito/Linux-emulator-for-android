@@ -1,0 +1,72 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string-array name="wm_entries">
+        <item>Openbox (lightweight)</item>
+        <item>Xfce4 session</item>
+        <item>LXDE session</item>
+        <item>i3 (tiling)</item>
+    </string-array>
+    <string-array name="wm_values">
+        <item>openbox</item>
+        <item>startxfce4</item>
+        <item>startlxde</item>
+        <item>i3</item>
+    </string-array>
+    <color name="emux_accent">#5AA7FF</color>
+    <color name="emux_bg">#101216</color>
+    <color name="emux_muted">#8A93A0</color>
+    <color name="emux_surface">#16191D</color>
+    <color name="emux_text">#E8E8E8</color>
+    <plurals name="sessions_count">
+        <item quantity="one">%d session</item>
+        <item quantity="other">%d sessions</item>
+    </plurals>
+    <string name="app_name">EmuX</string>
+    <string name="bootstrap_failed">Bootstrap failed — tap Install now to retry.</string>
+    <string name="bootstrap_failed_reason">Bootstrap failed: %1$s\nTap Install to retry.</string>
+    <string name="bootstrap_install">Install now</string>
+    <string name="bootstrap_prompt">Install the Linux environment (Alpine minirootfs, ~3 MB)? Runs once; scheduled when charging or idle.</string>
+    <string name="bootstrap_starting">Starting Linux installation…</string>
+    <string name="notif_channel_sessions">EmuX sessions</string>
+    <string name="notif_channel_sessions_desc">Ongoing notification while Linux sessions run</string>
+    <string name="pref_distro_title">Distro mirror</string>
+    <string name="pref_fps_title">Max desktop FPS</string>
+    <string name="pref_keepawake_summary">Auto-expiring wake lock (30 s) — off saves more battery</string>
+    <string name="pref_keepawake_title">Keep CPU awake during active bursts</string>
+    <string name="pref_root_mode_summary">chroot instead of interpreter-path mode + cgroup tuning</string>
+    <string name="pref_root_mode_title">Use root when available</string>
+    <string name="pref_wm_title">Window manager</string>
+    <string name="root_available">root: %1$s (accelerator on)</string>
+    <string name="root_none">root: not available</string>
+    <string name="tab_desktop">Desktop</string>
+    <string name="tab_settings">Settings</string>
+    <string name="tab_terminal">Terminal</string>
+    <string name="x_connected">X11 connected · %1$d×%2$d</string>
+    <string name="x_error">X error: %1$s</string>
+    <string name="x_starting">Starting X server…</string>
+    <style name="EmuX" parent="Theme.Material3.Dark.NoActionBar">
+        <item name="colorPrimary">@color/emux_accent</item>
+        <item name="android:windowBackground">@color/emux_bg</item>
+        <item name="android:statusBarColor">@color/emux_bg</item>
+        <item name="android:navigationBarColor">@color/emux_bg</item>
+    </style>
+    <style name="EmuX.Prefs" parent="Theme.Material3.Dark.NoActionBar">
+        <item name="colorPrimary">@color/emux_accent</item>
+        <item name="android:windowBackground">@color/emux_bg</item>
+        <item name="preferenceTheme">@style/PreferenceThemeOverlay</item>
+    </style>
+    <style name="EmuX.Tab">
+        <item name="android:layout_width">wrap_content</item>
+        <item name="android:layout_height">match_parent</item>
+        <item name="android:gravity">center</item>
+        <item name="android:paddingStart">14dp</item>
+        <item name="android:paddingEnd">14dp</item>
+        <item name="android:textColor">@color/tab_text</item>
+        <item name="android:textSize">14sp</item>
+        <item name="android:background">?android:selectableItemBackground</item>
+    </style>
+    <style name="EmuX.Translucent">
+        <item name="android:windowIsTranslucent">true</item>
+        <item name="android:windowBackground">@android:color/transparent</item>
+    </style>
+</resources>

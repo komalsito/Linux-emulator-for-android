@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="com.emux.SettingsLaunchTest" tests="3" skipped="0" failures="0" errors="0" timestamp="2026-10-17T01:45:42" hostname="c-6ad2b170-015982b3-fe9fd37bc3bd" time="12.107">
+  <properties/>
+  <testcase name="settingsOpensWithoutCrash" classname="com.emux.SettingsLaunchTest" time="9.511"/>
+  <testcase name="mainActivityLaunchesAndInstallClickDoesNotThrow" classname="com.emux.SettingsLaunchTest" time="2.308"/>
+  <testcase name="manifestDeclaresAppCompatThemeForEveryActivity" classname="com.emux.SettingsLaunchTest" time="0.288"/>
+  <system-out><![CDATA[]]></system-out>
+  <system-err><![CDATA[Invalid ID 0x5e000001.
+Invalid ID 0x00000000.
+Invalid ID 0x00000000.
+Invalid ID 0x00000000.
+Invalid ID 0x00000000.
+]]></system-err>
+</testsuite>

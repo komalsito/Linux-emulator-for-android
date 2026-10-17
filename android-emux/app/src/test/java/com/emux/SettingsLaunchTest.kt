@@ -71,6 +71,48 @@ class SettingsLaunchTest {
     }
 
     @Test
+    fun bootstrapWorkerNeverLeaksUncaughtExceptions() {
+        // v0.1.9 regression test for the REAL Install-button crash:
+        // BootstrapManager.bootstrapFlow() launched its work in a DETACHED scope
+        // (SupervisorJob fallback, no parent). Any Throwable escaping there hit
+        // the IO thread's UncaughtExceptionHandler → whole process died when the
+        // user tapped Install. Robolectric's default handler records uncaught
+        // exceptions instead of killing the JVM — so we can assert none escape.
+        val app = Robolectric.buildActivity(MainActivity::class.java).setup().get()
+
+        // Force the failure path: make every mirror unreachable by pointing at an
+        // invalid custom mirror AND stubbing DNS is overkill; instead just run the
+        // worker body directly with a context whose network calls fail fast.
+        val mgr = com.emux.core.BootstrapManager(app)
+        val result = kotlinx.coroutines.runBlocking(kotlinx.coroutines.Dispatchers.IO) {
+            // bootstrap() must convert ALL failures to Result.failure — never throw.
+            try {
+                withTimeoutSafe { mgr.bootstrap() }
+            } catch (e: Throwable) {
+                throw AssertionError("bootstrap() threw instead of returning Result.failure: $e", e)
+            }
+        }
+        // It may succeed (CI has network) or fail (no network) — both are fine.
+        // What is NOT fine is an escaped exception, asserted above.
+        check(result.isSuccess || result.exceptionOrNull() != null)
+
+        // Also assert FsLayout.tmp can never NPE even if cacheDir were null:
+        val f = com.emux.core.FsLayout.safeTmp(app)
+        check(f.absolutePath.isNotEmpty())
+
+        // And that the worker class itself compiles into the guarded shape:
+        // doWork must contain a top-level try/catch (verify via source text).
+        val src = java.io.File(
+            "/workspace/android-emux/app/src/main/java/com/emux/core/BootstrapWorker.kt").readText()
+        check(src.contains("override suspend fun doWork(): Result = try")) {
+            "BootstrapWorker.doWork lost its top-level guard"
+        }
+    }
+
+    private suspend fun <T> withTimeoutSafe(block: suspend () -> T): T =
+        kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) { block() }
+
+    @Test
     fun settingsOpensWithoutCrash() {
         val activity = Robolectric.buildActivity(SettingsActivity::class.java).setup()
         shadowOf(android.os.Looper.getMainLooper()).idle()

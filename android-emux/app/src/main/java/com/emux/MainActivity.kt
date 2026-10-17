@@ -15,7 +15,7 @@ import androidx.core.content.ContextCompat
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.repeatOnLifecycle
-import com.emux.core.BootstrapProgress
+import com.emux.core.BootstrapReporter
 import com.emux.core.FsLayout
 import com.emux.core.RootManager
 import com.emux.databinding.ActivityMainBinding
@@ -84,22 +84,66 @@ class MainActivity : AppCompatActivity() {
         //     background-FGS restrictions (see TerminalService fix);
         //  b) hasWindowFocus() is false during onCreate, so deferring guarantees
         //     the "app is visible" exemption applies when we do start services.
-        b.root.post {
+        postSafely(Runnable {
             if (!com.emux.core.FsLayout.isBootstrapped(this)) {
                 showBootstrapUiOnly()
             } else {
                 ensureSessionAttached()
             }
-        }
+        })
         maybeAskBatteryExemption()
 
-        b.btnInstall.setOnClickListener { startBootstrapNow(showUi = true) }
+        // v0.1.9 CRASH FIX: click listeners run on the main looper OUTSIDE every
+        // enclosing try/catch — any Throwable escaping startBootstrapNow (OEM ROM
+        // quirks in WorkManager, missing provider, ...) was an instant force-close
+        // exactly when Install was tapped. Belt-and-suspenders with the worker fix.
+        b.btnInstall.setOnClickListener {
+            try {
+                startBootstrapNow(showUi = true)
+            } catch (e: Throwable) {
+                com.emux.EmuXLog.e("install click failed", e)
+                runCatching {
+                    b.bootstrapBar.visibility = android.view.View.GONE
+                    b.bootstrapLabel.visibility = android.view.View.VISIBLE
+                    b.bootstrapLabel.text = getString(
+                        R.string.bootstrap_failed_reason,
+                        "${e.javaClass.simpleName}: ${e.message}")
+                }
+            }
+        }
 
         lifecycleScope.launch {
-            runCatching { root.detect() }
-            b.statusRoot.text = when (root.mode) {
-                com.emux.core.RootMode.NONE -> getString(R.string.root_none)
-                else -> getString(R.string.root_available, root.mode.name)
+            // v0.1.8: root.detect() must NEVER escape this coroutine — an
+            // uncaught Throwable in a lifecycleScope launch goes straight to the
+            // thread's UncaughtExceptionHandler and kills the process ("app keeps
+            // stopping" right after opening the app / tapping Install).
+            try { root.detect() } catch (e: Throwable) {
+                com.emux.EmuXLog.e("root detect failed", e)
+            }
+            runCatching {
+                b.statusRoot.text = when (root.mode) {
+                    com.emux.core.RootMode.NONE -> getString(R.string.root_none)
+                    else -> getString(R.string.root_available, root.mode.name)
+                }
+            }
+        }
+    }
+
+    /**
+     * v0.1.8 CRASH FIX: View.post bodies run on the main looper OUTSIDE every
+     * enclosing try/catch (MainActivity.onCreate's doOnCreate guard had already
+     * returned by then). Any throw inside it — corrupt prefs file, missing view,
+     * OEM ROM quirk — was an instant uncaught crash. Now wrapped, logged, and
+     * degraded gracefully.
+     */
+    private fun postSafely(r: Runnable) {
+        b.root.post {
+            try { r.run() } catch (e: Throwable) {
+                com.emux.EmuXLog.e("post-frame task failed", e)
+                runCatching {
+                    b.bootstrapLabel.visibility = android.view.View.VISIBLE
+                    b.bootstrapLabel.text = "Startup error: ${e.javaClass.simpleName}: ${e.message}"
+                }
             }
         }
     }
@@ -232,6 +276,17 @@ class MainActivity : AppCompatActivity() {
         runCatching {
             androidx.work.WorkManager.getInstance(this).cancelUniqueWork(EmuXApplication.BOOTSTRAP_WORK)
         }
+        // v0.1.8 CRASH FIX (the Install-button one): watchBootstrapProgress() used
+        // to run the FULL download+extract inside lifecycleScope.launch on Main,
+        // merely *collecting* progress emitted from an IO child scope. Two fatal
+        // consequences: (a) every BootstrapProgress is an Exception carrying a
+        // fresh stack trace — collecting dozens per second allocated hard enough
+        // to trip the low-memory killer; (b) more importantly, WorkManager had
+        // already been cancelled above, so if this in-process attempt died with
+        // the activity (rotation/task-swipe/OEM kill), nothing ever completed or
+        // reported bootstrap again. Now the UI ONLY observes the WorkManager job's
+        // progress; the work itself survives process death and can never crash
+        // the app because no bootstrap code runs on the main thread at all.
         val req = androidx.work.OneTimeWorkRequestBuilder<com.emux.core.BootstrapWorker>()
             .setConstraints(
                 androidx.work.Constraints.Builder()
@@ -240,8 +295,72 @@ class MainActivity : AppCompatActivity() {
         runCatching {
             androidx.work.WorkManager.getInstance(this)
                 .enqueueUniqueWork("emux-bootstrap-now", androidx.work.ExistingWorkPolicy.REPLACE, req)
-        }.onFailure { com.emux.EmuXLog.e("worker enqueue failed; running in-process only", it) }
+        }.onFailure { com.emux.EmuXLog.e("worker enqueue failed", it) }
         if (showUi) watchBootstrapProgress()
+    }
+
+    /** Observe the BootstrapWorker's progress; render bar + real errors. */
+    private fun watchBootstrapProgress() {
+        b.bootstrapBar.visibility = android.view.View.VISIBLE
+        b.bootstrapBar.isIndeterminate = true
+        b.btnInstall.visibility = android.view.View.GONE
+        b.bootstrapLabel.visibility = android.view.View.VISIBLE
+        b.bootstrapLabel.text = getString(R.string.bootstrap_starting)
+        lifecycleScope.launch {
+            try {
+                // (a) step/pct/error mirror: BootstrapReporter publishes into a
+                // static LiveData fed by the worker (survives activity recreation
+                // because the worker re-publishes on restart).
+                BootstrapReporter.live.observe(this@MainActivity) { data ->
+                    val step = (data[BootstrapReporter.KEY_STEP] as? String) ?: ""
+                    val pct = (data[BootstrapReporter.KEY_PCT] as? Int) ?: -1
+                    val err = data[BootstrapReporter.KEY_ERROR] as? String
+                    if (err != null) {
+                        b.bootstrapLabel.text =
+                            getString(R.string.bootstrap_failed_reason, err)
+                        b.bootstrapLabel.visibility = android.view.View.VISIBLE
+                        b.bootstrapBar.visibility = android.view.View.GONE
+                        b.btnInstall.visibility = android.view.View.VISIBLE
+                    } else if (step.isNotEmpty()) {
+                        b.bootstrapLabel.text = step
+                        b.bootstrapLabel.visibility = android.view.View.VISIBLE
+                        b.bootstrapBar.isIndeterminate = pct < 0
+                        if (pct >= 0) b.bootstrapBar.progress = pct
+                    }
+                }
+                // (b) terminal state comes from WorkInfo itself.
+                androidx.work.WorkManager.getInstance(this@MainActivity)
+                    .getWorkInfosForUniqueWorkLiveData("emux-bootstrap-now")
+                    .observe(this@MainActivity) { infos ->
+                        val info = infos?.firstOrNull() ?: return@observe
+                        when (info.state) {
+                            androidx.work.WorkInfo.State.SUCCEEDED -> {
+                                b.bootstrapBar.visibility = android.view.View.GONE
+                                b.bootstrapLabel.visibility = android.view.View.GONE
+                                b.btnInstall.visibility = android.view.View.GONE
+                                ensureSessionAttached()
+                            }
+                            androidx.work.WorkInfo.State.FAILED,
+                            androidx.work.WorkInfo.State.CANCELLED,
+                            androidx.work.WorkInfo.State.BLOCKED -> {
+                                b.bootstrapBar.visibility = android.view.View.GONE
+                                if (b.bootstrapLabel.text.isNullOrEmpty() ||
+                                    b.bootstrapLabel.text == getString(R.string.bootstrap_starting)) {
+                                    b.bootstrapLabel.text =
+                                        getString(R.string.bootstrap_failed_reason, "worker ${info.state}")
+                                }
+                                b.bootstrapLabel.visibility = android.view.View.VISIBLE
+                                b.btnInstall.visibility = android.view.View.VISIBLE
+                            }
+                            else -> { /* ENQUEUED/RUNNING — keep showing the bar */ }
+                        }
+                    }
+            } catch (e: Throwable) {
+                com.emux.EmuXLog.e("progress observer failed", e)
+                b.bootstrapBar.visibility = android.view.View.GONE
+                b.btnInstall.visibility = android.view.View.VISIBLE
+            }
+        }
     }
 
     private fun ensureWorkManager() {
@@ -254,66 +373,6 @@ class MainActivity : AppCompatActivity() {
             )
         } catch (_: IllegalStateException) { /* already initialised — fine */ }
         catch (e: Throwable) { com.emux.EmuXLog.e("WorkManager init failed", e) }
-    }
-
-    /**
-     * v0.1.1 bug: watchBootstrapProgress only ever ran from onCreate when the env was
-     * NOT bootstrapped. If the background WorkManager attempt had already failed, or
-     * bootstrap finished while the app was closed, tapping "Install Linux" enqueued a
-     * worker but NOTHING observed it → "nothing happens". Now every tap runs the flow
-     * in-process with progress UI AND cancels the duplicate worker.
-     */
-    private fun watchBootstrapProgress() {
-        b.bootstrapBar.visibility = android.view.View.VISIBLE
-        b.bootstrapBar.isIndeterminate = true
-        b.btnInstall.visibility = android.view.View.GONE
-        b.bootstrapLabel.visibility = android.view.View.VISIBLE
-        b.bootstrapLabel.text = getString(R.string.bootstrap_starting)
-        // Cancel the queued worker so we don't download twice in parallel.
-        runCatching {
-            androidx.work.WorkManager.getInstance(this).cancelUniqueWork("emux-bootstrap-now")
-        }
-        lifecycleScope.launch {
-            val mgr = com.emux.core.BootstrapManager(this@MainActivity)
-            val res = try {
-                var last: Result<Unit> = Result.failure(Exception("no result"))
-                mgr.bootstrapFlow().collect { r ->
-                    val e = r.exceptionOrNull()
-                    if (e is com.emux.core.BootstrapProgress) {
-                        b.bootstrapBar.isIndeterminate = e.pct < 0
-                        if (e.pct >= 0) b.bootstrapBar.progress = e.pct
-                        b.bootstrapLabel.text = e.step
-                        b.bootstrapLabel.visibility = android.view.View.VISIBLE
-                    }
-                    last = r
-                }
-                last
-            } catch (e: Throwable) { Result.failure(e) }
-            when {
-                res.isSuccess -> {
-                    b.bootstrapBar.visibility = android.view.View.GONE
-                    b.bootstrapLabel.visibility = android.view.View.GONE
-                    b.btnInstall.visibility = android.view.View.GONE
-                    // Environment just became available → make sure a live shell
-                    // is attached so the user immediately sees a prompt instead of
-                    // a blank screen ("nothing happens").
-                    ensureSessionAttached()
-                }
-                else -> {
-                    // Show the REAL reason (HTTP code, tar output, missing asset…)
-                    // instead of a generic "Bootstrap failed".
-                    val cause = res.exceptionOrNull()
-                    val msg = buildString {
-                        append(cause?.message ?: cause?.javaClass?.simpleName ?: "unknown error")
-                        cause?.cause?.let { append(" — ").append(it.message) }
-                    }
-                    b.bootstrapLabel.text = getString(R.string.bootstrap_failed_reason, msg)
-                    b.bootstrapLabel.visibility = android.view.View.VISIBLE
-                    b.bootstrapBar.visibility = android.view.View.GONE
-                    b.btnInstall.visibility = android.view.View.VISIBLE
-                }
-            }
-        }
     }
 
     // ------------------------------------------------------- permissions glue

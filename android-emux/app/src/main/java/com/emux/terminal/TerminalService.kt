@@ -57,21 +57,39 @@ class TerminalService : LifecycleService() {
                 // (bootstrap worker path, relaunch after task-swipe) →
                 // ForegroundServiceDidNotStartInTimeException / RemoteServiceException
                 // killed the process → "EmuX keeps stopping".
-                // Now: only a genuinely resumed Activity may start it as a plain
-                // background service; everyone else uses startForegroundService(),
-                // which legally grants the 5s startForeground() grace period.
-                val act = ctx as? androidx.appcompat.app.AppCompatActivity
-                val activityResumed = act != null && !act.isFinishing &&
-                    act.lifecycle.currentState.isAtLeast(androidx.lifecycle.Lifecycle.State.RESUMED)
-                if (activityResumed || android.os.Build.VERSION.SDK_INT < 26) {
-                    runCatching { ctx.startService(i) }
-                        .onFailure { runCatching { ctx.startForegroundService(i) } }
-                } else {
-                    runCatching { ctx.startForegroundService(i) }
-                        .onFailure { com.emux.EmuXLog.e("startForegroundService refused", it) }
+                // v0.1.8 CRASH FIX (verified against shipped dex + ROM behavior):
+                // the old "only a RESUMED activity may use startService()" rule was
+                // wrong on OEM ROMs (Samsung OneUI, MIUI) where lifecycleState can
+                // lag behind window focus — those calls threw
+                // IllegalStateException ("Not allowed to start service Intent … app
+                // is not in foreground") and BOTH branches of the old code then used
+                // startForegroundService(), which on API >= 31 throws
+                // ForegroundServiceStartNotAllowedException when the ROM doesn't
+                // grant the visible-window exemption. Every exception escaped the
+                // runCatching-less call sites → uncaught on the main thread →
+                // "EmuX keeps stopping" exactly when tapping Install (which attaches
+                // a terminal session). Now: try the legal paths in order, each one
+                // individually guarded; if everything is refused we simply log and
+                // the UI shows an error instead of dying.
+                var started = false
+                if (android.os.Build.VERSION.SDK_INT < 26) {
+                    started = runCatching { ctx.startService(i) }.isSuccess
                 }
-            } catch (_: Exception) {
+                if (!started) {
+                    // Plain startService is legal whenever the app has a visible
+                    // activity; failures here are expected-but-caught on O+.
+                    started = runCatching { ctx.startService(i) }.isSuccess
+                }
+                if (!started && android.os.Build.VERSION.SDK_INT >= 26) {
+                    started = runCatching { ctx.startForegroundService(i) }.isSuccess
+                }
+                if (!started) {
+                    com.emux.EmuXLog.e(
+                        "TerminalService start refused by ROM (all paths); sessions unavailable until next resume")
+                }
+            } catch (e: Throwable) {
                 // Last-resort: never let session startup kill the process.
+                com.emux.EmuXLog.e("startSession failed", e)
                 runCatching { ctx.startService(i) }
             }
             return -1 // real ids delivered through the sessions() flow

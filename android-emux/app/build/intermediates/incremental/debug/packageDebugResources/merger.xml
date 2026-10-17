@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="utf-8"?>
+<merger version="3"><dataSet aapt-namespace="http://schemas.android.com/apk/res-auto" config="main$Generated" generated="true" ignore_pattern="!.svn:!.git:!.ds_store:!*.scc:.*:&lt;dir>_*:!CVS:!thumbs.db:!picasa.ini:!*~"><source path="/workspace/android-emux/app/src/main/res"/></dataSet><dataSet aapt-namespace="http://schemas.android.com/apk/res-auto" config="main" generated-set="main$Generated" ignore_pattern="!.svn:!.git:!.ds_store:!*.scc:.*:&lt;dir>_*:!CVS:!thumbs.db:!picasa.ini:!*~"><source path="/workspace/android-emux/app/src/main/res"><file path="/workspace/android-emux/app/src/main/res/values/strings.xml" qualifiers=""><string name="app_name">EmuX</string><string name="tab_terminal">Terminal</string><string name="tab_desktop">Desktop</string><string name="tab_settings">Settings</string><string name="bootstrap_prompt">Install the Linux environment (Alpine minirootfs, ~3 MB)? Runs once; scheduled when charging or idle.</string><string name="bootstrap_install">Install now</string><string name="bootstrap_failed">Bootstrap failed — tap Install now to retry.</string><string name="root_none">root: not available</string><string name="root_available">root: %1$s (accelerator on)</string><string name="x_starting">Starting X server…</string><string name="x_connected">X11 connected · %1$d×%2$d</string><string name="x_error">X error: %1$s</string><string name="notif_channel_sessions">EmuX sessions</string><string name="notif_channel_sessions_desc">Ongoing notification while Linux sessions run</string><plurals name="sessions_count">
+        <item quantity="one">%d session</item>
+        <item quantity="other">%d sessions</item>
+    </plurals><string name="pref_wm_title">Window manager</string><string name="pref_root_mode_title">Use root when available</string><string name="pref_root_mode_summary">chroot instead of interpreter-path mode + cgroup tuning</string><string name="pref_fps_title">Max desktop FPS</string><string name="pref_keepawake_title">Keep CPU awake during active bursts</string><string name="pref_keepawake_summary">Auto-expiring wake lock (30 s) — off saves more battery</string><string name="pref_distro_title">Distro mirror</string><string name="bootstrap_failed_reason">Bootstrap failed: %1$s\nTap Install to retry.</string><string name="bootstrap_starting">Starting Linux installation…</string></file><file path="/workspace/android-emux/app/src/main/res/values/arrays.xml" qualifiers=""><string-array name="wm_entries">
+        <item>Openbox (lightweight)</item>
+        <item>Xfce4 session</item>
+        <item>LXDE session</item>
+        <item>i3 (tiling)</item>
+    </string-array><string-array name="wm_values">
+        <item>openbox</item>
+        <item>startxfce4</item>
+        <item>startlxde</item>
+        <item>i3</item>
+    </string-array></file><file path="/workspace/android-emux/app/src/main/res/values/themes.xml" qualifiers=""><color name="emux_bg">#101216</color><color name="emux_surface">#16191D</color><color name="emux_accent">#5AA7FF</color><color name="emux_text">#E8E8E8</color><color name="emux_muted">#8A93A0</color><style name="EmuX.Tab">
+        <item name="android:layout_width">wrap_content</item>
+        <item name="android:layout_height">match_parent</item>
+        <item name="android:gravity">center</item>
+        <item name="android:paddingStart">14dp</item>
+        <item name="android:paddingEnd">14dp</item>
+        <item name="android:textColor">@color/tab_text</item>
+        <item name="android:textSize">14sp</item>
+        <item name="android:background">?android:selectableItemBackground</item>
+    </style><style name="EmuX.Translucent">
+        <item name="android:windowIsTranslucent">true</item>
+        <item name="android:windowBackground">@android:color/transparent</item>
+    </style><style name="EmuX" parent="Theme.Material3.Dark.NoActionBar">
+        <item name="colorPrimary">@color/emux_accent</item>
+        <item name="android:windowBackground">@color/emux_bg</item>
+        <item name="android:statusBarColor">@color/emux_bg</item>
+        <item name="android:navigationBarColor">@color/emux_bg</item>
+    </style><style name="EmuX.Prefs" parent="Theme.Material3.Dark.NoActionBar">
+        <item name="colorPrimary">@color/emux_accent</item>
+        <item name="android:windowBackground">@color/emux_bg</item>
+        <item name="preferenceTheme">@style/PreferenceThemeOverlay</item>
+    </style></file><file name="usb_device_filter" path="/workspace/android-emux/app/src/main/res/xml/usb_device_filter.xml" qualifiers="" type="xml"/><file name="preferences" path="/workspace/android-emux/app/src/main/res/xml/preferences.xml" qualifiers="" type="xml"/><file name="activity_main" path="/workspace/android-emux/app/src/main/res/layout/activity_main.xml" qualifiers="" type="layout"/><file name="ic_launcher" path="/workspace/android-emux/app/src/main/res/mipmap-anydpi-v26/ic_launcher.xml" qualifiers="anydpi-v26" type="mipmap"/><file name="tab_text" path="/workspace/android-emux/app/src/main/res/color/tab_text.xml" qualifiers="" type="color"/><file name="ic_emux_notif" path="/workspace/android-emux/app/src/main/res/drawable/ic_emux_notif.xml" qualifiers="" type="drawable"/></source></dataSet><dataSet aapt-namespace="http://schemas.android.com/apk/res-auto" config="debug$Generated" generated="true" ignore_pattern="!.svn:!.git:!.ds_store:!*.scc:.*:&lt;dir>_*:!CVS:!thumbs.db:!picasa.ini:!*~"><source path="/workspace/android-emux/app/src/debug/res"/></dataSet><dataSet aapt-namespace="http://schemas.android.com/apk/res-auto" config="debug" generated-set="debug$Generated" ignore_pattern="!.svn:!.git:!.ds_store:!*.scc:.*:&lt;dir>_*:!CVS:!thumbs.db:!picasa.ini:!*~"><source path="/workspace/android-emux/app/src/debug/res"/></dataSet><dataSet aapt-namespace="http://schemas.android.com/apk/res-auto" config="generated$Generated" generated="true" ignore_pattern="!.svn:!.git:!.ds_store:!*.scc:.*:&lt;dir>_*:!CVS:!thumbs.db:!picasa.ini:!*~"><source path="/workspace/android-emux/app/build/generated/res/resValues/debug"/></dataSet><dataSet aapt-namespace="http://schemas.android.com/apk/res-auto" config="generated" generated-set="generated$Generated" ignore_pattern="!.svn:!.git:!.ds_store:!*.scc:.*:&lt;dir>_*:!CVS:!thumbs.db:!picasa.ini:!*~"><source path="/workspace/android-emux/app/build/generated/res/resValues/debug"/></dataSet><mergedItems/></merger>

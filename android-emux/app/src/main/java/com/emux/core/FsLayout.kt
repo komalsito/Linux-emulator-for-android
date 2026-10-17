@@ -20,12 +20,36 @@ object FsLayout {
     fun usr(ctx: Context): File = File(root(ctx), "usr")
     fun linuxRoot(ctx: Context): File = File(root(ctx), "linuxroot")
     fun home(ctx: Context): File = File(root(ctx), "home").apply { mkdirs() }
-    fun tmp(ctx: Context): File = File(ctx.cacheDir, "tmp").apply { mkdirs() }
+    /**
+     * v0.1.9 CRASH FIX: Context.getCacheDir() is @Nullable (returns null while
+     * the device is direct-boot-locked before first user unlock, and some OEM
+     * ROMs return null under storage pressure). `File(null, "tmp")` then threw
+     * KotlinNullPointerException — inside BootstrapWorker's withContext(IO)
+     * CHILD scope, which CoroutineWorker does NOT catch → UncaughtExceptionHandler
+     * → process death exactly when Install was tapped. Never nullable now.
+     */
+    fun safeTmp(ctx: Context): File = try {
+        val c = ctx.cacheDir
+        if (c != null) File(c, "tmp") else File(root(ctx), "tmp")
+    } catch (_: Throwable) { File(root(ctx), "tmp") }.apply { runCatching { mkdirs() } }
+
+    fun tmp(ctx: Context): File = safeTmp(ctx)
     fun prefixFile(ctx: Context): File = File(root(ctx), ".env_version")
 
-    fun isBootstrapped(ctx: Context): Boolean =
-        prefixFile(ctx).exists() && prefixFile(ctx).readText().trim() == ENV_VERSION.toString() &&
-            linuxRoot(ctx).exists()
+    /**
+     * v0.1.8 CRASH FIX (verified against shipped dex): this used to be a bare
+     * `readText()` — if `.env_version` was ever written empty/corrupted (killed
+     * mid-write during a previous bootstrap crash, storage pressure, OEM backup
+     * restore), readText threw and the exception escaped MainActivity's
+     * `b.root.post { … }` block. Code posted via View.post runs OUTSIDE any
+     * try/catch on the main looper → uncaught → "EmuX keeps stopping" on every
+     * launch of the affected install. Now it can never throw.
+     */
+    fun isBootstrapped(ctx: Context): Boolean = try {
+        val p = prefixFile(ctx)
+        p.exists() && p.readText().trim() == ENV_VERSION.toString() &&
+            File(linuxRoot(ctx), "etc").isDirectory
+    } catch (_: Throwable) { false }
 
     fun markBootstrapped(ctx: Context) {
         prefixFile(ctx).writeText(ENV_VERSION.toString())
