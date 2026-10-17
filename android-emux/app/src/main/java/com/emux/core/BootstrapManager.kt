@@ -141,7 +141,9 @@ class BootstrapManager(private val ctx: Context) {
                 val url: URL = when {
                     clean.endsWith(".tar.gz") -> URL(clean)               // full file URL — use verbatim
                     clean.endsWith("/v") -> URL("$clean$pathSuffix")      // "…/alpine/v" + "3.20/releases/…"
-                    Regex("/v[0-9]").containsMatchIn(clean) -> URL("$clean/$DEFAULT_DISTRO-$ver-${archName()}.tar.gz")
+                    // "…/alpine/v3.20" is a version directory: the tarball still lives
+                    // under releases/<arch>/, so append that segment (was missing → 404).
+                    Regex("/v[0-9]").containsMatchIn(clean) -> URL("$clean/releases/${archName()}/$DEFAULT_DISTRO-$ver-${archName()}.tar.gz")
                     else -> URL("$clean/${majorVersion(ver)}/releases/${archName()}/$DEFAULT_DISTRO-$ver-${archName()}.tar.gz")
                 }
                 report("Downloading rootfs (${url.host})", -1)
@@ -156,7 +158,12 @@ class BootstrapManager(private val ctx: Context) {
             }
             if (!downloaded) {
                 // Surface the actual HTTP failure (incl. response code) so users can act on it.
-                val detail = (lastErr as? java.net.HttpURLConnection)?.let { "HTTP ${it.responseCode}" }
+                // lastErr is never an HttpURLConnection itself — unwrap the cause chain
+                // to find one and surface its HTTP response code.
+                val conn = generateSequence(lastErr) { it.cause }
+                    .filterIsInstance<HttpURLConnection>()
+                    .firstOrNull()
+                val detail = conn?.let { "HTTP ${it.responseCode}" }
                     ?: lastErr?.toString() ?: "no attempt made"
                 throw RuntimeException("All mirrors failed ($detail). Check Wi-Fi/mobile data and retry.", lastErr)
             }
@@ -165,7 +172,9 @@ class BootstrapManager(private val ctx: Context) {
             // surface as a confusing "tar failed" message.
             val head = ByteArray(2)
             FileInputStream(tmp).use { it.read(head) }
-            if (head[0] != 0x1f.toByte() || head[1] != 0x8.toByte()) {
+            // gzip magic bytes are 0x1f 0x8b — the old check compared against 0x08,
+            // which rejected every valid tarball ("Mirror returned non-gzip data").
+            if (head[0] != 0x1f.toByte() || head[1] != 0x8b.toByte()) {
                 throw RuntimeException("Mirror returned non-gzip data (${tmp.length()} bytes) — check network/mirror URL")
             }
 
