@@ -38,6 +38,18 @@ object BootstrapRunner {
     /** True while an in-process bootstrap pass is active (UI dedupe). */
     fun isRunning(): Boolean = running
 
+    // v0.1.12: the ONLY androidx.work-free entry point into the worker logic.
+    // BootstrapWorker.doWork() delegates here after its own (guarded) setup, so
+    // if a ROM ever fails to resolve some deep androidx.work internal *during*
+    // execution — not just at enqueue time — MainActivity's safety net can still
+    // finish the install using this method, which touches zero W-M classes.
+    suspend fun bootstrapNow(ctx: Context): Result<Unit> = try {
+        BootstrapManager(ctx.applicationContext).bootstrap()
+    } catch (e: Throwable) {
+        BootstrapDiagnostics.dumpFull(ctx, e)
+        Result.failure(e)
+    }
+
     /**
      * Run bootstrap in this process. [onDone] receives the final Result and is
      * invoked on Main when possible (best-effort; never throws into the caller).

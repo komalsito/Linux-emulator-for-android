@@ -32,8 +32,11 @@ class BootstrapWorker(appCtx: Context, params: WorkerParameters) :
         // executor thread → UncaughtExceptionHandler → the whole app died the
         // moment Install was tapped. That is THE Install-button crash.
         // Now nothing can leave this worker uncaught; failures become retry().
-        val mgr = BootstrapManager(applicationContext)
-        val r = mgr.bootstrap()
+        // v0.1.12: delegate to the androidx.work-FREE runner so a linkage error
+        // raised deep inside W-M execution (not just at enqueue time) can never
+        // strand the install — doWork's own class resolution already succeeded
+        // by the time we're here, but anything further down is now irrelevant.
+        val r = BootstrapRunner.bootstrapNow(applicationContext)
         if (r.isSuccess) Result.success() else Result.retry()
     } catch (e: Throwable) {
         // v0.1.10: the UI previously showed only "NoClassDefFoundError" because
