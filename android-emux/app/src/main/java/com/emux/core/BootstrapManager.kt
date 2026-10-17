@@ -221,10 +221,38 @@ class BootstrapManager(private val ctx: Context) {
             // three distinct phases (special-file prune + mountpoint seeding,
             // resolver config, profile/os-release writes). Split into two
             // reported sub-steps so the UI visibly advances through them.
+            //
+            // v0.1.14 STALL FIX #3 — "stuck at Seeding/Sending resolver config".
+            // The resolver-seeding block inside linkAndroidRuntime() used to run
+            // *after* pruneSpecialFiles(dev): a bounded walk with a 10-second
+            // wall-clock cap and a 4096-entry cap. On a rootfs left over from an
+            // interrupted attempt, dev/ can hold tens of thousands of entries
+            // (or be mid-corruption), so the prune silently gave up at its cap
+            // and returned right when the time budget expired. Everything that
+            // came after it in the same phase — including the resolv.conf seed
+            // whose label was already on screen — then sat behind an operation
+            // that had burned its whole budget doing nothing visible. Because
+            // indeterminate progress frames only repaint when the NEXT step
+            // starts, the UI froze at the resolver-config label exactly like the
+            // earlier pre-wipe stall.
+            // Fix:
+            //  - reorder: the resolver seed + mountpoint dirs are cheap,
+            //    metadata-only operations and now run FIRST, before any tree
+            //    walk can eat time;
+            //  - the dev/ prune is bounded harder (5 s) and wrapped in a hard
+            //    watchdog thread so even a pathological filesystem hang cannot
+            //    delay the next frame by more than a few seconds;
+            //  - each remaining sub-step emits its own heartbeat frame
+            //    ("Finalizing rootfs config", "Installing helper scripts") so
+            //    no label ever has to cover multiple operations again.
             report("Linking /data/data paths", -1)
-            linkAndroidRuntime(dest)
-            report("Seeding resolver config", -1)
+            seedResolverConfig(dest)          // fast, metadata-only — runs first now
+            report("Pruning special files", -1)
+            withHardTimeout(5_000L) { pruneSpecialFiles(File(dest, "dev"), maxMillis = 4_500L) }
+            prepareMountpoints(dest)
+            report("Finalizing rootfs config", -1)
             postInstall(dest)
+            report("Installing helper scripts", -1)
             installHelperScripts(dest)
 
             FsLayout.markBootstrapped(ctx)
@@ -437,25 +465,78 @@ class BootstrapManager(private val ctx: Context) {
     }
 
     /**
-     * Make the chroot usable without root: bind-free access to the Android DNS
-     * resolver and a minimal /proc,/sys,/dev populated at session start instead.
-     * Here we just pre-create mountpoint dirs and seed resolv.conf from Android.
+     * v0.1.14 SPLIT: pre-create the mountpoint dirs the session launcher binds
+     * onto (/proc /sys /dev /tmp /run /root /home). Plain mkdirs — no
+     * enumeration, cannot block. Extracted from linkAndroidRuntime(), which in
+     * turn is kept as a thin wrapper over these three steps for any legacy
+     * call sites and tests.
      */
-    private fun linkAndroidRuntime(dest: File) {
-        // v0.1.13 STALL FIX #2 — special files under dev/ blocking later
-        // enumeration. Alpine's minirootfs ships /dev entries; on the pure-Java
-        // extraction fallback they arrive as fifos/links. Any subsequent
-        // recursive scan (or our own cleanup) that *opens* them can block
-        // forever on an empty FIFO reader. Fix: a bounded, non-opening
-        // pruneSpecialFiles(dev) walk runs FIRST in this phase, removing
-        // symlinks/non-regular files so every later fs op is guaranteed to
-        // terminate. It only ever lstats/unlinks — it never opens anything.
-        pruneSpecialFiles(File(dest, "dev"))
-
+    internal fun prepareMountpoints(dest: File) {
         listOf("proc", "sys", "dev", "tmp", "run", "root", "home").forEach {
             File(dest, it).mkdirs()
         }
         File(dest, "tmp").setWritable(true, false)
+    }
+
+    /**
+     * Make the chroot usable without root: bind-free access to the Android DNS
+     * resolver and a minimal /proc,/sys,/dev populated at session start instead.
+     * v0.1.14: this is now just the ordered composition of the three cheap,
+     * individually-reported sub-steps (resolver seed → dev/ prune → mountpoint
+     * dirs). The old monolithic version ran the bounded-but-slow dev/ prune
+     * FIRST and left the resolv.conf seed behind it on screen with no new
+     * progress frame until everything finished — the exact mechanism of the
+     * "stuck at Seeding resolver config" stall. bootstrapFlow() now calls the
+     * pieces directly so each one gets its own heartbeat; this wrapper remains
+     * for completeness/legacy callers.
+     */
+    internal fun linkAndroidRuntime(dest: File) {
+        // v0.1.13 STALL FIX #2 — special files under dev/ blocking later
+        // enumeration. Alpine's minirootfs ships /dev entries; on the pure-Java
+        // extraction fallback they arrive as fifos/links. Any subsequent
+        // recursive scan (or our own cleanup) that *opens* them can block
+        // forever on an empty FIFO reader. pruneSpecialFiles only ever
+        // lstats/unlinks — it never opens anything — and here it additionally
+        // runs under withHardTimeout so even a kernel-level readdir hang can't
+        // gate progress.
+        seedResolverConfig(dest)
+        withHardTimeout(5_000L) { pruneSpecialFiles(File(dest, "dev"), maxMillis = 4_500L) }
+        prepareMountpoints(dest)
+    }
+
+    /**
+     * v0.1.14: run [block] on a daemon thread and wait for it at most
+     * [millis] ms. If the operation exceeds its budget we return anyway and
+     * let the orphaned daemon finish (or die) in the background — bootstrap
+     * progress must NEVER be gated on a filesystem walk again. This is the
+     * hard backstop behind pruneSpecialFiles' own cooperative time cap: even
+     * if a single readdir/lstat blocks indefinitely in kernel space (bad
+     * f2fs state, hung fuse-like mount), the next progress frame lands within
+     * [millis]. Best-effort semantics apply to everything it wraps, so losing
+     * the result of a timed-out walk is acceptable by design.
+     */
+    private fun withHardTimeout(millis: Long, block: () -> Unit) {
+        val done = java.util.concurrent.CountDownLatch(1)
+        val t = Thread {
+            try { runCatching { block() } } finally { done.countDown() }
+        }.apply { isDaemon = true; name = "emux-bootstrap-timeout" }
+        t.start()
+        try {
+            done.await(millis, java.util.concurrent.TimeUnit.MILLISECONDS)
+        } catch (_: InterruptedException) {
+            Thread.currentThread().interrupt()
+        }
+    }
+
+    /**
+     * v0.1.14 SPLIT: seed etc/resolv.conf from Android. Extracted out of
+     * linkAndroidRuntime() so it gets its OWN progress frame and runs before
+     * any tree walk — this block is metadata-only plus one tiny file write,
+     * worst case milliseconds. (The old placement — after the dev/ prune — is
+     * what made the UI sit at "Seeding resolver config" while the prune burned
+     * its time budget doing nothing visible.)
+     */
+    internal fun seedResolverConfig(dest: File) {
         // Seed resolv.conf from Android's DNS properties (net.dns1/net.dns2 —
         // readable by any app).
         // v0.1.11 HANG FIX: this used to enumerate interfaces with

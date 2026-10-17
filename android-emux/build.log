@@ -49,3 +49,10 @@ Daemon will be stopped at the end of the build
 
 BUILD SUCCESSFUL in 1m 12s
 38 actionable tasks: 11 executed, 27 up-to-date
+=== v0.1.14 rebuild (resolver-config stall fix) ===
+Sat Oct 17 23:35:08 UTC 2026
+> Task :app:createDebugApkListingFileRedirect
+> Task :app:assembleDebug
+
+BUILD SUCCESSFUL in 1m 11s
+38 actionable tasks: 11 executed, 27 up-to-date
