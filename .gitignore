@@ -1,2 +1,6 @@
-*.log
-local.properties
+build/
+.gradle/
+*.dex
+*.class
+*.apk
+*.ap_

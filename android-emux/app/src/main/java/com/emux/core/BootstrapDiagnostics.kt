@@ -39,7 +39,24 @@ object BootstrapDiagnostics {
     private fun linkageDetail(t: Throwable): String? {
         val m = t.message ?: return null
         val idx = m.indexOf("Failed resolution of:")
-        return if (idx >= 0) m.substring(idx).take(200) else null
+        if (idx >= 0) return m.substring(idx).take(200)
+        // v0.1.12: ART's LinkageError messages are frequently EMPTY on OEM ROMs
+        // (e.g. Samsung/MIUI strip the "Failed resolution of:" detail), which is
+        // why users kept seeing a bare "NoClassDefFoundError" with zero info.
+        // Recover the missing class name from the stack frames instead — the
+        // failing call site is always the top frame we ourselves compiled.
+        if (t is NoClassDefFoundError || t is ClassNotFoundException || t is LinkageError) {
+            if (!m.isNullOrBlank()) return m.take(200)
+            val ours = t.stackTrace.firstOrNull { f ->
+                f.className.startsWith("com.emux") && !f.className.contains("BootstrapDiagnostics")
+            }
+            if (ours != null) {
+                return "missing class while running ${ours.methodName} in " +
+                    ours.className.substringAfterLast('.') + ":" + ours.lineNumber +
+                    " (ART gave no class name — see bootstrap-error.log)"
+            }
+        }
+        return null
     }
 
     /** Writes the full trace to files/log/bootstrap-error.log (tail shown in Settings→About). */

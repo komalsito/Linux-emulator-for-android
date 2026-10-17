@@ -10,6 +10,19 @@ import kotlinx.coroutines.withContext
 class BootstrapWorker(appCtx: Context, params: WorkerParameters) :
     CoroutineWorker(appCtx, params) {
 
+    // v0.1.12 CRITICAL FIX: this class statically extends
+    // androidx.work.CoroutineWorker. If the app's startup .dex (classes.dex) does
+    // not contain androidx.work classes, ART fails to resolve the superclass at
+    // instantiation time and throws NoClassDefFoundError — BEFORE any of our
+    // try/catch inside doWork can run, because the failure happens while
+    // constructing the worker instance itself. That is exactly why every
+    // "guarded" release still reported "bootstrap failed: NoClassDefFoundError".
+    // The guard therefore lives in BootstrapScheduling.instantiateWorker(),
+    // which reflectively verifies CoroutineWorker::class.java.isAssignableFrom(
+    // BootstrapWorker::class.java) before WorkManager ever constructs us; on
+    // linkage failure it throws a marker exception that makes the job fail fast
+    // and permanently, letting MainActivity run the identical bootstrap via the
+    // zero-dependency BootstrapRunner instead.
     override suspend fun doWork(): Result = try {
         // v0.1.9 CRASH FIX (verified against kotlinx-coroutines semantics):
         // withContext propagates exceptions from its *child* coroutine even when

@@ -265,46 +265,86 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    /** Kick the WorkManager job immediately (user pressed Install). */
+    /** Kick the distro install (user pressed Install). */
     private fun startBootstrapNow(showUi: Boolean) {
-        // v0.1.3 CRASH FIX: WorkManager was never explicitly initialised and this
-        // app does NOT use androidx.startup, so on some devices/OEM ROMs
-        // WorkManager.getInstance() throws IllegalStateException ("no default
-        // Configuration") right here — and because onCreate auto-called this on a
-        // fresh install, EVERY launch crashed → "EmuX keeps stopping".
-        ensureWorkManager()
-        runCatching {
-            androidx.work.WorkManager.getInstance(this).cancelUniqueWork(EmuXApplication.BOOTSTRAP_WORK)
+        // v0.1.11 CRASH FIX ("bootstrap failed: NoClassDefFoundError"): every
+        // androidx.work call in this file was STATIC — on ROMs where the work
+        // runtime fails class resolution, enqueue/observe threw straight past
+        // runCatching-less code into the looper and the UI printed the wrapper
+        // name only. All W-M access now goes through BootstrapScheduling (fully
+        // guarded reflection); if it reports unavailable we run the identical
+        // bootstrap in-process via BootstrapRunner. Either way Install works.
+        val wmOk = com.emux.core.BootstrapScheduling.ensureWork(this)
+        if (wmOk) {
+            com.emux.core.BootstrapScheduling.cancel(this, EmuXApplication.BOOTSTRAP_WORK)
         }
-        // v0.1.8 CRASH FIX (the Install-button one): watchBootstrapProgress() used
-        // to run the FULL download+extract inside lifecycleScope.launch on Main,
-        // merely *collecting* progress emitted from an IO child scope. Two fatal
-        // consequences: (a) every BootstrapProgress is an Exception carrying a
-        // fresh stack trace — collecting dozens per second allocated hard enough
-        // to trip the low-memory killer; (b) more importantly, WorkManager had
-        // already been cancelled above, so if this in-process attempt died with
-        // the activity (rotation/task-swipe/OEM kill), nothing ever completed or
-        // reported bootstrap again. Now the UI ONLY observes the WorkManager job's
-        // progress; the work itself survives process death and can never crash
-        // the app because no bootstrap code runs on the main thread at all.
-        // v0.1.10: also add backoffCriteria so a permanently-failing mirror can't
-        // hammer retries, and NEVER fall through silently — if enqueue throws
-        // (e.g. NoClassDefFoundError linking androidx.work on a broken ROM), run
-        // the bootstrap IN-PROCESS right here instead of leaving the user stuck.
-        val enqueued = runCatching {
-            val req = androidx.work.OneTimeWorkRequestBuilder<com.emux.core.BootstrapWorker>()
-                .setConstraints(
-                    androidx.work.Constraints.Builder()
-                        .setRequiredNetworkType(androidx.work.NetworkType.CONNECTED).build())
-                .setBackoffCriteria(
-                    androidx.work.BackoffPolicy.EXPONENTIAL, 30L, java.util.concurrent.TimeUnit.SECONDS)
-                .build()
-            androidx.work.WorkManager.getInstance(this)
-                .enqueueUniqueWork("emux-bootstrap-now", androidx.work.ExistingWorkPolicy.REPLACE, req)
-        }.also { r -> r.exceptionOrNull()?.let { com.emux.EmuXLog.e("worker enqueue failed", it) } }
-            .isSuccess
-        if (!enqueued) startInProcessFallback()
+        val enqueued = wmOk && com.emux.core.BootstrapScheduling.enqueue(
+            this, "emux-bootstrap-now", replace = true)
+        if (!enqueued) {
+            com.emux.EmuXLog.i("WorkManager unavailable/enqueue failed -> in-process bootstrap")
+            com.emux.core.BootstrapRunner.run(applicationContext) { r ->
+                // Render the terminal result into the same UI the W-M observer uses,
+                // so fallback mode is indistinguishable to the user (except it works).
+                runCatching {
+                    b.bootstrapBar.isIndeterminate = false
+                    if (r.isSuccess) {
+                        ensureSessionAttached()
+                        b.bootstrapBar.visibility = android.view.View.GONE
+                        b.bootstrapLabel.visibility = android.view.View.GONE
+                        b.btnInstall.visibility = android.view.View.GONE
+                    } else {
+                        b.bootstrapLabel.text = getString(
+                            R.string.bootstrap_failed_reason,
+                            com.emux.core.BootstrapDiagnostics.describe(r.exceptionOrNull()))
+                        b.bootstrapBar.visibility = android.view.View.GONE
+                        b.btnInstall.visibility = android.view.View.VISIBLE
+                    }
+                }
+            }
+        }
         if (showUi) watchBootstrapProgress()
+        // v0.1.12: safety net for linkage errors that kill the W-M job outside
+        // any code we control (worker superclass resolution). If after a grace
+        // period the rootfs still isn't there, run it in-process instead.
+        ensureBootstrapCompletes()
+    }
+
+    /**
+     * v0.1.12: last-resort safety net. If WorkManager reported available but the
+     * job nevertheless dies with a linkage error (e.g. BootstrapWorker's
+     * CoroutineWorker superclass fails to resolve at instantiation time — which
+     * happens OUTSIDE every try/catch we control), nothing else would ever run
+     * the bootstrap. This re-checks after a grace period and, when the rootfs is
+     * still missing, transparently runs the zero-dependency in-process path.
+     */
+    private fun ensureBootstrapCompletes() {
+        lifecycleScope.launch(kotlinx.coroutines.Dispatchers.Main) {
+            kotlinx.coroutines.delay(8_000L)
+            try {
+                if (com.emux.core.FsLayout.isBootstrapped(applicationContext)) return@launch
+                if (com.emux.core.BootstrapRunner.isRunning()) return@launch
+                com.emux.EmuXLog.i("bootstrap not completed via W-M -> in-process retry")
+                com.emux.core.BootstrapRunner.run(applicationContext) { r ->
+                    runCatching {
+                        b.bootstrapBar.isIndeterminate = false
+                        if (r.isSuccess) {
+                            ensureSessionAttached()
+                            b.bootstrapBar.visibility = android.view.View.GONE
+                            b.bootstrapLabel.visibility = android.view.View.GONE
+                            b.btnInstall.visibility = android.view.View.GONE
+                        } else {
+                            b.bootstrapLabel.text = getString(
+                                R.string.bootstrap_failed_reason,
+                                com.emux.core.BootstrapDiagnostics.describe(r.exceptionOrNull()))
+                            b.bootstrapBar.visibility = android.view.View.GONE
+                            b.btnInstall.visibility = android.view.View.VISIBLE
+                        }
+                    }
+                }
+            } catch (e: Throwable) {
+                com.emux.EmuXLog.e("ensureBootstrapCompletes failed", e)
+            }
+        }
     }
 
     /** Last-resort path when WorkManager itself can't load/run on this device. */
@@ -360,26 +400,29 @@ class MainActivity : AppCompatActivity() {
                         if (pct >= 0) b.bootstrapBar.progress = pct
                     }
                 }
-                // (b) terminal state comes from WorkInfo itself.
-                androidx.work.WorkManager.getInstance(this@MainActivity)
-                    .getWorkInfosForUniqueWorkLiveData("emux-bootstrap-now")
-                    .observe(this@MainActivity) { infos ->
-                        val info = infos?.firstOrNull() ?: return@observe
-                        when (info.state) {
-                            androidx.work.WorkInfo.State.SUCCEEDED -> {
+                // (b) terminal state comes from WorkInfo itself — v0.1.11: only
+                // when androidx.work actually linked; otherwise the in-process
+                // BootstrapRunner result drives the UI via BootstrapReporter.
+                if (com.emux.core.BootstrapScheduling.workAvailable) {
+                    com.emux.core.BootstrapScheduling.progressLiveData(
+                        this@MainActivity, "emux-bootstrap-now"
+                    )?.observe(this@MainActivity) { raw ->
+                        val infos = raw as? List<*> ?: return@observe
+                        val info = infos.firstOrNull() ?: return@observe
+                        val state = info.javaClass.getMethod("getState").invoke(info).toString()
+                        when (state) {
+                            "SUCCEEDED" -> {
                                 b.bootstrapBar.visibility = android.view.View.GONE
                                 b.bootstrapLabel.visibility = android.view.View.GONE
                                 b.btnInstall.visibility = android.view.View.GONE
                                 ensureSessionAttached()
                             }
-                            androidx.work.WorkInfo.State.FAILED,
-                            androidx.work.WorkInfo.State.CANCELLED,
-                            androidx.work.WorkInfo.State.BLOCKED -> {
+                            "FAILED", "CANCELLED", "BLOCKED" -> {
                                 b.bootstrapBar.visibility = android.view.View.GONE
                                 if (b.bootstrapLabel.text.isNullOrEmpty() ||
                                     b.bootstrapLabel.text == getString(R.string.bootstrap_starting)) {
                                     b.bootstrapLabel.text =
-                                        getString(R.string.bootstrap_failed_reason, "worker ${info.state}")
+                                        getString(R.string.bootstrap_failed_reason, "worker $state")
                                 }
                                 b.bootstrapLabel.visibility = android.view.View.VISIBLE
                                 b.btnInstall.visibility = android.view.View.VISIBLE
@@ -387,6 +430,7 @@ class MainActivity : AppCompatActivity() {
                             else -> { /* ENQUEUED/RUNNING — keep showing the bar */ }
                         }
                     }
+                }
             } catch (e: Throwable) {
                 com.emux.EmuXLog.e("progress observer failed", e)
                 b.bootstrapBar.visibility = android.view.View.GONE

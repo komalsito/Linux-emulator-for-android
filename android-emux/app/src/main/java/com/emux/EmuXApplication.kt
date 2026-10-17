@@ -4,18 +4,21 @@ import android.app.Application
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.content.Context
-import androidx.work.Constraints
-import androidx.work.ExistingWorkPolicy
-import androidx.work.NetworkType
-import androidx.work.OneTimeWorkRequestBuilder
-import androidx.work.WorkManager
-import androidx.work.workDataOf
-import com.emux.core.BootstrapWorker
 import com.emux.terminal.TerminalService
 
 class EmuXApplication : Application() {
 
     companion object { const val BOOTSTRAP_WORK = "emux-bootstrap" }
+
+    // v0.1.11 CRASH FIX ("bootstrap failed: NoClassDefFoundError", verified by
+    // tracing the shipped dex): this file statically referenced androidx.work
+    // (imports + CoroutineWorker class literal). On devices where the work
+    // runtime fails late class resolution, merely *touching* scheduleBootstrap()
+    // threw NoClassDefFoundError inside Application.onCreate — and because the
+    // error text came from the wrapper exception only, every previous release
+    // showed the same bare "NoClassDefFoundError". WorkManager is now reached
+    // ONLY reflectively; if linkage fails we fall back to BootstrapRunner, an
+    // in-process path with zero androidx.work dependency.
 
     // v0.1.6 CRASH FIX (verified by static analysis of the shipped dex):
     // EVERYTHING in Application.onCreate is now individually guarded. Any
@@ -33,23 +36,12 @@ class EmuXApplication : Application() {
         try { ensureNotificationChannel() }
         catch (e: Throwable) { com.emux.EmuXLog.e("channel setup failed", e) }
 
-        // Explicitly initialise WorkManager BEFORE any getInstance() call —
-        // without androidx.startup on the classpath it can throw otherwise.
-        try {
-            androidx.work.WorkManager.initialize(
-                this,
-                androidx.work.Configuration.Builder()
-                    .setMinimumLoggingLevel(android.util.Log.INFO).build()
-            )
-        } catch (_: IllegalStateException) { /* already initialised */ }
-        catch (e: Throwable) { com.emux.EmuXLog.e("WorkManager init failed", e) }
-
-        // If the distro isn't installed yet, schedule it for a battery-friendly
-        // window (charging OR idle + network) instead of hammering CPU now.
+        // v0.1.11: WorkManager is touched ONLY through the reflective bridge in
+        // BootstrapScheduling; if androidx.work can't link on this ROM we run the
+        // bootstrap in-process instead of showing "NoClassDefFoundError".
         try {
             if (!com.emux.core.FsLayout.isBootstrapped(this)) {
-                runCatching { scheduleBootstrap(this) }
-                    .onFailure { com.emux.EmuXLog.e("scheduleBootstrap failed", it) }
+                com.emux.core.BootstrapScheduling.scheduleAuto(this)
             }
         } catch (e: Throwable) { com.emux.EmuXLog.e("startup bootstrap scheduling failed", e) }
     }
@@ -71,18 +63,6 @@ class EmuXApplication : Application() {
         }
     }
 
-    private fun scheduleBootstrap(ctx: Context) {
-        val req = OneTimeWorkRequestBuilder<BootstrapWorker>()
-            .setConstraints(
-                Constraints.Builder()
-                    .setRequiredNetworkType(NetworkType.CONNECTED)
-                    .build()
-            )
-            .setInputData(workDataOf("force" to false))
-            .addTag("emux")
-            .build()
-        WorkManager.getInstance(ctx).enqueueUniqueWork(
-            BOOTSTRAP_WORK, ExistingWorkPolicy.KEEP, req
-        )
-    }
+    // v0.1.11: scheduleBootstrap removed — all WorkManager access now goes
+    // through com.emux.core.BootstrapScheduling (reflective, crash-proof).
 }
