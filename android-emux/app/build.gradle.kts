@@ -14,8 +14,8 @@ android {
         applicationId = "com.emux"
         minSdk = 24
         targetSdk = 34
-        versionCode = 5
-        versionName = "0.1.4"
+        versionCode = 6
+        versionName = "0.1.5"
 
         ndk {
             abiFilters += listOf("arm64-v8a", "armeabi-v7a", "x86_64")
@@ -50,6 +50,12 @@ android {
     buildFeatures {
         viewBinding = true
     }
+    testOptions {
+        unitTests {
+            isIncludeAndroidResources = true
+            isReturnDefaultValues = true
+        }
+    }
 }
 
 dependencies {
@@ -71,4 +77,13 @@ dependencies {
 
     // Optional: root helper binary (see docs/ROOT.md). Ships nothing privileged itself.
     // implementation(files("libs/magisk-su-bridge.aar"))
+}
+
+configurations.all {
+    resolutionStrategy.force("org.robolectric:android-all:14-robolectric-10818077")
+}
+
+dependencies {
+    testImplementation("junit:junit:4.13.2")
+    testImplementation("org.robolectric:robolectric:4.12.2")
 }

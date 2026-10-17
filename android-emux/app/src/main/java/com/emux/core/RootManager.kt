@@ -43,12 +43,41 @@ class RootManager(private val ctx: Context) {
         mode
     }
 
-    private fun probeSu(): Boolean = try {
-        val p = ProcessBuilder(suBinary!!, "-c", "id -u")
-            .redirectErrorStream(true).start()
-        val out = BufferedReader(InputStreamReader(p.inputStream)).readLine()
-        p.waitFor() == 0 && out?.trim() == "0"
-    } catch (_: Exception) { false }
+    @Volatile private var suProbeDone = false
+
+    private fun probeSu(): Boolean {
+        // v0.1.5 ANR FIX (verified against the shipped dex): RootManager.detect()
+        // runs in MainActivity.onCreate's coroutine AND in TerminalService.onCreate.
+        // It spawned `su -c id -u` with NO timeout. On devices where an su binary
+        // EXISTS but Magisk/SuperSU is not configured (or shows a first-grant
+        // prompt), the child blocks forever waiting on stdin/supervisor → the UI
+        // thread never gets its frame → Input dispatching timed out → system kills
+        // the app ("EmuX keeps stopping"), identically on every launch. That was
+        // the real Install-button + general crash cause; guarded code paths never
+        // even got a chance to run.
+        if (suProbeDone) return mode != RootMode.NONE && probedOk
+        suProbeDone = true
+        val ok = try {
+            val p = ProcessBuilder(suBinary!!, "-c", "id -u")
+                .redirectErrorStream(true)
+                .redirectInput(ProcessBuilder.Redirect.from(File("/dev/null")))
+                .start()
+            val reader = BufferedReader(InputStreamReader(p.inputStream))
+            // Hard 2.5 s watchdog: destroy() unblocks both readLine() and waitFor().
+            val wd = Thread {
+                try { Thread.sleep(2_500); p.destroy() } catch (_: Exception) {}
+            }.apply { isDaemon = true }
+            wd.start()
+            val out = try { reader.readLine() } catch (_: Exception) { null }
+            val code = try { p.waitFor() } catch (_: Exception) { -1 }
+            wd.interrupt()
+            code == 0 && out?.trim() == "0"
+        } catch (_: Exception) { false }
+        probedOk = ok
+        return ok
+    }
+
+    @Volatile private var probedOk = false
 
     /** Run a command as root. Returns stdout, or null if unavailable/refused. */
     suspend fun su(command: String, timeoutMs: Long = 10_000): String? =

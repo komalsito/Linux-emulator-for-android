@@ -48,15 +48,27 @@ class TerminalService : LifecycleService() {
             // startForegroundService() when the caller is not an active
             // foreground activity (e.g. the termux-api style EmuXExecuteService).
             try {
-                val fgCaller = ctx is android.app.Activity &&
-                    (ctx as android.app.Activity).isFinishing.not() &&
-                    ctx.hasWindowFocus() || ctx is androidx.lifecycle.LifecycleOwner &&
-                    (ctx as? androidx.lifecycle.LifecycleOwner)?.lifecycle
-                        ?.currentState?.isAtLeast(androidx.lifecycle.Lifecycle.State.RESUMED) == true
-                if (fgCaller || android.os.Build.VERSION.SDK_INT < 31) {
-                    ctx.startService(i)
+                // v0.1.5 CRASH FIX (verified by decompiling the shipped dex):
+                // this expression evaluated `A && !isFinishing && B.hasWindowFocus()
+                // || C is LifecycleOwner && …` — Kotlin precedence made it TRUE for
+                // every Service/Application context (they are LifecycleOwners and
+                // their state is >= RESUMED once started). So TerminalService.onCreate
+                // called startForeground() while the app had NO visible window
+                // (bootstrap worker path, relaunch after task-swipe) →
+                // ForegroundServiceDidNotStartInTimeException / RemoteServiceException
+                // killed the process → "EmuX keeps stopping".
+                // Now: only a genuinely resumed Activity may start it as a plain
+                // background service; everyone else uses startForegroundService(),
+                // which legally grants the 5s startForeground() grace period.
+                val act = ctx as? androidx.appcompat.app.AppCompatActivity
+                val activityResumed = act != null && !act.isFinishing &&
+                    act.lifecycle.currentState.isAtLeast(androidx.lifecycle.Lifecycle.State.RESUMED)
+                if (activityResumed || android.os.Build.VERSION.SDK_INT < 26) {
+                    runCatching { ctx.startService(i) }
+                        .onFailure { runCatching { ctx.startForegroundService(i) } }
                 } else {
-                    ctx.startForegroundService(i)
+                    runCatching { ctx.startForegroundService(i) }
+                        .onFailure { com.emux.EmuXLog.e("startForegroundService refused", it) }
                 }
             } catch (_: Exception) {
                 // Last-resort: never let session startup kill the process.
