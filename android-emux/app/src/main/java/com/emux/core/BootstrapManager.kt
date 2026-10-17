@@ -183,19 +183,46 @@ class BootstrapManager(private val ctx: Context) {
         } catch (e: Throwable) {
             // v0.1.8: surface the real reason to the observing UI through the
             // WorkManager progress data too (the Flow path only works in-process).
+            // v0.1.10: use BootstrapDiagnostics so linkage errors show WHICH class
+            // is missing instead of a bare "NoClassDefFoundError".
+            com.emux.core.BootstrapDiagnostics.dumpFull(ctx, e)
             BootstrapReporter.publishError(
-                ctx, buildString {
-                    append(e.message ?: e.javaClass.simpleName)
-                    (e.cause?.message)?.let { append(" — ").append(it) }
-                })
+                ctx, com.emux.core.BootstrapDiagnostics.describe(e))
             emit(Result.failure(e))
         }
     }
 
     suspend fun bootstrap(): Result<Unit> = withContext(Dispatchers.IO) {
+        // v0.1.10 CRITICAL FIX (found by decompiling the SHIPPED v0.1.9 dex):
+        // BootstrapWorker calls mgr.bootstrap() WITHOUT passing a Context, so
+        // `this` inside this lambda resolved to the LAMBDA RECEIVER — which is
+        // not a Context — and Kotlin emitted an UNBOUND THIS REFERENCE to
+        // android/content/Context in classes.dex. On devices where that class
+        // fails late resolution (some OEM ROMs / direct-boot), the worker died
+        // with NoClassDefFoundError the moment Install was tapped — exactly the
+        // reported symptom. Every reference now goes through the explicit
+        // `ctx` property; no implicit receiver use remains here.
+        val appCtx = this@BootstrapManager.ctx
         var last: Result<Unit> = Result.failure(Exception("not started"))
-        bootstrapFlow().collect { last = it }
-        last
+        try {
+            var sawProgress = false
+            bootstrapFlow().collect { r ->
+                // Progress emissions are encoded as Result.failure(BootstrapProgress);
+                // they must never overwrite the real result, otherwise a *successful*
+                // run still returned failure(the-last-progress-step), the worker
+                // retried forever, and the UI printed "Bootstrap failed" over success.
+                val c = r.exceptionOrNull()
+                if (c is BootstrapProgress) { sawProgress = true; return@collect }
+                last = r
+            }
+            if (last.isFailure && sawProgress && FsLayout.isBootstrapped(appCtx)) {
+                Result.success(Unit)   // completed but final emission raced a progress frame
+            } else last
+        } catch (e: Throwable) {
+            com.emux.core.BootstrapDiagnostics.dumpFull(appCtx, e)
+            com.emux.EmuXLog.e("bootstrap() escape (guarded)", e)
+            Result.failure(e)
+        }
     }
 
     private fun downloadTo(url: URL, out: File, onPct: (Int) -> Unit) {

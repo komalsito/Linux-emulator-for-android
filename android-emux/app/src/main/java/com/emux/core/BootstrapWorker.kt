@@ -23,10 +23,14 @@ class BootstrapWorker(appCtx: Context, params: WorkerParameters) :
         val r = mgr.bootstrap()
         if (r.isSuccess) Result.success() else Result.retry()
     } catch (e: Throwable) {
+        // v0.1.10: the UI previously showed only "NoClassDefFoundError" because
+        // we printed the wrapper's simpleName. Report the FULL cause chain with
+        // the linkage detail ("Failed resolution of: L…;") and dump the complete
+        // trace to files/log/bootstrap-error.log for remote diagnosis.
+        com.emux.core.BootstrapDiagnostics.dumpFull(applicationContext, e)
         runCatching {
             com.emux.core.BootstrapReporter.publishError(
-                applicationContext,
-                "${e.javaClass.simpleName}: ${e.message ?: "no message"}")
+                applicationContext, com.emux.core.BootstrapDiagnostics.describe(e))
         }
         com.emux.EmuXLog.e("BootstrapWorker caught (was an app-killing escape)", e)
         Result.retry()

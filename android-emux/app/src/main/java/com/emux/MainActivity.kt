@@ -287,16 +287,48 @@ class MainActivity : AppCompatActivity() {
         // reported bootstrap again. Now the UI ONLY observes the WorkManager job's
         // progress; the work itself survives process death and can never crash
         // the app because no bootstrap code runs on the main thread at all.
-        val req = androidx.work.OneTimeWorkRequestBuilder<com.emux.core.BootstrapWorker>()
-            .setConstraints(
-                androidx.work.Constraints.Builder()
-                    .setRequiredNetworkType(androidx.work.NetworkType.CONNECTED).build())
-            .build()
-        runCatching {
+        // v0.1.10: also add backoffCriteria so a permanently-failing mirror can't
+        // hammer retries, and NEVER fall through silently — if enqueue throws
+        // (e.g. NoClassDefFoundError linking androidx.work on a broken ROM), run
+        // the bootstrap IN-PROCESS right here instead of leaving the user stuck.
+        val enqueued = runCatching {
+            val req = androidx.work.OneTimeWorkRequestBuilder<com.emux.core.BootstrapWorker>()
+                .setConstraints(
+                    androidx.work.Constraints.Builder()
+                        .setRequiredNetworkType(androidx.work.NetworkType.CONNECTED).build())
+                .setBackoffCriteria(
+                    androidx.work.BackoffPolicy.EXPONENTIAL, 30L, java.util.concurrent.TimeUnit.SECONDS)
+                .build()
             androidx.work.WorkManager.getInstance(this)
                 .enqueueUniqueWork("emux-bootstrap-now", androidx.work.ExistingWorkPolicy.REPLACE, req)
-        }.onFailure { com.emux.EmuXLog.e("worker enqueue failed", it) }
+        }.also { r -> r.exceptionOrNull()?.let { com.emux.EmuXLog.e("worker enqueue failed", it) } }
+            .isSuccess
+        if (!enqueued) startInProcessFallback()
         if (showUi) watchBootstrapProgress()
+    }
+
+    /** Last-resort path when WorkManager itself can't load/run on this device. */
+    private fun startInProcessFallback() {
+        lifecycleScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+            val mgr = com.emux.core.BootstrapManager(applicationContext)
+            val r = runCatching { mgr.bootstrap() }
+            kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) {
+                b.bootstrapBar.isIndeterminate = false
+                if (r.getOrNull()?.isSuccess == true) {
+                    ensureSessionAttached()
+                    b.bootstrapBar.visibility = android.view.View.GONE
+                    b.bootstrapLabel.visibility = android.view.View.GONE
+                    b.btnInstall.visibility = android.view.View.GONE
+                } else {
+                    b.bootstrapLabel.text = getString(
+                        R.string.bootstrap_failed_reason,
+                        com.emux.core.BootstrapDiagnostics.describe(
+                            r.exceptionOrNull() ?: RuntimeException("in-process fallback failed")))
+                    b.bootstrapBar.visibility = android.view.View.GONE
+                    b.btnInstall.visibility = android.view.View.VISIBLE
+                }
+            }
+        }
     }
 
     /** Observe the BootstrapWorker's progress; render bar + real errors. */
@@ -364,15 +396,10 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun ensureWorkManager() {
-        try {
-            androidx.work.WorkManager.initialize(
-                applicationContext,
-                androidx.work.Configuration.Builder()
-                    .setMinimumLoggingLevel(android.util.Log.INFO)
-                    .build()
-            )
-        } catch (_: IllegalStateException) { /* already initialised — fine */ }
-        catch (e: Throwable) { com.emux.EmuXLog.e("WorkManager init failed", e) }
+        // v0.1.10: route through EmuXBootstrapApp so the availability flag is set;
+        // MainActivity uses this to decide whether WorkManager observation is even
+        // possible on this device (some OEM ROMs fail androidx.work linkage).
+        com.emux.core.EmuXBootstrapApp.workManagerAvailable(application)
     }
 
     // ------------------------------------------------------- permissions glue

@@ -44,6 +44,24 @@
         android:theme="@style/EmuX"
         tools:targetApi="34">
 
+        <!-- v0.1.10: disable WorkManager's androidx.startup auto-initialization.
+             Root cause of "bootstrap failed: NoClassDefFoundError": on some OEM ROMs
+             the WorkManagerInitializer ContentProvider init races/fails and every
+             later WorkManager call dies with a class-linkage error. EmuX now
+             initializes WorkManager explicitly (EmuXBootstrapApp) before first use,
+             and falls back to an in-process runner if even that fails.
+             NOTE: <provider> must live INSIDE <application>, not at manifest level. -->
+        <provider
+            android:name="androidx.startup.InitializationProvider"
+            android:authorities="${applicationId}.androidx-startup"
+            android:exported="false"
+            tools:node="merge">
+            <meta-data
+                android:name="androidx.work.WorkManagerInitializer"
+                android:value="androidx.startup"
+                tools:node="remove" />
+        </provider>
+
         <activity
             android:name=".MainActivity"
             android:exported="true"
