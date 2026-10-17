@@ -10,6 +10,10 @@
     <uses-permission android:name="android.permission.WAKE_LOCK" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+    <!-- TerminalService falls back to dataSync type on OEM ROMs that reject
+         SPECIAL_USE (some Samsung/Xiaomi builds throw SecurityException there,
+         which crash-loops the whole app). Both permissions must be declared. -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
     <!-- Storage access for mounting user files into the env (scoped; no MANAGE_EXTERNAL_STORAGE) -->
