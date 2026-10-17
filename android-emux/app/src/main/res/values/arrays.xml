@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string-array name="wm_entries">
+        <item>Openbox (lightweight)</item>
+        <item>Xfce4 session</item>
+        <item>LXDE session</item>
+        <item>i3 (tiling)</item>
+    </string-array>
+    <string-array name="wm_values">
+        <item>openbox</item>
+        <item>startxfce4</item>
+        <item>startlxde</item>
+        <item>i3</item>
+    </string-array>
+</resources>

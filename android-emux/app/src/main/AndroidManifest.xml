@@ -1,0 +1,104 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+
+    <!-- Network: apt/pip/npm inside the Linux env, X11 over loopback TCP -->
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+
+    <!-- Keep the session alive while foregrounded (same model as Termux) -->
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+    <!-- TerminalService falls back to dataSync type on OEM ROMs that reject
+         SPECIAL_USE (some Samsung/Xiaomi builds throw SecurityException there,
+         which crash-loops the whole app). Both permissions must be declared. -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
+    <!-- Storage access for mounting user files into the env (scoped; no MANAGE_EXTERNAL_STORAGE) -->
+    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE"
+        android:maxSdkVersion="32" />
+
+    <!-- Optional hardware passthrough for the X11 desktop -->
+    <uses-feature android:name="android.hardware.touchscreen" android:required="false" />
+    <uses-feature android:name="android.hardware.usb.host" android:required="false" />
+
+    <!-- Root capability is NOT a manifest permission: we detect su/Magisk at runtime
+         and use it only as an opt-in accelerator (cgroup tuning). See docs/ROOT.md -->
+
+    <queries>
+        <!-- Detect Magisk / SuperSU if installed, so root mode can be offered -->
+        <package android:name="com.topjohnwu.magisk" />
+        <package android:name="eu.chainfire.supersu" />
+    </queries>
+
+    <application
+        android:name=".EmuXApplication"
+        android:allowBackup="true"
+        android:icon="@mipmap/ic_launcher"
+        android:label="@string/app_name"
+        android:supportsRtl="true"
+        android:largeHeap="false"
+        android:hardwareAccelerated="true"
+        android:theme="@style/EmuX"
+        tools:targetApi="34">
+
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:launchMode="singleTask"
+            android:theme="@style/EmuX"
+            android:configChanges="orientation|screenSize|keyboardHidden|keyboard|screenLayout|smallestScreenSize|density|uiMode"
+            android:windowSoftInputMode="adjustResize">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <!-- v0.1.6 CRASH FIX: this entry had NO android:theme, so AppCompat's
+             onApplyThemeResource() received themeResId==0 and threw
+             "You need to use a Theme.AppCompat theme…" the moment Settings was
+             opened on a real device. Robolectric masks this bug; phones don't. -->
+        <activity
+            android:name=".SettingsActivity"
+            android:exported="false"
+            android:theme="@style/EmuX.Prefs" />
+
+        <!-- The single process that hosts PTY sessions — mirrors Termux's design -->
+        <service
+            android:name=".terminal.TerminalService"
+            android:exported="false"
+            android:foregroundServiceType="specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="Interactive Linux shell &amp; X11 desktop sessions kept alive while app is backgrounded" />
+        </service>
+
+        <!-- termux-api style intents other apps can use to run commands in our env -->
+        <service
+            android:name=".api.EmuXExecuteService"
+            android:exported="true"
+            android:permission="com.emux.RUN_COMMAND">
+            <intent-filter>
+                <action android:name="com.emux.RUN_COMMAND" />
+            </intent-filter>
+        </service>
+
+        <!-- USB devices passthrough for the desktop (opt-in via intent filter discovery) -->
+        <activity
+            android:name=".x11.UsbCaptureActivity"
+            android:exported="true"
+            android:launchMode="singleTop"
+            android:excludeFromRecents="true"
+            android:theme="@style/EmuX.Translucent">
+            <intent-filter>
+                <action android:name="android.hardware.usb.action.USB_DEVICE_ATTACHED" />
+            </intent-filter>
+            <meta-data
+                android:name="android.hardware.usb.action.USB_DEVICE_ATTACHED"
+                android:resource="@xml/usb_device_filter" />
+        </activity>
+    </application>
+</manifest>

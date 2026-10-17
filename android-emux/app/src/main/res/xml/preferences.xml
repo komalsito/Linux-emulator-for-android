@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="utf-8"?>
+<PreferenceScreen xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto">
+
+    <ListPreference
+        app:key="wm"
+        app:title="@string/pref_wm_title"
+        app:entries="@array/wm_entries"
+        app:entryValues="@array/wm_values"
+        app:defaultValue="openbox"
+        app:useSimpleSummaryProvider="true" />
+
+    <SwitchPreferenceCompat
+        app:key="root_accel"
+        app:title="@string/pref_root_mode_title"
+        app:summary="@string/pref_root_mode_summary"
+        app:defaultValue="true" />
+
+    <SwitchPreferenceCompat
+        app:key="keepawake_burst"
+        app:title="@string/pref_keepawake_title"
+        app:summary="@string/pref_keepawake_summary"
+        app:defaultValue="true" />
+
+    <EditTextPreference
+        app:key="mirror"
+        app:title="@string/pref_distro_title"
+        app:defaultValue="https://dlcdn.alpinelinux.org/alpine/v" />
+</PreferenceScreen>

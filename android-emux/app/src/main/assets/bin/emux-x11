@@ -1,0 +1,19 @@
+#!/bin/sh
+# emux-x11 WM — start Xvfb (or real Xorg under root) + window manager inside distro.
+WM="${1:-openbox}"
+RES="${EMUX_X_RES:-720x1280x24}"
+export HOME="${HOME:-/root}"
+if [ "$(id -u)" = "0" ] && [ -x /usr/bin/Xorg ]; then
+  Xorg :0 -config /etc/X11/emux-xorg.conf &
+else
+  [ -x /usr/bin/Xvfb ] || apk add --no-cache xorg-server-xvfb openbox xterm
+  Xvfb :0 -screen 0 "$RES" -nolisten tcp -auth /tmp/xauth >/tmp/xvfb.log 2>&1 &
+fi
+XPID=$!
+# wait for socket, max 15s
+i=0; while [ ! -e /tmp/.X11-unix/X0 ] && [ $i -lt 150 ]; do sleep 0.1; i=$((i+1)); done
+export DISPLAY=:0
+# enable TCP for the Android-side X11 client (loopback only)
+[ -x /usr/bin/xhost ] && xhost +local: >/dev/null 2>&1
+"$WM" 2>/tmp/wm.log &
+wait $XPID
