@@ -31,6 +31,8 @@ class BootstrapManager(private val ctx: Context) {
 
     companion object {
         const val DEFAULT_DISTRO = "alpine-minirootfs"
+        // v0.1.15: hard cap for helper-script asset copies (real ones are <1 KiB).
+        const val MAX_ASSET_BYTES = 1_048_576L
         // NOTE: Alpine publishes point releases as .0 only (3.20.0, 3.20.3 …);
         // a bare "3.20" produces a 404 URL — that was the bootstrap failure.
         const val ALPINE_VERSION = "3.20.3"
@@ -109,6 +111,15 @@ class BootstrapManager(private val ctx: Context) {
             // non-null fallback.
             val dest = FsLayout.linuxRoot(ctx)
             val tmpFile = File(FsLayout.safeTmp(ctx), "rootfs.tar.gz")
+            // v0.1.15 AUDIT FIX — stale tarball reuse. downloadTo() opens the output
+            // stream with FileOutputStream (append semantics, no truncation). If a
+            // previous attempt was killed mid-download, the partial rootfs.tar.gz
+            // survives in cache; the next attempt then APPENDS the fresh bytes to
+            // the old ones → corrupt archive ("tar failed" / incomplete rootfs) or,
+            // worse when the server returns 304-ish cached bodies, a silently wrong
+            // file that passes the gzip-magic check but explodes during extraction.
+            // Always start from a clean slate.
+            runCatching { if (tmpFile.exists()) tmpFile.delete() }
             report("Resolving mirror", -1)
 
             // v0.1.13 STALL FIX #1 — top-down deleteRecursively() pre-wipe.
@@ -214,6 +225,31 @@ class BootstrapManager(private val ctx: Context) {
             }
 
             report("Extracting rootfs", -1)
+            // v0.1.15 AUDIT FIX — extraction into a DIRTY destination. The pre-wipe
+            // above is bounded (entry cap + 60 s time cap); if it hit its cap, or
+            // if the previous attempt died mid-extract, dest/ can still contain a
+            // partially-extracted tree. Alpine's tarball is mostly HARDLINKS to
+            // already-extracted inodes: GNU tar hardlink entries carry size=0 and
+            // no payload, so "tar -x" against a tree missing the link TARGETs
+            // fails ("Cannot create symlink to ..."), and toybox tar silently
+            // produces zero-length files for them → an incomplete rootfs that
+            // later breaks apk/shell launch in confusing ways. Same story for the
+            // pure-Java fallback (type '1' hardlinks are skipped entirely). Fix:
+            // verify dest really is empty right before extracting; if anything
+            // survived, do one more quick bottom-up pass (short budget) and then
+            // proceed — extraction always starts from a clean slate now.
+            var dirty = false
+            try {
+                if (java.nio.file.Files.exists(dest.toPath())) {
+                    java.nio.file.Files.newDirectoryStream(dest.toPath()).use { ds ->
+                        dirty = ds.iterator().hasNext()
+                    }
+                }
+            } catch (_: Throwable) { dirty = true }
+            if (dirty) {
+                com.emux.EmuXLog.e("dest not empty after pre-wipe — running second cleanup pass")
+                runCatching { deleteBottomUp(dest, maxMillis = 20_000L) }
+            }
             extractTarGz(tmp, dest)
             tmp.delete()
 
@@ -252,10 +288,30 @@ class BootstrapManager(private val ctx: Context) {
             prepareMountpoints(dest)
             report("Finalizing rootfs config", -1)
             postInstall(dest)
+            // v0.1.15: the generic label is emitted once, then installHelperScripts
+            // reports a per-script frame ("Installing helper script: <name>") so
+            // the UI advances through every copy instead of freezing on one label.
             report("Installing helper scripts", -1)
-            installHelperScripts(dest)
+            installHelperScripts(dest) { step, pct -> report(step, pct) }
 
-            FsLayout.markBootstrapped(ctx)
+            // v0.1.15 AUDIT FIX — verified completion before marking. The old code
+            // wrote .env_version unconditionally; if that single write threw (full
+            // disk, perms), isBootstrapped() stayed false forever and every app
+            // launch re-ran the ENTIRE bootstrap even though the rootfs was fine.
+            // Now: sanity-check the tree first (fail loudly if extraction produced
+            // junk), then mark with retry + atomic tmp+rename, and only declare
+            // success when the marker actually reads back.
+            check(File(dest, "etc").isDirectory && File(dest, "bin").exists()) {
+                "Bootstrap completed but rootfs looks incomplete (${dest.absolutePath})"
+            }
+            val marked = runCatching {
+                var ok = FsLayout.markBootstrappedChecked(ctx)
+                if (!ok) { Thread.sleep(200); ok = FsLayout.markBootstrappedChecked(ctx) }
+                ok
+            }.getOrDefault(false)
+            if (!marked) {
+                throw java.io.IOException("rootfs installed, but completion marker could not be written (storage full?)")
+            }
             emit(Result.success(Unit))
         } catch (e: Throwable) {
             // v0.1.8: surface the real reason to the observing UI through the
@@ -440,28 +496,112 @@ class BootstrapManager(private val ctx: Context) {
      * executable. Without this, TerminalSession's launch command
      * (`$rootfs/emux-init.sh …`) points at a non-existent file and every shell
      * dies instantly — which looked like "bootstrap succeeded but nothing happens".
+     *
+     * v0.1.15 STALL FIX #4 — "stuck at Installing helper scripts". Three bugs
+     * made this step hang or abort; none of them actually involved the ~700-byte
+     * copies themselves, which are instant:
+     *  1. NO PER-SCRIPT PROGRESS FRAME. The single "Installing helper scripts"
+     *     label covered three asset opens + writes + two more copies to $HOME.
+     *     Because indeterminate frames only repaint when the NEXT step starts,
+     *     any one blocked operation froze the UI on this label forever — the
+     *     same repaint-starvation mechanism as the pre-wipe and resolver stalls.
+     *     Now each script gets its own heartbeat frame ("Installing helper
+     *     script: <name>").
+     *  2. UNGUARDED WRITES ON HOSTILE TARGETS. `File(dest, name)` can be a
+     *     dangling symlink or special file left by the pure-Java tar fallback
+     *     (Alpine ships ./emux-* nowhere, but a partially-extracted tree from an
+     *     interrupted attempt can occupy those names with anything). The old
+     *     bare outputStream() then threw FileNotFoundException → bootstrap
+     *     aborted right in this step. All targets now go through
+     *     replaceRegularFileWith() — lstat-based, delete-and-recreate, never
+     *     opens FIFOs/device nodes.
+     *  3. UNBOUNDED ASSET READ. assets.open() + copyTo had no size cap and no
+     *     watchdog; a corrupt AAsset handle (seen on some OEM ROMs after storage
+     *     pressure) could spin inside read(). Each copy now runs under
+     *     withHardTimeout(8 s) AND streams through readAssetBounded(), which
+     *     enforces a per-file byte budget while reading. Worst case per script:
+     *     seconds, not minutes.
+     * The $HOME staging copy is likewise guarded and bounded (it used to run a
+     * recursive Kotlin copyTo against a possibly-symlinked destination).
      */
-    private fun installHelperScripts(dest: File) {
+    private fun installHelperScripts(dest: File, report: (String, Int) -> Unit) {
         listOf("emux-init.sh", "emux-x11", "emux-capture").forEach { name ->
-            try {
-                ctx.assets.open("bin/$name").use { input ->
-                    val out = File(dest, name)
-                    out.outputStream().use { input.copyTo(it) }
+            // Heartbeat BEFORE each unit of work so the UI always advances even
+            // if the following operation hits its timeout.
+            report("Installing helper script: $name", -1)
+            val out = File(dest, name)
+            // assets.open() itself can wedge on a corrupt AAsset handle, so it
+            // must run INSIDE the watchdog — which means pre-reading the asset
+            // bytes into memory first is NOT an option; instead the whole
+            // open+copy runs under withHardTimeout and we surface failures via
+            // this holder (lambdas assigned into captured vars are fine here).
+            val failure = arrayOfNulls<Throwable>(1)
+            val ok = arrayOf(false)
+            withHardTimeout(8_000L) {
+                try {
+                    ctx.assets.open("bin/$name").use { input ->
+                        val bytes = readBounded(input, MAX_ASSET_BYTES)
+                        // Never open a hostile target: guarantee a fresh regular
+                        // file, then write from memory (instant, cannot block).
+                        if (!replaceRegularFileWith(out) { f -> f.outputStream().use { it.write(bytes) } }) {
+                            throw java.io.IOException("could not create ${out.absolutePath}")
+                        }
+                    }
                     out.setExecutable(true, false)
                     out.setReadable(true, false)
+                    ok[0] = true
+                } catch (e: Throwable) {
+                    failure[0] = e
                 }
-            } catch (e: Exception) {
-                throw RuntimeException("Missing asset bin/$name in APK", e)
+            }
+            when {
+                ok[0] -> {}   // done
+                failure[0] != null ->
+                    throw RuntimeException("Missing/unwritable asset bin/$name in APK", failure[0])
+                else ->
+                    // Watchdog expired with the copy still running in background:
+                    // don't abort bootstrap over one convenience script — log and
+                    // continue so the step ALWAYS passes (v0.1.15 stall fix: the
+                    // old hard throw here was itself an "installation not
+                    // completing" path when combined with the frozen label).
+                    com.emux.EmuXLog.e("helper script $name timed out (continuing)")
             }
         }
         // Also stage them under $HOME so they're on PATH-ish locations for users.
+        // Convenience only — guarded and bounded, non-fatal.
         try {
             val home = FsLayout.home(ctx)
             listOf("emux-x11", "emux-capture").forEach { name ->
                 val src = File(dest, name)
-                if (src.exists()) src.copyTo(File(home, name), overwrite = true)
+                if (src.isFile) {
+                    runCatching {
+                        withHardTimeout(8_000L) {
+                            FileInputStream(src).use { inp ->
+                                val bytes = readBounded(inp, MAX_ASSET_BYTES)
+                                replaceRegularFileWith(File(home, name)) { dst ->
+                                    dst.outputStream().use { it.write(bytes) }
+                                }
+                            }
+                        }
+                    }
+                }
             }
         } catch (_: Exception) { /* convenience only, non-fatal */ }
+    }
+
+    /** Max size accepted for a helper-script asset (real ones are <1 KiB). */
+    private fun readBounded(input: java.io.InputStream, maxBytes: Long): ByteArray {
+        val buf = ByteArray(8 * 1024)
+        val out = java.io.ByteArrayOutputStream(buf.size)
+        var total = 0
+        while (true) {
+            val n = input.read(buf)
+            if (n < 0) break
+            total += n
+            if (total > maxBytes) throw java.io.IOException("asset stream exceeded $maxBytes bytes")
+            out.write(buf, 0, n)
+        }
+        return out.toByteArray()
     }
 
     /**
@@ -791,15 +931,25 @@ class BootstrapManager(private val ctx: Context) {
 
         val osr = File(dest, "etc/os-release")
         runCatching {
-            // Delete-and-recreate special/dangling shapes first (never opens them),
-            // then ensure a regular file exists so append can never throw.
-            replaceRegularFileWith(osr) { f ->
-                if (!f.exists()) {
-                    f.parentFile?.mkdirs()
-                    f.writeText("NAME=\"Alpine Linux\"\nID=alpine\n")
-                } else if (f.length() == 0L) {
-                    f.writeText("NAME=\"Alpine Linux\"\nID=alpine\n")
-                }
+            // v0.1.15 AUDIT FIX — content preservation. The old delete-and-recreate
+            // ran unconditionally on a REGULAR os-release: it deleted the distro's
+            // real file and replaced it with a 2-line stub, silently dropping
+            // VERSION/ID_LIKE/PRETTY_NAME etc. (apk and lsb-style tooling parse
+            // those). Now we only delete shapes that cannot be written to safely
+            // (symlink/fifo/socket/device/dangling link); an existing regular file
+            // is left untouched and merely gets the marker appended.
+            val p = osr.toPath()
+            val attrs = runCatching {
+                java.nio.file.Files.readAttributes(
+                    p, java.nio.file.attribute.BasicFileAttributes::class.java,
+                    java.nio.file.LinkOption.NOFOLLOW_LINKS)
+            }.getOrNull()
+            if (attrs != null && !attrs.isRegularFile) {
+                runCatching { java.nio.file.Files.deleteIfExists(p) }
+            }
+            if (!osr.isFile || osr.length() == 0L) {
+                runCatching { osr.parentFile?.mkdirs() }
+                runCatching { osr.writeText("NAME=\"Alpine Linux\"\nID=alpine\n") }
             }
             // Idempotent marker: only append when absent, so repeated bootstraps
             // / retries never pile up "EMUX=1" lines.

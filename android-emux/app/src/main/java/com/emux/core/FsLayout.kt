@@ -52,7 +52,32 @@ object FsLayout {
     } catch (_: Throwable) { false }
 
     fun markBootstrapped(ctx: Context) {
-        prefixFile(ctx).writeText(ENV_VERSION.toString())
+        // v0.1.15: atomic write (tmp + rename). A killed mid-write used to leave a
+        // truncated/empty .env_version → isBootstrapped() false → full re-download
+        // on every launch even though the rootfs was perfectly fine.
+        runCatching {
+            val p = prefixFile(ctx)
+            val tmp = File(p.parentFile, ".env_version.tmp")
+            tmp.writeText(ENV_VERSION.toString())
+            if (!tmp.renameTo(p)) {
+                p.delete(); tmp.renameTo(p)
+            }
+        }
+    }
+
+    /**
+     * v0.1.15: like [markBootstrapped] but verifies the marker actually reads back
+     * before returning true — BootstrapManager refuses to report success when the
+     * completion state cannot be persisted (otherwise the next launch silently
+     * starts the whole download again and users see "installation never finishes").
+     */
+    fun markBootstrappedChecked(ctx: Context): Boolean {
+        markBootstrapped(ctx)
+        return try {
+            prefixFile(ctx).exists() &&
+                prefixFile(ctx).readText().trim() == ENV_VERSION.toString() &&
+                File(linuxRoot(ctx), "etc").isDirectory
+        } catch (_: Throwable) { false }
     }
 
     /** Build the environment map injected into every session (POSIX-ish, minimal). */

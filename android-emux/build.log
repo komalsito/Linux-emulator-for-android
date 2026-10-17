@@ -56,3 +56,9 @@ Sat Oct 17 23:35:08 UTC 2026
 
 BUILD SUCCESSFUL in 1m 11s
 38 actionable tasks: 11 executed, 27 up-to-date
+
+=== v0.1.15 build (helper-scripts stall fix + download audit) ===
+gradle --no-daemon assembleDebug -> BUILD SUCCESSFUL in 1m14s (38 tasks, 0 errors)
+versionCode 15 / versionName 0.1.15; aapt2 badging OK; apksigner verify OK
+Dex check (classes3.dex): per-script heartbeat labels, second-cleanup-pass log,
+markBootstrappedChecked, rootfs-completeness check, bounded asset read — all present.
