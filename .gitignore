@@ -1,6 +1,5 @@
 build/
 .gradle/
-*.dex
-*.class
 *.apk
-*.ap_
+*.dex
+kotlin-classes/
