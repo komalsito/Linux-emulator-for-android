@@ -19,48 +19,33 @@ Daemon will be stopped at the end of the build
 > Task :app:processDebugManifest UP-TO-DATE
 > Task :app:processDebugManifestForPackage UP-TO-DATE
 > Task :app:processDebugResources UP-TO-DATE
+> Task :app:compileDebugKotlin UP-TO-DATE
 > Task :app:javaPreCompileDebug UP-TO-DATE
+> Task :app:compileDebugJavaWithJavac
 > Task :app:mergeDebugShaders UP-TO-DATE
 > Task :app:compileDebugShaders NO-SOURCE
 > Task :app:generateDebugAssets UP-TO-DATE
 > Task :app:mergeDebugAssets UP-TO-DATE
 > Task :app:compressDebugAssets UP-TO-DATE
 > Task :app:desugarDebugFileDependencies UP-TO-DATE
+> Task :app:dexBuilderDebug
+> Task :app:mergeDebugGlobalSynthetics
+> Task :app:processDebugJavaRes
+> Task :app:mergeDebugJavaResource UP-TO-DATE
 > Task :app:checkDebugDuplicateClasses UP-TO-DATE
 > Task :app:mergeDebugStartupProfile UP-TO-DATE
-> Task :app:mergeExtDexDebug UP-TO-DATE
-> Task :app:mergeLibDexDebug UP-TO-DATE
-> Task :app:mergeDebugJniLibFolders UP-TO-DATE
+> Task :app:mergeLibDexDebug
+> Task :app:mergeProjectDexDebug
+> Task :app:mergeDebugJniLibFolders
+> Task :app:mergeExtDexDebug
 > Task :app:mergeDebugNativeLibs NO-SOURCE
 > Task :app:stripDebugDebugSymbols NO-SOURCE
-> Task :app:validateSigningDebug UP-TO-DATE
+> Task :app:validateSigningDebug
 > Task :app:writeDebugAppMetadata UP-TO-DATE
 > Task :app:writeDebugSigningConfigVersions UP-TO-DATE
-
-> Task :app:compileDebugKotlin
-w: file:///workspace/android-emux/app/src/main/java/com/emux/api/EmuXExecuteService.kt:3:20 'IntentService' is deprecated. Deprecated in Java
-w: file:///workspace/android-emux/app/src/main/java/com/emux/api/EmuXExecuteService.kt:13:28 'constructor IntentService(String!)' is deprecated. Deprecated in Java
-w: file:///workspace/android-emux/app/src/main/java/com/emux/api/EmuXExecuteService.kt:13:28 'IntentService' is deprecated. Deprecated in Java
-w: file:///workspace/android-emux/app/src/main/java/com/emux/core/BootstrapManager.kt:221:28 Parameter 'ni' is never used, could be renamed to _
-w: file:///workspace/android-emux/app/src/main/java/com/emux/terminal/ExtraKeysView.kt:65:37 Parameter 'tv' is never used
-w: file:///workspace/android-emux/app/src/main/java/com/emux/terminal/TerminalSession.kt:88:21 Variable 'code' is never used
-w: file:///workspace/android-emux/app/src/main/java/com/emux/terminal/TerminalSession.kt:142:16 Parameter 'cols' is never used
-w: file:///workspace/android-emux/app/src/main/java/com/emux/terminal/TerminalSession.kt:142:27 Parameter 'rows' is never used
-w: file:///workspace/android-emux/app/src/main/java/com/emux/terminal/VtTerminalView.kt:289:46 Parameter 'y1' is never used
-w: file:///workspace/android-emux/app/src/main/java/com/emux/terminal/VtTerminalView.kt:419:13 Variable 'fm' is never used
-w: file:///workspace/android-emux/app/src/main/java/com/emux/terminal/VtTerminalView.kt:477:9 'invalidate(Int, Int, Int, Int): Unit' is deprecated. Deprecated in Java
-w: file:///workspace/android-emux/app/src/main/java/com/emux/x11/DesktopView.kt:89:15 Elvis operator (?:) always returns the left operand of non-nullable type ScaleGestureDetector
-w: file:///workspace/android-emux/app/src/main/java/com/emux/x11/X11Client.kt:146:13 Variable 'release' is never used
-
-> Task :app:compileDebugJavaWithJavac
-> Task :app:dexBuilderDebug
-> Task :app:mergeDebugGlobalSynthetics UP-TO-DATE
-> Task :app:processDebugJavaRes UP-TO-DATE
-> Task :app:mergeDebugJavaResource UP-TO-DATE
-> Task :app:mergeProjectDexDebug
 > Task :app:packageDebug
-> Task :app:createDebugApkListingFileRedirect
+> Task :app:createDebugApkListingFileRedirect UP-TO-DATE
 > Task :app:assembleDebug
 
-BUILD SUCCESSFUL in 1m 11s
-38 actionable tasks: 7 executed, 31 up-to-date
+BUILD SUCCESSFUL in 1m 12s
+38 actionable tasks: 11 executed, 27 up-to-date
