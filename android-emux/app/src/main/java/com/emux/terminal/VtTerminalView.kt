@@ -78,8 +78,9 @@ class VtTerminalView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attr
         return stylePool.size - 1
     }
 
-    // damage tracking
-    private val dirtyRows = booleanArrayOfNull(rows)
+    // damage tracking — MUST be resized together with [screen] in resize();
+    // a stale fixed-size array caused ArrayIndexOutOfBounds / OOM churn (v0.1.5 bugfix)
+    private var dirtyRows = BooleanArray(rows) { true }
     private var allDirty = true
 
     // ------------------------------------------------------------------ paint
@@ -100,7 +101,6 @@ class VtTerminalView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attr
     private fun buildScreen(r: Int, c: Int): Array<Row> =
         Array(r) { Row(IntArray(c) { 0x20 }, ByteArray(c)) }
 
-    private fun booleanArrayOfNull(n: Int) = BooleanArray(n) { true }
 
     override fun onSizeChanged(w: Int, h: Int, ow: Int, oh: Int) {
         super.onSizeChanged(w, h, ow, oh)
@@ -108,8 +108,14 @@ class VtTerminalView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attr
         val fm = textPaint.fontMetrics
         cellH = ceil(fm.descent - fm.ascent)
         baseline = -fm.ascent
-        val newCols = max(20, (w / cellW).toInt())
-        val newRows = max(8, (h / cellH).toInt())
+        // GUARD (v0.1.5 crash fix): Robolectric/edge layouts can hand us a huge
+        // or degenerate size while cellW/cellH are still ~0 → (w / cellW).toInt()
+        // overflows to a negative/huge number and buildScreen() dies with
+        // OutOfMemoryError "Requested array size exceeds VM limit". Same guard
+        // protects real devices from pathological multi-window sizes.
+        if (cellW < 1f || cellH < 1f || w <= 0 || h <= 0) { scheduleBlink(); return }
+        val newCols = (w / cellW).toInt().coerceIn(20, 400)
+        val newRows = (h / cellH).toInt().coerceIn(8, 500)
         if (newCols != cols || newRows != rows) resize(newRows, newCols)
         scheduleBlink()
     }
@@ -124,6 +130,7 @@ class VtTerminalView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attr
             System.arraycopy(orow.styles, 0, nrow.styles, 0, n)
         }
         screen = ns; rows = newRows; cols = newCols
+        dirtyRows = BooleanArray(newRows) { true }   // keep damage map in sync with screen
         curX = curX.coerceAtMost(cols - 1); curY = curY.coerceAtMost(rows - 1)
         markAllDirty()
         session?.resize(rows, cols)
