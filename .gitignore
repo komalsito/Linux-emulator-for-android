@@ -1,5 +1,15 @@
 build/
 .gradle/
-*.apk
 *.dex
-kotlin-classes/
+*.class
+*.bin
+*.at
+*.tab
+*.keystream
+*.len
+*.i
+*.s
+*.values
+*.snap
+*.snapshot
+*.log

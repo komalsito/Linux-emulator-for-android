@@ -110,8 +110,43 @@ class BootstrapManager(private val ctx: Context) {
             val dest = FsLayout.linuxRoot(ctx)
             val tmpFile = File(FsLayout.safeTmp(ctx), "rootfs.tar.gz")
             report("Resolving mirror", -1)
-            if (dest.exists()) runCatching { dest.deleteRecursively() }
-            
+
+            // v0.1.13 STALL FIX #1 — top-down deleteRecursively() pre-wipe.
+            // The old code ran Kotlin's dest.deleteRecursively() on
+            // /data/data/com.emux/files/linuxroot right before downloading.
+            // Kotlin's implementation FULLY ENUMERATES the tree into memory
+            // before deleting anything; re-walking a large partially-extracted
+            // rootfs (left over from an interrupted attempt) takes minutes on
+            // ext4/f2fs. And because indeterminate progress frames only repaint
+            // when the *next* step starts, the UI sat frozen at the previous
+            // label ("Extracting rootfs" / "Linking…") — exactly the reported
+            // "step takes forever / never passes" symptom.
+            //
+            // Fix:
+            //  - skip the wipe entirely when there is nothing to clean (the
+            //    common case: first run, or dest missing/empty);
+            //  - otherwise use deleteBottomUp() — an explicit-stack walk that
+            //    lstats each entry via java.nio (so FIFOs/device nodes are NEVER
+            //    opened), deletes leaves as it descends and rmdirs deepest-first.
+            //    No full enumeration pass, no blocking special files;
+            //  - emit a dedicated "Cleaning previous rootfs" heartbeat frame so
+            //    the UI visibly advances instead of looking stale.
+            var hasEntries = false
+            try {
+                if (java.nio.file.Files.exists(dest.toPath())) {
+                    java.nio.file.Files.newDirectoryStream(dest.toPath()).use { ds ->
+                        hasEntries = ds.iterator().hasNext()
+                    }
+                }
+            } catch (_: Throwable) {
+                hasEntries = true   // unreadable → treat as dirty, bottom-up delete
+            }
+            if (hasEntries) {
+                report("Cleaning previous rootfs", -1)
+                runCatching { deleteBottomUp(dest) }
+                    .onFailure { com.emux.EmuXLog.e("pre-wipe failed (continuing)", it) }
+            }
+
             check(dest.mkdirs() || dest.isDirectory) { "Cannot create ${dest.absolutePath}" }
 
             // Build candidate URLs: user's custom mirror (Settings → "mirror") first,
@@ -182,9 +217,42 @@ class BootstrapManager(private val ctx: Context) {
             extractTarGz(tmp, dest)
             tmp.delete()
 
+            // v0.1.13: the old single "Linking /data/data paths" frame covered
+            // three distinct phases (special-file prune + mountpoint seeding,
+            // resolver config, profile/os-release writes). Split into two
+            // reported sub-steps so the UI visibly advances through them.
+            //
+            // v0.1.14 STALL FIX #3 — "stuck at Seeding/Sending resolver config".
+            // The resolver-seeding block inside linkAndroidRuntime() used to run
+            // *after* pruneSpecialFiles(dev): a bounded walk with a 10-second
+            // wall-clock cap and a 4096-entry cap. On a rootfs left over from an
+            // interrupted attempt, dev/ can hold tens of thousands of entries
+            // (or be mid-corruption), so the prune silently gave up at its cap
+            // and returned right when the time budget expired. Everything that
+            // came after it in the same phase — including the resolv.conf seed
+            // whose label was already on screen — then sat behind an operation
+            // that had burned its whole budget doing nothing visible. Because
+            // indeterminate progress frames only repaint when the NEXT step
+            // starts, the UI froze at the resolver-config label exactly like the
+            // earlier pre-wipe stall.
+            // Fix:
+            //  - reorder: the resolver seed + mountpoint dirs are cheap,
+            //    metadata-only operations and now run FIRST, before any tree
+            //    walk can eat time;
+            //  - the dev/ prune is bounded harder (5 s) and wrapped in a hard
+            //    watchdog thread so even a pathological filesystem hang cannot
+            //    delay the next frame by more than a few seconds;
+            //  - each remaining sub-step emits its own heartbeat frame
+            //    ("Finalizing rootfs config", "Installing helper scripts") so
+            //    no label ever has to cover multiple operations again.
             report("Linking /data/data paths", -1)
-            linkAndroidRuntime(dest)
+            seedResolverConfig(dest)          // fast, metadata-only — runs first now
+            report("Pruning special files", -1)
+            withHardTimeout(5_000L) { pruneSpecialFiles(File(dest, "dev"), maxMillis = 4_500L) }
+            prepareMountpoints(dest)
+            report("Finalizing rootfs config", -1)
             postInstall(dest)
+            report("Installing helper scripts", -1)
             installHelperScripts(dest)
 
             FsLayout.markBootstrapped(ctx)
@@ -397,15 +465,78 @@ class BootstrapManager(private val ctx: Context) {
     }
 
     /**
-     * Make the chroot usable without root: bind-free access to the Android DNS
-     * resolver and a minimal /proc,/sys,/dev populated at session start instead.
-     * Here we just pre-create mountpoint dirs and seed resolv.conf from Android.
+     * v0.1.14 SPLIT: pre-create the mountpoint dirs the session launcher binds
+     * onto (/proc /sys /dev /tmp /run /root /home). Plain mkdirs — no
+     * enumeration, cannot block. Extracted from linkAndroidRuntime(), which in
+     * turn is kept as a thin wrapper over these three steps for any legacy
+     * call sites and tests.
      */
-    private fun linkAndroidRuntime(dest: File) {
+    internal fun prepareMountpoints(dest: File) {
         listOf("proc", "sys", "dev", "tmp", "run", "root", "home").forEach {
             File(dest, it).mkdirs()
         }
         File(dest, "tmp").setWritable(true, false)
+    }
+
+    /**
+     * Make the chroot usable without root: bind-free access to the Android DNS
+     * resolver and a minimal /proc,/sys,/dev populated at session start instead.
+     * v0.1.14: this is now just the ordered composition of the three cheap,
+     * individually-reported sub-steps (resolver seed → dev/ prune → mountpoint
+     * dirs). The old monolithic version ran the bounded-but-slow dev/ prune
+     * FIRST and left the resolv.conf seed behind it on screen with no new
+     * progress frame until everything finished — the exact mechanism of the
+     * "stuck at Seeding resolver config" stall. bootstrapFlow() now calls the
+     * pieces directly so each one gets its own heartbeat; this wrapper remains
+     * for completeness/legacy callers.
+     */
+    internal fun linkAndroidRuntime(dest: File) {
+        // v0.1.13 STALL FIX #2 — special files under dev/ blocking later
+        // enumeration. Alpine's minirootfs ships /dev entries; on the pure-Java
+        // extraction fallback they arrive as fifos/links. Any subsequent
+        // recursive scan (or our own cleanup) that *opens* them can block
+        // forever on an empty FIFO reader. pruneSpecialFiles only ever
+        // lstats/unlinks — it never opens anything — and here it additionally
+        // runs under withHardTimeout so even a kernel-level readdir hang can't
+        // gate progress.
+        seedResolverConfig(dest)
+        withHardTimeout(5_000L) { pruneSpecialFiles(File(dest, "dev"), maxMillis = 4_500L) }
+        prepareMountpoints(dest)
+    }
+
+    /**
+     * v0.1.14: run [block] on a daemon thread and wait for it at most
+     * [millis] ms. If the operation exceeds its budget we return anyway and
+     * let the orphaned daemon finish (or die) in the background — bootstrap
+     * progress must NEVER be gated on a filesystem walk again. This is the
+     * hard backstop behind pruneSpecialFiles' own cooperative time cap: even
+     * if a single readdir/lstat blocks indefinitely in kernel space (bad
+     * f2fs state, hung fuse-like mount), the next progress frame lands within
+     * [millis]. Best-effort semantics apply to everything it wraps, so losing
+     * the result of a timed-out walk is acceptable by design.
+     */
+    private fun withHardTimeout(millis: Long, block: () -> Unit) {
+        val done = java.util.concurrent.CountDownLatch(1)
+        val t = Thread {
+            try { runCatching { block() } } finally { done.countDown() }
+        }.apply { isDaemon = true; name = "emux-bootstrap-timeout" }
+        t.start()
+        try {
+            done.await(millis, java.util.concurrent.TimeUnit.MILLISECONDS)
+        } catch (_: InterruptedException) {
+            Thread.currentThread().interrupt()
+        }
+    }
+
+    /**
+     * v0.1.14 SPLIT: seed etc/resolv.conf from Android. Extracted out of
+     * linkAndroidRuntime() so it gets its OWN progress frame and runs before
+     * any tree walk — this block is metadata-only plus one tiny file write,
+     * worst case milliseconds. (The old placement — after the dev/ prune — is
+     * what made the UI sit at "Seeding resolver config" while the prune burned
+     * its time budget doing nothing visible.)
+     */
+    internal fun seedResolverConfig(dest: File) {
         // Seed resolv.conf from Android's DNS properties (net.dns1/net.dns2 —
         // readable by any app).
         // v0.1.11 HANG FIX: this used to enumerate interfaces with
@@ -419,6 +550,12 @@ class BootstrapManager(private val ctx: Context) {
         // dead weight; SystemProperties gives us real DNS without touching the
         // kernel netlink socket. If even that reflection fails, we fall back to
         // public resolvers. Total worst case here: milliseconds.
+        // v0.1.13 THROW FIX: the write itself is now guarded too. If etc/ is
+        // missing or etc/resolv.conf ended up as a dangling symlink after the
+        // tar, the old unguarded writeText threw FileNotFoundException right
+        // inside the linking phase and aborted the whole step ("not passing").
+        // We mkdir parents first and delete-and-recreate special/dangling
+        // targets before writing.
         try {
             val propDns = try {
                 val cls = Class.forName("android.os.SystemProperties")
@@ -429,15 +566,219 @@ class BootstrapManager(private val ctx: Context) {
                 ).filter { it.isNotBlank() }.distinct()
             } catch (_: Exception) { emptyList() }
             val servers = propDns.ifEmpty { listOf("8.8.8.8", "1.1.1.1") }
-            File(dest, "etc/resolv.conf").writeText(servers.joinToString("\n") { "nameserver $it\n" })
+            val rc = File(dest, "etc/resolv.conf")
+            runCatching { rc.parentFile?.mkdirs() }
+            replaceRegularFileWith(rc) {
+                it.writeText(servers.joinToString("\n") { s -> "nameserver $s\n" })
+            }
         } catch (_: Exception) { /* non-fatal */ }
+    }
+
+    /**
+     * v0.1.13: ensure [f] exists as a fresh writable REGULAR file before running
+     * [write] against it. Guards against the three shapes that made the old
+     * unguarded writeText()/appendText() calls throw FileNotFoundException and
+     * kill bootstrap mid-linking: a missing parent dir, a dangling symlink
+     * (exists() == false but a link occupies the name), and special files
+     * (fifo/socket/device) left over from a previous partial extract. All
+     * operations are lstat/unlink based (java.nio) — nothing is ever opened,
+     * so this cannot block on a FIFO either. Returns true when the write ran.
+     */
+    private fun replaceRegularFileWith(f: File, write: (File) -> Unit): Boolean {
+        return try {
+            f.parentFile?.mkdirs()
+            val p = f.toPath()
+            val attrs = runCatching {
+                java.nio.file.Files.readAttributes(
+                    p, java.nio.file.attribute.BasicFileAttributes::class.java,
+                    java.nio.file.LinkOption.NOFOLLOW_LINKS)
+            }.getOrNull()
+            // Anything that isn't a plain regular file (symlink, fifo, socket,
+            // device node) gets deleted first, so the write below always lands
+            // on a brand-new regular file.
+            if (attrs != null && !attrs.isRegularFile) runCatching { java.nio.file.Files.deleteIfExists(p) }
+            write(f)
+            true
+        } catch (e: Throwable) {
+            com.emux.EmuXLog.e("replaceRegularFileWith(${f.name}) failed (non-fatal)", e)
+            false
+        }
+    }
+
+    /**
+     * v0.1.13: bounded, NON-OPENING prune of symlinks and non-regular files
+     * under [root] (Alpine's /dev is full of them after the pure-Java tar
+     * fallback: char/block device nodes, FIFOs, dangling links). Opening any of
+     * those for read/write can block forever (classic empty-FIFO reader stall),
+     * and Kotlin's File.walkTopDown()/deleteRecursively() enumerate deeply, so
+     * we do an explicit-stack BFS instead:
+     *   - every entry is inspected with java.nio lstat (NOFOLLOW_LINKS) — the
+     *     target of a symlink is never resolved, nothing is ever opened;
+     *   - hard caps (entries scanned / depth / wall time) guarantee termination
+     *     even on a pathological tree;
+     *   - directories are descended into, everything else non-regular/symlink
+     *     is unlinked immediately (which also frees space for the re-extract).
+     * Best-effort: individual failures are swallowed; the walk always returns.
+     */
+    private fun pruneSpecialFiles(root: File, maxEntries: Int = 4096, maxMillis: Long = 10_000L) {
+        val start = SystemClockElapsed()
+        var seen = 0
+        val queue = ArrayDeque<java.nio.file.Path>()
+        val rootP = root.toPath()
+        if (!java.nio.file.Files.isDirectory(rootP)) return
+        queue.addLast(rootP)
+        while (queue.isNotEmpty() && seen < maxEntries && SystemClockElapsed() - start < maxMillis) {
+            val dir = queue.removeFirst()
+            try {
+                java.nio.file.Files.newDirectoryStream(dir).use { ds ->
+                    for (child in ds) {
+                        if (++seen > maxEntries) return
+                        val attrs = runCatching {
+                            java.nio.file.Files.readAttributes(
+                                child, java.nio.file.attribute.BasicFileAttributes::class.java,
+                                java.nio.file.LinkOption.NOFOLLOW_LINKS)
+                        }.getOrNull() ?: continue   // vanished concurrently
+                        when {
+                            attrs.isDirectory -> queue.addLast(child)
+                            // symlink / fifo / socket / device node → unlink,
+                            // never open, never follow.
+                            else -> runCatching { java.nio.file.Files.deleteIfExists(child) }
+                        }
+                    }
+                }
+            } catch (_: Throwable) { /* unreadable dir: skip it, keep walking */ }
+        }
+    }
+
+    /** Monotonic-ish elapsed ms; isolated so JVM unit tests can stub the class. */
+    private fun SystemClockElapsed(): Long = try {
+        android.os.SystemClock.elapsedRealtime()
+    } catch (_: Throwable) {
+        System.currentTimeMillis()
+    }
+
+    /**
+     * v0.1.13 STALL FIX companion to the pre-wipe: bottom-up recursive delete
+     * WITHOUT Kotlin's deleteRecursively(). Why not deleteRecursively()? It
+     * fully enumerates the whole tree into memory BEFORE deleting its first
+     * entry — on ext4/f2fs re-walking a large partially-extracted rootfs costs
+     * minutes of readdir+stat syscalls, all invisible to the UI (no repaint
+     * happens mid-step), which is exactly the "stuck at Extracting rootfs /
+     * Linking…" freeze. deleteBottomUp() instead:
+     *   - uses an EXPLICIT stack (no recursion → no StackOverflowError on deep
+     *     trees);
+     *   - lstats each entry through java.nio with NOFOLLOW_LINKS, so FIFOs and
+     *     device nodes are identified and unlinked WITHOUT EVER BEING OPENED
+     *     (opening a FIFO with no writer blocks forever — java.io.File APIs
+     *     don't open on stat, but any accidental read would; NIO keeps it
+     *     strictly metadata-only);
+     *   - deletes leaves as it descends and rmdirs deepest-first, so total work
+     *     is one pass and progress is monotone;
+     *   - is bounded (entry cap + time cap) and best-effort: whatever survives
+     *     is simply overwritten by the fresh extraction afterwards.
+     * Returns the number of entries removed.
+     */
+    internal fun deleteBottomUp(top: File, maxMillis: Long = 60_000L): Int {
+        val start = SystemClockElapsed()
+        var removed = 0
+        val topP = top.toPath()
+        if (!runCatching { java.nio.file.Files.exists(topP) }.getOrDefault(false)) return 0
+        if (!runCatching { java.nio.file.Files.isDirectory(topP) }.getOrDefault(false)) {
+            runCatching { java.nio.file.Files.deleteIfExists(topP) }
+            return 1
+        }
+        // Explicit DFS stack. Each frame is (dir, childrenIterator); the stream
+        // backing the iterator stays referenced by its frame and is closed when
+        // the frame pops — so no fd leaks even on huge trees. Frames are MUTATED
+        // in place (iter/ds filled on first visit) so a parent's position never
+        // shifts out from under its live DirectoryStream iterator.
+        val stack = ArrayDeque<DeleteFrame>()
+        stack.addLast(DeleteFrame(topP))
+        outer@ while (stack.isNotEmpty()) {
+            if (SystemClockElapsed() - start > maxMillis) break
+            val frame = stack.last()
+            if (frame.iter == null) {
+                // First visit: open the child stream lazily (bounded reads).
+                try {
+                    val ds = java.nio.file.Files.newDirectoryStream(frame.dir)
+                    frame.ds = ds
+                    frame.iter = ds.iterator()
+                } catch (_: Throwable) {
+                    frame.iter = EmptyIter   // unreadable dir → treated as empty, rmdir'd below
+                }
+            }
+            val itNow = frame.iter ?: EmptyIter
+            var descended = false
+            while (itNow.hasNext()) {
+                if (SystemClockElapsed() - start > maxMillis) break@outer
+                val child = itNow.next()
+                val attrs = runCatching {
+                    java.nio.file.Files.readAttributes(
+                        child, java.nio.file.attribute.BasicFileAttributes::class.java,
+                        java.nio.file.LinkOption.NOFOLLOW_LINKS)
+                }.getOrNull()
+                when {
+                    attrs == null -> removed++                        // vanished concurrently
+                    attrs.isDirectory -> {                            // descend; parent frame stays
+                        stack.addLast(DeleteFrame(child))
+                        descended = true
+                    }
+                    else -> {   // regular / symlink / fifo / socket / device node
+                        runCatching { java.nio.file.Files.deleteIfExists(child) }
+                        removed++
+                    }
+                }
+                if (descended) break          // process the new subtree first
+            }
+            if (!descended) {
+                // Frame exhausted → rmdir the (now-empty) directory deepest-first.
+                stack.removeLast().close()
+                runCatching { java.nio.file.Files.deleteIfExists(frame.dir) }
+                    .onFailure { runCatching { frame.dir.toFile().delete() } }
+                removed++
+            }
+        }
+        // Unwind any frames left on the stack after a time-cap break (closes fds).
+        while (stack.isNotEmpty()) stack.removeLast().close()
+        // Belt & braces: whatever the bounded walk left behind (cap hit), sweep
+        // the top level non-recursively so extraction starts from a clean slate.
+        // Never recursive, never blocking — lstat/delete only.
+        runCatching {
+            java.nio.file.Files.newDirectoryStream(topP).use { ds ->
+                for (child in ds) runCatching { java.nio.file.Files.deleteIfExists(child) }
+            }
+        }
+        return removed
+    }
+
+    /** One explicit-stack frame of deleteBottomUp; owns its DirectoryStream. */
+    private class DeleteFrame(
+        val dir: java.nio.file.Path,
+        var ds: java.nio.file.DirectoryStream<java.nio.file.Path>? = null,
+        var iter: Iterator<java.nio.file.Path>? = null,
+    ) {
+        fun close() { runCatching { ds?.close() } }
+    }
+
+    /** Shared empty iterator so unreadable dirs cost zero allocations. */
+    private object EmptyIter : Iterator<java.nio.file.Path> {
+        override fun hasNext() = false
+        override fun next(): java.nio.file.Path = throw NoSuchElementException()
     }
 
     private fun postInstall(dest: File) {
         // sane defaults: non-login shells get our env, disable services that need init
-        File(dest, "etc/profile.d/emux.sh").apply {
-            parentFile?.mkdirs()
-            writeText(
+        // v0.1.13 THROW FIX: both writes are guarded now. The old code did a bare
+        // writeText() on etc/profile.d/emux.sh and — worse — an unguarded
+        // File(dest,"etc/os-release").appendText("\nEMUX=1\n"), which throws
+        // FileNotFoundException when os-release is missing or left as a dangling
+        // symlink by the tar fallback, killing bootstrap right in the linking
+        // phase ("step not passing"). Parents are mkdir'd first, special/dangling
+        // targets are deleted-and-recreated via replaceRegularFileWith(), and the
+        // EMUX=1 marker is appended IDEMPOTENTLY (no duplicate on retry).
+        val profile = File(dest, "etc/profile.d/emux.sh")
+        replaceRegularFileWith(profile) {
+            it.writeText(
                 """
                 export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
                 export PS1='\[\e[38;5;39m\]emux:\w\[\e[0m\] \$ '
@@ -447,7 +788,26 @@ class BootstrapManager(private val ctx: Context) {
                 """.trimIndent()
             )
         }
-        File(dest, "etc/os-release").appendText("\nEMUX=1\n")
+
+        val osr = File(dest, "etc/os-release")
+        runCatching {
+            // Delete-and-recreate special/dangling shapes first (never opens them),
+            // then ensure a regular file exists so append can never throw.
+            replaceRegularFileWith(osr) { f ->
+                if (!f.exists()) {
+                    f.parentFile?.mkdirs()
+                    f.writeText("NAME=\"Alpine Linux\"\nID=alpine\n")
+                } else if (f.length() == 0L) {
+                    f.writeText("NAME=\"Alpine Linux\"\nID=alpine\n")
+                }
+            }
+            // Idempotent marker: only append when absent, so repeated bootstraps
+            // / retries never pile up "EMUX=1" lines.
+            val content = runCatching { osr.readText() }.getOrNull()
+            if (content != null && !Regex("(?m)^EMUX=1$").containsMatchIn(content)) {
+                runCatching { osr.appendText("\nEMUX=1\n") }
+            }
+        }.onFailure { com.emux.EmuXLog.e("os-release marker failed (non-fatal)", it) }
     }
 }
 
