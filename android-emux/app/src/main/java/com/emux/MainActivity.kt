@@ -42,6 +42,34 @@ class MainActivity : AppCompatActivity() {
         registerForActivityResult(ActivityResultContracts.RequestPermission()) { /* fine if denied */ }
 
     override fun onCreate(savedInstanceState: Bundle?) {
+        // v0.1.3 CRASH FIX: wrap the ENTIRE startup path. Any exception thrown
+        // here (missing resource, OEM view-inflation quirk, corrupt prefs…) used
+        // to propagate straight out of onCreate → Android shows "EmuX keeps
+        // stopping" and, because it happens on every launch, the app became
+        // permanently unopenable. Now we degrade to a plain error screen that
+        // still tells the user what happened and lets them retry/clear data.
+        try {
+            doOnCreate(savedInstanceState)
+        } catch (e: Throwable) {
+            com.emux.EmuXLog.init(this)
+            com.emux.EmuXLog.e("MainActivity.onCreate failed", e)
+            try {
+                setContentView(android.widget.ScrollView(this).apply {
+                    addView(android.widget.TextView(this@MainActivity).apply {
+                        text = "EmuX failed to start:\n\n${e.javaClass.name}: ${e.message}\n\n" +
+                            "You can try: Settings (in launcher) → EmuX → Storage → Clear Data,\n" +
+                            "or reinstall the APK. Log tail:\n\n" + com.emux.EmuXLog.tail(40)
+                        setTextIsSelectable(true)
+                        setPadding(48, 96, 48, 48)
+                        setTextColor(0xFFE8E8E8.toInt())
+                        setBackgroundColor(0xFF101216.toInt())
+                    })
+                })
+            } catch (_: Throwable) { /* nothing more we can do */ }
+        }
+    }
+
+    private fun doOnCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         b = ActivityMainBinding.inflate(layoutInflater)
         setContentView(b.root)
@@ -50,18 +78,36 @@ class MainActivity : AppCompatActivity() {
         wireExtraKeys()
         requestNotificationIfNeeded()
         observeSessions()
-        if (!com.emux.core.FsLayout.isBootstrapped(this)) startBootstrapNow(showUi = true)
+        // v0.1.3: session attach + root detection are deferred until AFTER the
+        // first frame is drawn. Two reasons:
+        //  a) TerminalService.startSession() from inside onCreate hit Android 12+
+        //     background-FGS restrictions (see TerminalService fix);
+        //  b) hasWindowFocus() is false during onCreate, so deferring guarantees
+        //     the "app is visible" exemption applies when we do start services.
+        b.root.post {
+            if (!com.emux.core.FsLayout.isBootstrapped(this)) {
+                showBootstrapUiOnly()
+            } else {
+                ensureSessionAttached()
+            }
+        }
         maybeAskBatteryExemption()
 
         b.btnInstall.setOnClickListener { startBootstrapNow(showUi = true) }
 
         lifecycleScope.launch {
-            root.detect()
+            runCatching { root.detect() }
             b.statusRoot.text = when (root.mode) {
                 com.emux.core.RootMode.NONE -> getString(R.string.root_none)
                 else -> getString(R.string.root_available, root.mode.name)
             }
         }
+    }
+
+    /** Bootstrap banner without auto-starting anything (fresh install path). */
+    private fun showBootstrapUiOnly() {
+        b.bootstrapPane.visibility = android.view.View.VISIBLE
+        b.btnInstall.visibility = android.view.View.VISIBLE
     }
 
     private fun wireTabs() {
@@ -177,15 +223,37 @@ class MainActivity : AppCompatActivity() {
 
     /** Kick the WorkManager job immediately (user pressed Install). */
     private fun startBootstrapNow(showUi: Boolean) {
-        androidx.work.WorkManager.getInstance(this).cancelUniqueWork(EmuXApplication.BOOTSTRAP_WORK)
+        // v0.1.3 CRASH FIX: WorkManager was never explicitly initialised and this
+        // app does NOT use androidx.startup, so on some devices/OEM ROMs
+        // WorkManager.getInstance() throws IllegalStateException ("no default
+        // Configuration") right here — and because onCreate auto-called this on a
+        // fresh install, EVERY launch crashed → "EmuX keeps stopping".
+        ensureWorkManager()
+        runCatching {
+            androidx.work.WorkManager.getInstance(this).cancelUniqueWork(EmuXApplication.BOOTSTRAP_WORK)
+        }
         val req = androidx.work.OneTimeWorkRequestBuilder<com.emux.core.BootstrapWorker>()
             .setConstraints(
                 androidx.work.Constraints.Builder()
                     .setRequiredNetworkType(androidx.work.NetworkType.CONNECTED).build())
             .build()
-        androidx.work.WorkManager.getInstance(this)
-            .enqueueUniqueWork("emux-bootstrap-now", androidx.work.ExistingWorkPolicy.REPLACE, req)
+        runCatching {
+            androidx.work.WorkManager.getInstance(this)
+                .enqueueUniqueWork("emux-bootstrap-now", androidx.work.ExistingWorkPolicy.REPLACE, req)
+        }.onFailure { com.emux.EmuXLog.e("worker enqueue failed; running in-process only", it) }
         if (showUi) watchBootstrapProgress()
+    }
+
+    private fun ensureWorkManager() {
+        try {
+            androidx.work.WorkManager.initialize(
+                applicationContext,
+                androidx.work.Configuration.Builder()
+                    .setMinimumLoggingLevel(android.util.Log.INFO)
+                    .build()
+            )
+        } catch (_: IllegalStateException) { /* already initialised — fine */ }
+        catch (e: Throwable) { com.emux.EmuXLog.e("WorkManager init failed", e) }
     }
 
     /**
@@ -294,12 +362,30 @@ class MainActivity : AppCompatActivity() {
 
     override fun onStart() {
         super.onStart()
-        registerReceiver(
-            screenReceiver,
-            android.content.IntentFilter().apply {
-                addAction(Intent.ACTION_SCREEN_ON); addAction(Intent.ACTION_SCREEN_OFF)
+        // v0.1.3 CRASH FIX: on Android 14+ (targetSdk 34) registering a receiver
+        // for SCREEN_ON/SCREEN_OFF requires the RECEIVER_NOT_EXPORTED flag —
+        // without it, registerReceiver throws SecurityException here and this ran
+        // on EVERY launch → instant "app keeps stopping" crash loop.
+        try {
+            if (Build.VERSION.SDK_INT >= 33) {
+                registerReceiver(
+                    screenReceiver,
+                    android.content.IntentFilter().apply {
+                        addAction(Intent.ACTION_SCREEN_ON); addAction(Intent.ACTION_SCREEN_OFF)
+                    },
+                    Context.RECEIVER_NOT_EXPORTED
+                )
+            } else {
+                registerReceiver(
+                    screenReceiver,
+                    android.content.IntentFilter().apply {
+                        addAction(Intent.ACTION_SCREEN_ON); addAction(Intent.ACTION_SCREEN_OFF)
+                    }
+                )
             }
-        )
+        } catch (e: Throwable) {
+            com.emux.EmuXLog.e("screen receiver registration failed (non-fatal)", e)
+        }
     }
 
     override fun onStop() {

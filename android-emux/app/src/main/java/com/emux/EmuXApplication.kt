@@ -19,21 +19,43 @@ class EmuXApplication : Application() {
 
     override fun onCreate() {
         super.onCreate()
+        com.emux.EmuXLog.init(this)
+        com.emux.EmuXLog.i("EmuXApplication onCreate v${com.emux.EmuXLog.appVersion(this)}")
         ensureNotificationChannel()
+        // Explicitly initialise WorkManager BEFORE any getInstance() call —
+        // without androidx.startup on the classpath it can throw otherwise.
+        try {
+            androidx.work.WorkManager.initialize(
+                this,
+                androidx.work.Configuration.Builder()
+                    .setMinimumLoggingLevel(android.util.Log.INFO).build()
+            )
+        } catch (_: IllegalStateException) { /* already initialised */ }
+        catch (e: Throwable) { com.emux.EmuXLog.e("WorkManager init failed", e) }
+
         // If the distro isn't installed yet, schedule it for a battery-friendly
         // window (charging OR idle + network) instead of hammering CPU now.
-        if (!com.emux.core.FsLayout.isBootstrapped(this)) scheduleBootstrap(this)
+        if (!com.emux.core.FsLayout.isBootstrapped(this)) {
+            runCatching { scheduleBootstrap(this) }
+                .onFailure { com.emux.EmuXLog.e("scheduleBootstrap failed", it) }
+        }
     }
 
     private fun ensureNotificationChannel() {
-        val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-        nm.createNotificationChannel(
-            NotificationChannel(
-                TerminalService.CHANNEL_ID,
-                getString(R.string.notif_channel_sessions),
-                NotificationManager.IMPORTANCE_LOW   // never sounds / never peeks
-            ).apply { description = getString(R.string.notif_channel_sessions_desc) }
-        )
+        try {
+            val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+            nm.createNotificationChannel(
+                NotificationChannel(
+                    TerminalService.CHANNEL_ID,
+                    getString(R.string.notif_channel_sessions),
+                    NotificationManager.IMPORTANCE_LOW   // never sounds / never peeks
+                ).apply { description = getString(R.string.notif_channel_sessions_desc) }
+            )
+        } catch (e: Throwable) {
+            // A failure here previously killed the process before MainActivity
+            // ever existed → "app keeps stopping" with no UI at all. Non-fatal.
+            com.emux.EmuXLog.e("notification channel creation failed", e)
+        }
     }
 
     private fun scheduleBootstrap(ctx: Context) {
