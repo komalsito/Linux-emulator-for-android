@@ -1,10 +1,34 @@
 package com.emux
 
+import android.content.Context
 import android.os.Bundle
 import androidx.appcompat.app.AppCompatActivity
 import androidx.preference.PreferenceFragmentCompat
 
+/**
+ * v0.1.6 CRASH FIX #3 (the one Robolectric could never see):
+ * AppCompatActivity.onApplyThemeResource() reads `themeResId` from the
+ * activity's OWN <activity> manifest entry. Our manifest declared no theme for
+ * SettingsActivity, so themeResId == 0 → AppCompat threw
+ * IllegalArgumentException("You need to use a Theme.AppCompat theme (or
+ * descendant) with this activity.") inside setContentView()/fragment inflation.
+ * That exception escaped AFTER our onCreate try/catch had finished (it fires
+ * during the FIRST actual theme resolution, not during setTheme()), so every
+ * guard we added in 0.1.4/0.1.5 was useless on real devices — opening Settings
+ * still force-closed. JVM tests pass because Robolectric's resource layer
+ * tolerates themeResId==0; phones do not. Fix: apply the AppCompat-based prefs
+ * theme at attachBaseContext time, when AppCompat's delegate records it.
+ */
 class SettingsActivity : AppCompatActivity() {
+
+    override fun attachBaseContext(newBase: Context) {
+        try {
+            super.attachBaseContext(newBase)
+            setTheme(R.style.EmuX_Prefs)   // AppCompat delegates resolve theme lazily → OK here
+        } catch (t: Throwable) {
+            com.emux.EmuXLog.e("attachBaseContext theme failed", t)
+        }
+    }
 
     // Theme hardening: PreferenceFragmentCompat requires the host theme to define
     // preferenceTheme, applied BEFORE fragment inflation. setTheme() at the very top

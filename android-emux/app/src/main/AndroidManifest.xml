@@ -48,6 +48,7 @@
             android:name=".MainActivity"
             android:exported="true"
             android:launchMode="singleTask"
+            android:theme="@style/EmuX"
             android:configChanges="orientation|screenSize|keyboardHidden|keyboard|screenLayout|smallestScreenSize|density|uiMode"
             android:windowSoftInputMode="adjustResize">
             <intent-filter>
@@ -55,6 +56,15 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <!-- v0.1.6 CRASH FIX: this entry had NO android:theme, so AppCompat's
+             onApplyThemeResource() received themeResId==0 and threw
+             "You need to use a Theme.AppCompat theme…" the moment Settings was
+             opened on a real device. Robolectric masks this bug; phones don't. -->
+        <activity
+            android:name=".SettingsActivity"
+            android:exported="false"
+            android:theme="@style/EmuX.Prefs" />
 
         <!-- The single process that hosts PTY sessions — mirrors Termux's design -->
         <service
