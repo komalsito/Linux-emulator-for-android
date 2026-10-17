@@ -283,12 +283,22 @@ class BootstrapManager(private val ctx: Context) {
         )
         var lastErr = ""
         for (argv in cmds) {
+            // v0.1.11 HANG GUARD: p.waitFor() with no timeout could block forever
+            // if a toybox tar/gzip wedges on some ROMs (stuck process — the exact
+            // class of "installation takes 5+ minutes" report). A watchdog thread
+            // destroys the process after 3 minutes; destroy() unblocks both the
+            // readLine loop and waitFor(), and we fall through to the next strategy.
             val r = runCatching {
                 val p = ProcessBuilder(*argv).redirectErrorStream(true).start()
-                val out = StringBuilder()
-                BufferedReader(InputStreamReader(p.inputStream)).forEachLine { out.append(it).append('\n') }
-                val code = p.waitFor()
-                code to out.toString()
+                val watchdog = Thread {
+                    try { Thread.sleep(180_000); if (p.isAlive) p.destroy() } catch (_: Exception) {}
+                }.apply { isDaemon = true; start() }
+                try {
+                    val out = StringBuilder()
+                    BufferedReader(InputStreamReader(p.inputStream)).forEachLine { out.append(it).append('\n') }
+                    val code = p.waitFor()
+                    code to out.toString()
+                } finally { watchdog.interrupt() }
             }
             // `continue` inside runCatching's inline lambda isn't allowed pre-2.2 —
             // handle the failure branch explicitly instead.
@@ -396,17 +406,29 @@ class BootstrapManager(private val ctx: Context) {
             File(dest, it).mkdirs()
         }
         File(dest, "tmp").setWritable(true, false)
-        // Copy Android's DNS servers so busybox/http clients work inside the distro.
+        // Seed resolv.conf from Android's DNS properties (net.dns1/net.dns2 —
+        // readable by any app).
+        // v0.1.11 HANG FIX: this used to enumerate interfaces with
+        //   Collections.list(NetworkInterface.getNetworkInterfaces())
+        // and then threw every element away via `flatMap { emptyList() }`.
+        // On many OEM ROMs that netlink enumeration blocks for minutes (or
+        // indefinitely when a radio/tether iface is mid-transition), which froze
+        // the bootstrap at "Linking /data/data paths" for 5+ minutes with no
+        // progress — exactly the reported symptom. The result was *always* empty
+        // anyway (the flatMap discarded everything), so the whole call was pure
+        // dead weight; SystemProperties gives us real DNS without touching the
+        // kernel netlink socket. If even that reflection fails, we fall back to
+        // public resolvers. Total worst case here: milliseconds.
         try {
-            val dns = java.util.Collections.list(java.net.NetworkInterface.getNetworkInterfaces())
-                .flatMap { ni: java.net.NetworkInterface ->
-                    // Android ignores NetworkInterface.networkParameters (unavailable in the
-                    // core-libs stub); fall back to a well-known public resolver instead.
-                    emptyList<String>()
-                }
-                .filter { it.isNotEmpty() }
-                .distinct()
-            val servers = if (dns.isNotEmpty()) dns else listOf("8.8.8.8", "1.1.1.1")
+            val propDns = try {
+                val cls = Class.forName("android.os.SystemProperties")
+                val get = cls.getMethod("get", String::class.java)
+                listOfNotNull(
+                    get.invoke(null, "net.dns1") as? String,
+                    get.invoke(null, "net.dns2") as? String,
+                ).filter { it.isNotBlank() }.distinct()
+            } catch (_: Exception) { emptyList() }
+            val servers = propDns.ifEmpty { listOf("8.8.8.8", "1.1.1.1") }
             File(dest, "etc/resolv.conf").writeText(servers.joinToString("\n") { "nameserver $it\n" })
         } catch (_: Exception) { /* non-fatal */ }
     }
