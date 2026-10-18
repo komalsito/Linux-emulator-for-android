@@ -20,10 +20,10 @@ Daemon will be stopped at the end of the build
 > Task :app:javaPreCompileDebug UP-TO-DATE
 > Task :app:mergeDebugShaders UP-TO-DATE
 > Task :app:compileDebugShaders NO-SOURCE
-> Task :app:processDebugManifestForPackage
 > Task :app:generateDebugAssets UP-TO-DATE
-> Task :app:mergeDebugAssets
-> Task :app:compressDebugAssets
+> Task :app:mergeDebugAssets UP-TO-DATE
+> Task :app:processDebugManifestForPackage
+> Task :app:compressDebugAssets UP-TO-DATE
 > Task :app:desugarDebugFileDependencies UP-TO-DATE
 > Task :app:checkDebugDuplicateClasses UP-TO-DATE
 > Task :app:mergeDebugStartupProfile UP-TO-DATE
@@ -37,11 +37,8 @@ Daemon will be stopped at the end of the build
 > Task :app:writeDebugSigningConfigVersions UP-TO-DATE
 > Task :app:processDebugResources
 > Task :app:compileDebugKotlin
-w: file:///workspace/android-emux/app/src/main/java/com/emux/terminal/TerminalSession.kt:293:16 Parameter 'cols' is never used
-w: file:///workspace/android-emux/app/src/main/java/com/emux/terminal/TerminalSession.kt:293:27 Parameter 'rows' is never used
-w: file:///workspace/android-emux/app/src/main/java/com/emux/terminal/VtTerminalView.kt:318:46 Parameter 'y1' is never used
-w: file:///workspace/android-emux/app/src/main/java/com/emux/terminal/VtTerminalView.kt:448:13 Variable 'fm' is never used
-w: file:///workspace/android-emux/app/src/main/java/com/emux/terminal/VtTerminalView.kt:506:9 'invalidate(Int, Int, Int, Int): Unit' is deprecated. Deprecated in Java
+w: file:///workspace/android-emux/app/src/main/java/com/emux/terminal/TerminalSession.kt:386:16 Parameter 'cols' is never used
+w: file:///workspace/android-emux/app/src/main/java/com/emux/terminal/TerminalSession.kt:386:27 Parameter 'rows' is never used
 
 > Task :app:compileDebugJavaWithJavac
 > Task :app:dexBuilderDebug
@@ -54,6 +51,4 @@ w: file:///workspace/android-emux/app/src/main/java/com/emux/terminal/VtTerminal
 > Task :app:assembleDebug
 
 BUILD SUCCESSFUL in 1m 41s
-38 actionable tasks: 14 executed, 24 up-to-date
-=== v0.1.21 assembleDebug Z ===
-BUILD SUCCESSFUL in 1m 22s
+38 actionable tasks: 12 executed, 26 up-to-date

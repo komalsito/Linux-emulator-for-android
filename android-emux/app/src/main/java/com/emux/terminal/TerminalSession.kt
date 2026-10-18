@@ -173,8 +173,23 @@ class TerminalSession(
         val rootfs = rootfsFile.absolutePath
         // Alpine minirootfs ships ash only (no bash) — use /bin/sh so the session
         // doesn't die instantly with "bash: not found" on a fresh bootstrap.
-        val shellCmd = cmd.replace("bash -l", "/bin/sh -l")
+        // v0.1.23 BUGFIX: every downstream layer (TtyWrap single-quoting,
+        // `export EMUX_ARGV1=''` here) breaks on apostrophes inside the
+        // command; normalize them to U+02BC MODIFIER APOSTROPHE, which
+        // shells treat as an ordinary character, so the quoting chain can
+        // never fall through to the noexec-doomed direct path.
+        val shellCmd = cmd.replace("bash -l", "/bin/sh -l").replace("'", "ʼ")
         val init = File(rootfsFile, "emux-init.sh")
+        // v0.1.23 BUGFIX: the old gate was `init.isFile` ONLY — pointing at the
+        // copy extracted INTO the rootfs by tar. On a partially-extracted /
+        // interrupted bootstrap that file can be missing even though the
+        // authoritative files/bin/emux-init.sh mirror (written directly by
+        // installHelperScripts) is perfectly fine; we then fell into the
+        // "launcher missing" branch and ran PLAIN Android sh forever — no
+        // distro PATH, no emux-x11, no musl loader: exactly the reported
+        // "bootstrapped but cannot type / black desktop". Accept either copy.
+        val binMirror = File(File(ctx.filesDir, "bin"), "emux-init.sh")
+        val haveLauncher = init.isFile || binMirror.isFile
 
         // v0.1.19 BUGFIX M: the privileged chroot branch built its command as
         //   su -c 'chroot $rootfs /bin/su -s /bin/sh -c \"cd && exec $shellCmd\"'
@@ -233,7 +248,7 @@ class TerminalSession(
             // shell is harmless for our simple commands.
             ProcessBuilder("/system/bin/sh", "-c",
                 "su -c 'chroot $rootfs /bin/sh -l -c $shellCmd'")
-        } else if (init.isFile) {
+        } else if (haveLauncher) {
             // v0.1.18 BUGFIX #2: the old gate was `init.canExecute()`. Bootstrap
             // sets the exec bit via File.setExecutable(true,false), which maps to
             // chmod 700 *owner-only* — and some OEM file managers / SELinux-aware
@@ -273,14 +288,48 @@ class TerminalSession(
             // sh the script body plus our one clean argv line. The body contains
             // no apostrophes, so the wrapper's '<entry>' quoting keeps it intact
             // through script(1)'s inner shell too.
-            val body = runCatching { init.readText() }.getOrDefault("")
-            if (body.isNotBlank() && !body.contains('\'')) {
-                ProcessBuilder("/system/bin/sh", "-c", "EMUX_ARGV1='$shellCmd' exec sh\n$body")
-            } else if (init.isFile) {
+            // v0.1.23 BUGFIX: read from the files/bin/ mirror FIRST, then the
+            // rootfs copy. The bin/ copy is written by bootstrap directly into
+            // app-private storage; the rootfs one lands through tar extraction
+            // and a partially-extracted tree can leave it truncated or as a
+            // dangling symlink — readText() then threw, we fell into the
+            // direct-invocation branch, and on Android 10+ that path dies
+            // with EACCES on the noexec mount → instant silent exit ("cannot
+            // type" survived every previous fix round).
+            val candidates = listOf(
+                File(File(ctx.filesDir, "bin"), "emux-init.sh"),
+                File(FsLayout.home(ctx), "emux-init.sh"),
+                init,
+            )
+            val body = candidates.firstNotNullOfOrNull { f ->
+                runCatching { if (f.isFile) f.readText() else null }.getOrNull()
+            } ?: ""
+            if (body.isNotBlank() && !body.contains('\'') && !shellCmd.contains('\'')) {
+                // v0.1.23 BUGFIX (keyboard STILL dead + desktop STILL black
+                // after every previous round): the old line was
+                // `EMUX_ARGV1='…' exec sh` — a variable assignment applied to
+                // the exec BUILTIN. POSIX is explicit that assignments
+                // prefixed to `exec` affect only the builtin itself and are
+                // NOT exported into the replaced process, so EMUX_ARGV1 never
+                // existed inside emux-init.sh: CMD fell back to "$*" (empty),
+                // terminal sessions started as a bare login shell through a
+                // fragile per-ROM code path, and desktop sessions ("emux-x11
+                // openbox") silently ran a plain shell instead — Xvfb NEVER
+                // started → black pane forever. Fix: export the variable in
+                // its own statement BEFORE the body runs, so it is genuinely
+                // part of the environment the launcher inherits. Also refuse
+                // this form when the command itself contains an apostrophe
+                // (single-quoted here) and fall through to direct invocation.
+                ProcessBuilder(
+                    "/system/bin/sh", "-c",
+                    "export EMUX_ARGV1='$shellCmd'\n$body",
+                )
+            } else if (haveLauncher) {
                 // Fallback (body unreadable or contains apostrophes): direct
                 // invocation — works on ROMs without the noexec mount, fails
                 // loudly on ones that have it (visible via the notice below).
-                ProcessBuilder("/system/bin/sh", init.absolutePath, shellCmd)
+                val launcher = if (binMirror.isFile && runCatching { binMirror.length() > 40 }.getOrDefault(false)) binMirror else init
+                ProcessBuilder("/system/bin/sh", launcher.absolutePath, shellCmd)
             } else {
                 ProcessBuilder("/system/bin/sh", "-c",
                     "echo '[emux] rootfs launcher missing — tap Install to finish bootstrap'; exec /system/bin/sh -l")

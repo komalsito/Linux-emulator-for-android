@@ -13,17 +13,16 @@ Daemon will be stopped at the end of the build
 > Task :app:dataBindingGenBaseClassesDebug UP-TO-DATE
 > Task :app:checkDebugAarMetadata UP-TO-DATE
 > Task :app:mapDebugSourceSetPaths UP-TO-DATE
-> Task :app:createDebugCompatibleScreenManifests UP-TO-DATE
+> Task :app:createDebugCompatibleScreenManifests
 > Task :app:extractDeepLinksDebug UP-TO-DATE
-> Task :app:processDebugMainManifest UP-TO-DATE
-> Task :app:processDebugManifest UP-TO-DATE
-> Task :app:processDebugManifestForPackage UP-TO-DATE
-> Task :app:processDebugResources UP-TO-DATE
+> Task :app:processDebugMainManifest
+> Task :app:processDebugManifest
 > Task :app:javaPreCompileDebug UP-TO-DATE
 > Task :app:mergeDebugShaders UP-TO-DATE
 > Task :app:compileDebugShaders NO-SOURCE
 > Task :app:generateDebugAssets UP-TO-DATE
 > Task :app:mergeDebugAssets UP-TO-DATE
+> Task :app:processDebugManifestForPackage
 > Task :app:compressDebugAssets UP-TO-DATE
 > Task :app:desugarDebugFileDependencies UP-TO-DATE
 > Task :app:checkDebugDuplicateClasses UP-TO-DATE
@@ -36,9 +35,10 @@ Daemon will be stopped at the end of the build
 > Task :app:validateSigningDebug UP-TO-DATE
 > Task :app:writeDebugAppMetadata UP-TO-DATE
 > Task :app:writeDebugSigningConfigVersions UP-TO-DATE
+> Task :app:processDebugResources
 > Task :app:compileDebugKotlin
-w: file:///workspace/android-emux/app/src/main/java/com/emux/terminal/TerminalSession.kt:307:16 Parameter 'cols' is never used
-w: file:///workspace/android-emux/app/src/main/java/com/emux/terminal/TerminalSession.kt:307:27 Parameter 'rows' is never used
+w: file:///workspace/android-emux/app/src/main/java/com/emux/terminal/TerminalSession.kt:386:16 Parameter 'cols' is never used
+w: file:///workspace/android-emux/app/src/main/java/com/emux/terminal/TerminalSession.kt:386:27 Parameter 'rows' is never used
 
 > Task :app:compileDebugJavaWithJavac
 > Task :app:dexBuilderDebug
@@ -50,5 +50,5 @@ w: file:///workspace/android-emux/app/src/main/java/com/emux/terminal/TerminalSe
 > Task :app:createDebugApkListingFileRedirect
 > Task :app:assembleDebug
 
-BUILD SUCCESSFUL in 1m 22s
-38 actionable tasks: 7 executed, 31 up-to-date
+BUILD SUCCESSFUL in 1m 41s
+38 actionable tasks: 12 executed, 26 up-to-date

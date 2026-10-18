@@ -761,6 +761,24 @@ class BootstrapManager(private val ctx: Context) {
         staged: Map<String, ByteArray>,
         report: (String, Int) -> Unit,
     ) {
+        // v0.1.23 SELF-HEAL: if this pass ran with assets unavailable (staged
+        // map empty — wedged AAsset handle on some OEM ROMs) but a previous
+        // bootstrap already installed the helpers into files/bin/, reuse those
+        // bytes instead of falling back to the possibly-corrupt rootfs copy.
+        // Without this, a re-bootstrap after an update could OVERWRITE good
+        // rootfs copies with garbage read through a hostile path.
+        var healed = staged
+        if (healed.isEmpty()) {
+            val binDir0 = java.io.File(ctx.filesDir, "bin")
+            healed = listOf("emux-init.sh", "emux-x11", "emux-capture").mapNotNull { n ->
+                val f = java.io.File(binDir0, n)
+                if (f.isFile && f.length() in 1..MAX_ASSET_BYTES)
+                    runCatching { FileInputStream(f).use { readBounded(it, MAX_ASSET_BYTES) } }
+                        .getOrNull()?.let { n to it }
+                else null
+            }.toMap()
+        }
+        val stagedFinal = healed
         listOf("emux-init.sh", "emux-x11", "emux-capture").forEach { name ->
             // Heartbeat BEFORE each unit of work so the UI always advances even
             // if the following operation hits its timeout.
@@ -774,7 +792,7 @@ class BootstrapManager(private val ctx: Context) {
             // NEITHER source exists do we fail — and even then non-fatally for
             // convenience scripts, fatally only for emux-init.sh which the shell
             // launcher requires.
-            var bytes = staged[name]
+            var bytes = stagedFinal[name]
             if (bytes == null) {
                 bytes = runCatching {
                     if (out.isFile && out.length() in 1..MAX_ASSET_BYTES) FileInputStream(out).use {
@@ -805,10 +823,14 @@ class BootstrapManager(private val ctx: Context) {
             }
         }
         // Also stage them under $HOME so they're on PATH-ish locations for users.
-        // Convenience only — guarded and bounded, non-fatal.
+        // v0.1.23: emux-init.sh is included now — TerminalSession reads the
+        // launcher body from files/bin/ or the rootfs copy; if BOTH were lost
+        // (storage pressure cleared cache/home dirs, interrupted cleanup), the
+        // $HOME mirror is a third guaranteed-readable source in app-private
+        // storage that tar extraction can never clobber.
         try {
             val home = FsLayout.home(ctx)
-            listOf("emux-x11", "emux-capture").forEach { name ->
+            listOf("emux-init.sh", "emux-x11", "emux-capture").forEach { name ->
                 val src = File(dest, name)
                 if (src.isFile) {
                     runCatching {
@@ -837,7 +859,7 @@ class BootstrapManager(private val ctx: Context) {
                 if (!src.isFile) return@forEach
                 runCatching {
                     withHardTimeout(8_000L) {
-                        val bytes = staged[name] ?: FileInputStream(src).use { readBounded(it, MAX_ASSET_BYTES) }
+                        val bytes = stagedFinal[name] ?: FileInputStream(src).use { readBounded(it, MAX_ASSET_BYTES) }
                         if (replaceRegularFileWith(java.io.File(binDir, name)) { dst ->
                                 dst.outputStream().use { it.write(bytes) } }) {
                             java.io.File(binDir, name).setExecutable(true, false)

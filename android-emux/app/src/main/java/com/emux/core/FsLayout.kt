@@ -14,7 +14,7 @@ import java.io.File
  *   cache/tmp        -> $TMPDIR (cleared by OS on demand = friendly to storage)
  */
 object FsLayout {
-    const val ENV_VERSION = 6   // v0.1.22: musl loader bridge + TMPDIR socket paths + FIFO/nc frame push — helper scripts must re-install
+    const val ENV_VERSION = 7   // v0.1.23: launcher body now read from files/bin + $HOME mirrors (rootfs copy can be corrupt/missing after interrupted tar); EMUX_ARGV1 exported properly; helper self-heal — re-bootstrap required
 
     fun root(ctx: Context): File = ctx.filesDir
     fun usr(ctx: Context): File = File(root(ctx), "usr")
