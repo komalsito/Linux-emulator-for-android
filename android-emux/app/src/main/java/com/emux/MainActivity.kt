@@ -281,6 +281,42 @@ class MainActivity : AppCompatActivity() {
                     ""
                 }
                 if (line.isNotEmpty()) view.feed(line.toByteArray())
+                // v0.1.24 DIAGNOSTIC PROBE: every prior fix round was blind —
+                // we could not tell whether the distro shell actually starts,
+                // whether the musl loader execs, or which layer fails. Run one
+                // harmless self-test through the SAME launcher chain and print
+                // the verdict, so device feedback pinpoints the broken layer
+                // instead of costing another guess-and-rebuild cycle.
+                lifecycleScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+                    val probe = runCatching {
+                        val env = com.emux.core.FsLayout.sessionEnv(this@MainActivity)
+                        // v0.1.24: the probe script is shipped as an asset and
+                        // copied to files/bin by bootstrap; read its body in
+                        // Kotlin (plain file read — always allowed even on
+                        // noexec mounts) and run it through Android sh -c,
+                        // exactly like the session launcher does.
+                        val probeFile = java.io.File(filesDir, "bin/emux-init-probe.sh")
+                        val probeBody = runCatching { if (probeFile.isFile) probeFile.readText() else null }.getOrNull()
+                            ?: return@runCatching ""
+                        val pb = ProcessBuilder("/system/bin/sh", "-c", probeBody)
+                        pb.environment().clear(); pb.environment().putAll(env)
+                        pb.redirectErrorStream(true)
+                        val p = pb.start()
+                        val out = p.inputStream.bufferedReader().use { it.readText() }
+                        val wd = Thread { try { Thread.sleep(8_000); p.destroy() } catch (_: Exception) {} }.apply { isDaemon = true }
+                        wd.start(); p.waitFor(); wd.interrupt()
+                        out
+                    }.getOrDefault("[emux] probe failed to run\n")
+                    val summary = buildString {
+                        append("\n[emux] --- environment self-test ---\n")
+                        if (probe.contains("LOADER_OK")) append("[emux]   distro shell + musl loader: OK\n")
+                        else append("[emux]   distro shell/loader: FAILED -> " + probe.lineSequence().filter { it.isNotBlank() && !it.startsWith("EMUXPROBE") }.take(3).joinToString(" | ") + "\n")
+                        if (probe.contains("APK_OK")) append("[emux]   apk tool runs inside distro: OK\n")
+                        else append("[emux]   apk tool cannot run (see failure above)\n")
+                        append("[emux] ------------------------------\n")
+                    }
+                    kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) { view.feed(summary.toByteArray()) }
+                }
             }
         }
     }

@@ -14,7 +14,7 @@ import java.io.File
  *   cache/tmp        -> $TMPDIR (cleared by OS on demand = friendly to storage)
  */
 object FsLayout {
-    const val ENV_VERSION = 7   // v0.1.23: launcher body now read from files/bin + $HOME mirrors (rootfs copy can be corrupt/missing after interrupted tar); EMUX_ARGV1 exported properly; helper self-heal — re-bootstrap required
+    const val ENV_VERSION = 8   // v0.1.24: TtyWrap apostrophe-proof quoting + launcher body sanitization (the no-apostrophes guard made the sh -c path DEAD CODE — every session fell into the SELinux-denied direct exec)
 
     fun root(ctx: Context): File = ctx.filesDir
     fun usr(ctx: Context): File = File(root(ctx), "usr")

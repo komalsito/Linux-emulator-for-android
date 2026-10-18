@@ -304,25 +304,34 @@ class TerminalSession(
             val body = candidates.firstNotNullOfOrNull { f ->
                 runCatching { if (f.isFile) f.readText() else null }.getOrNull()
             } ?: ""
-            if (body.isNotBlank() && !body.contains('\'') && !shellCmd.contains('\'')) {
-                // v0.1.23 BUGFIX (keyboard STILL dead + desktop STILL black
-                // after every previous round): the old line was
-                // `EMUX_ARGV1='…' exec sh` — a variable assignment applied to
-                // the exec BUILTIN. POSIX is explicit that assignments
-                // prefixed to `exec` affect only the builtin itself and are
-                // NOT exported into the replaced process, so EMUX_ARGV1 never
-                // existed inside emux-init.sh: CMD fell back to "$*" (empty),
-                // terminal sessions started as a bare login shell through a
-                // fragile per-ROM code path, and desktop sessions ("emux-x11
-                // openbox") silently ran a plain shell instead — Xvfb NEVER
-                // started → black pane forever. Fix: export the variable in
-                // its own statement BEFORE the body runs, so it is genuinely
-                // part of the environment the launcher inherits. Also refuse
-                // this form when the command itself contains an apostrophe
-                // (single-quoted here) and fall through to direct invocation.
+            // v0.1.24 BUGFIX: the old guard demanded the script body contain NO
+            // apostrophes at all — but every shipped emux-init.sh has comments
+            // with apostrophes, so this branch NEVER ran on real installs. We
+            // fell into direct launcher invocation (`sh files/.../emux-init.sh`),
+            // which Android 10+ SELinux DENIES for app-data paths → instant
+            // silent death ("cannot type" persisted through v0.1.22/23 despite
+            // the noexec fix being present). Now we sanitize the body instead:
+            // drop single-quote characters from comment lines only (code lines
+            // of our launcher are quote-free by design; anything else is
+            // belt-and-braces removed too), keeping the '-quoted wrapper form
+            // safe even after TtyWrap re-quotes it for script(1).
+            val safeBody = body.lineSequence().joinToString("\n") { line ->
+                if (line.trimStart().startsWith("#")) line.replace("'", "") else line
+            }.replace("'", "")
+            if (safeBody.isNotBlank()) {
+                // v0.1.23 BUGFIX: the old line was `EMUX_ARGV1='…' exec sh` —
+                // a variable assignment applied to the exec BUILTIN. POSIX is
+                // explicit that assignments prefixed to `exec` affect only the
+                // builtin itself and are NOT exported into the replaced
+                // process, so EMUX_ARGV1 never existed inside emux-init.sh:
+                // CMD fell back to "$*" (empty) and desktop sessions silently
+                // ran a plain shell instead of "emux-x11 openbox" → black pane
+                // forever. Fix: export the variable in its own statement BEFORE
+                // the body runs, so it is genuinely part of the environment the
+                // launcher inherits.
                 ProcessBuilder(
                     "/system/bin/sh", "-c",
-                    "export EMUX_ARGV1='$shellCmd'\n$body",
+                    "export EMUX_ARGV1='$shellCmd'\n$safeBody",
                 )
             } else if (haveLauncher) {
                 // Fallback (body unreadable or contains apostrophes): direct
@@ -581,7 +590,17 @@ object TtyWrap {
         // shell; our entries never contain apostrophes (bootstrap paths and the
         // fixed commands above), so plain '<entry>' quoting is safe and keeps
         // multi-word desktop commands intact.
-        val inner = base.joinToString(" ") { "'" + it + "'" }
+        // v0.1.24 BUGFIX (THE reason typing still did nothing on stock
+        // Android): script(1) builds the child command as `sh -c '<inner>'`,
+        // so every apostrophe inside an entry became a QUOTE TERMINATOR for
+        // that inner shell. The launcher line we pass contains many
+        // apostrophes — `/system/bin/sh` (toybox sh's own name!), `-c`, and
+        // the `export EMUX_ARGV1='…'` wrapper — so quoting broke mid-string:
+        // toybox sh received garbage like `xport EMUX_ARGV1=` → "not found",
+        // the session died instantly, respawn looped, and the terminal looked
+        // permanently dead even though bootstrap said "Bootstrapped".
+        // POSIX single-quote semantics: close ', insert '\'' , reopen '.
+        val inner = base.joinToString(" ") { "'" + it.replace("'", "'\\''") + "'" }
         pb.command(
             when (dialect) {
                 Dialect.TOYBOX -> prefix + listOf("-q", "-f", "/dev/null", inner)
