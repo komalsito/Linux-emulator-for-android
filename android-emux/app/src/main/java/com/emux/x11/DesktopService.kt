@@ -156,8 +156,15 @@ class DesktopService(
                 // EMUX_BIN/PATH constants (compile error). Emux already exports
                 // EMUX_BIN and a PATH containing files/bin via FsLayout.sessionEnv;
                 // prepend the resolved helper dir explicitly as belt-and-braces.
-                val binP = emuxBin.absolutePath.replace("'", "'\\''")
-                val cmd = "sh -c 'export PATH=\"$binP:\$PATH\"; emux-x11 $wmCommand'"
+                // v0.1.20 BUGFIX: the old payload embedded its OWN single/double
+                // quotes ("sh -c 'export PATH=\"…\"; …'"). TtyWrap wraps every argv
+                // entry in single quotes for script(1)'s inner shell — nested
+                // single quotes are IMPOSSIBLE to survive that way, so the distro
+                // shell received a broken command line and Xvfb never started
+                // (black desktop forever). The helper dir is already prepended to
+                // PATH by FsLayout.sessionEnv + exported as EMUX_BIN, so plain
+                // `emux-x11 <wm>` resolves without any inline quoting at all.
+                val cmd = "emux-x11 $wmCommand"
                 xSession = TerminalSession(9001, ctx, root, cmd).also { it.start() }
 
                 // v0.1.18 BUGFIX #6: if the X server session dies (launcher exec
@@ -292,13 +299,20 @@ class DesktopService(
                 while (isActive) {
                     val minFrameMs = if (foreground && screenOn) 1000L / MAX_FPS_FOREGROUND
                         else 1000L / MAX_FPS_IDLE
-                    val fh = ByteArray(10)
+                    // v0.1.20 BUGFIX (desktop black): the sender's frame prefix is
+                    // 12 bytes (seq u32 | w u16 | h u16 | x u16 | y u16), but this
+                    // reader consumed only 10 — every subsequent read was offset by
+                    // two bytes, so dw/dh decoded as garbage (usually 0 → `continue`
+                    // forever, or huge → EOF exception). Now both sides agree on a
+                    // FIXED full-frame protocol: 12-byte header + exactly W*H*2
+                    // payload bytes, always at (0,0) with W,H from the stream header.
+                    val fh = ByteArray(12)
                     din.readFully(fh)                 // blocks: parked thread when idle
                     val fb = ByteBuffer.wrap(fh).order(ByteOrder.LITTLE_ENDIAN)
-                    val dw = fb.getShort(2).toInt() and 0xFFFF
-                    val dh = fb.getShort(4).toInt() and 0xFFFF
-                    val dx = fb.getShort(6).toInt() and 0xFFFF
-                    val dy = fb.getShort(8).toInt() and 0xFFFF
+                    val dw = fb.getShort(4).toInt() and 0xFFFF
+                    val dh = fb.getShort(6).toInt() and 0xFFFF
+                    val dx = fb.getShort(8).toInt() and 0xFFFF
+                    val dy = fb.getShort(10).toInt() and 0xFFFF
                     if (dw <= 0 || dh <= 0) continue
 
                     val rowBytes = dw * 2
@@ -344,25 +358,15 @@ class DesktopService(
     /** Convert incoming RGB565 rows into the reused RGB_565 bitmap (memcpy-fast). */
     private fun writeDirtyRegion(x: Int, y: Int, w: Int, h: Int, rows: Array<ByteArray>) {
         val bmp = currentFrame ?: return
-        // Android RGB_565 stores little-endian 16-bit pixels exactly like X's
-        // default visual masks after our B/R swap — so swap per 16-bit unit.
+        // v0.1.20 BUGFIX (garbage colors even if frames arrived): the old code
+        // byte-swapped every pixel through an intermediate buffer using bit math
+        // that mixed up the field boundaries. The wire format is plain RGB565
+        // LITTLE-ENDIAN (bit 15..11 = R, 10..5 = G, 4..0 = B), so decode each
+        // LE 16-bit unit directly into ARGB — no swap, no staging buffer.
         val buf = ByteArray(w * h * 2)
         for (r in 0 until h) {
             val src = rows[r]
             System.arraycopy(src, 0, buf, r * w * 2, src.size)
-        }
-        // swap R/B nibbles of each pixel (5-6-5 layout: [RRRRR GGGGGG BBBBB])
-        var i = 0
-        while (i + 1 < buf.size) {
-            val lo = buf[i]; val hi = buf[i + 1]
-            // extract fields
-            val b5 = (lo.toInt() and 0b11111)
-            val g6 = ((lo.toInt() shr 5) and 0b11) or ((hi.toInt() and 0b1111) shl 2)
-            val r5 = (hi.toInt() shr 4) and 0b11111
-            val swapped = (b5) or (g6 shl 5) or (r5 shl 11)
-            buf[i] = (swapped and 0xFF).toByte()
-            buf[i + 1] = ((swapped shr 8) and 0xFF).toByte()
-            i += 2
         }
         synchronized(frameLock) {
             // setPixels needs IntArray; do the widening once here (still allocation-free

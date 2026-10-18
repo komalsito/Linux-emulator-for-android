@@ -13,18 +13,17 @@ Daemon will be stopped at the end of the build
 > Task :app:dataBindingGenBaseClassesDebug UP-TO-DATE
 > Task :app:checkDebugAarMetadata UP-TO-DATE
 > Task :app:mapDebugSourceSetPaths UP-TO-DATE
-> Task :app:createDebugCompatibleScreenManifests UP-TO-DATE
+> Task :app:createDebugCompatibleScreenManifests
 > Task :app:extractDeepLinksDebug UP-TO-DATE
-> Task :app:processDebugMainManifest UP-TO-DATE
-> Task :app:processDebugManifest UP-TO-DATE
-> Task :app:processDebugManifestForPackage UP-TO-DATE
-> Task :app:processDebugResources UP-TO-DATE
+> Task :app:processDebugMainManifest
+> Task :app:processDebugManifest
 > Task :app:javaPreCompileDebug UP-TO-DATE
 > Task :app:mergeDebugShaders UP-TO-DATE
 > Task :app:compileDebugShaders NO-SOURCE
+> Task :app:processDebugManifestForPackage
 > Task :app:generateDebugAssets UP-TO-DATE
-> Task :app:mergeDebugAssets UP-TO-DATE
-> Task :app:compressDebugAssets UP-TO-DATE
+> Task :app:mergeDebugAssets
+> Task :app:compressDebugAssets
 > Task :app:desugarDebugFileDependencies UP-TO-DATE
 > Task :app:checkDebugDuplicateClasses UP-TO-DATE
 > Task :app:mergeDebugStartupProfile UP-TO-DATE
@@ -36,16 +35,23 @@ Daemon will be stopped at the end of the build
 > Task :app:validateSigningDebug UP-TO-DATE
 > Task :app:writeDebugAppMetadata UP-TO-DATE
 > Task :app:writeDebugSigningConfigVersions UP-TO-DATE
+> Task :app:processDebugResources
 > Task :app:compileDebugKotlin
-> Task :app:compileDebugJavaWithJavac UP-TO-DATE
+w: file:///workspace/android-emux/app/src/main/java/com/emux/terminal/TerminalSession.kt:293:16 Parameter 'cols' is never used
+w: file:///workspace/android-emux/app/src/main/java/com/emux/terminal/TerminalSession.kt:293:27 Parameter 'rows' is never used
+w: file:///workspace/android-emux/app/src/main/java/com/emux/terminal/VtTerminalView.kt:318:46 Parameter 'y1' is never used
+w: file:///workspace/android-emux/app/src/main/java/com/emux/terminal/VtTerminalView.kt:448:13 Variable 'fm' is never used
+w: file:///workspace/android-emux/app/src/main/java/com/emux/terminal/VtTerminalView.kt:506:9 'invalidate(Int, Int, Int, Int): Unit' is deprecated. Deprecated in Java
+
+> Task :app:compileDebugJavaWithJavac
 > Task :app:dexBuilderDebug
 > Task :app:mergeDebugGlobalSynthetics UP-TO-DATE
 > Task :app:processDebugJavaRes UP-TO-DATE
 > Task :app:mergeDebugJavaResource UP-TO-DATE
 > Task :app:mergeProjectDexDebug
 > Task :app:packageDebug
-> Task :app:createDebugApkListingFileRedirect UP-TO-DATE
+> Task :app:createDebugApkListingFileRedirect
 > Task :app:assembleDebug
 
-BUILD SUCCESSFUL in 47s
-38 actionable tasks: 5 executed, 33 up-to-date
+BUILD SUCCESSFUL in 1m 41s
+38 actionable tasks: 14 executed, 24 up-to-date

@@ -103,7 +103,19 @@ class VtTerminalView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attr
         // looked right. Termux's emulated-UI terminal declares itself a text
         // editor the same way.
         isFocusable = true
+        // v0.1.20 BUGFIX: MainActivity.onResume does
+        //   b.termContainer.findViewWithTag<VtTerminalView>("term")?.requestFocus()
+        // but the tag was only ever set inside onTouchEvent — i.e. AFTER the
+        // first tap. Before any touch the lookup returned null, focus was never
+        // restored (after tab switches / activity pause-resume), and the IME
+        // connection died with it: typing did nothing. Set the identity here.
+        tag = "term"
         screen = buildScreen(rows, cols)
+    }
+
+    override fun onAttachedToWindow() {
+        super.onAttachedToWindow()
+        if (tag == null) tag = "term"
     }
 
     override fun onCheckIsTextEditor(): Boolean = true
@@ -539,7 +551,11 @@ class VtTerminalView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attr
             KeyEvent.KEYCODE_DPAD_UP -> if (applicationCursorKeys) "\u001BOA" else "\u001B[A"
             KeyEvent.KEYCODE_DPAD_DOWN -> if (applicationCursorKeys) "\u001BOB" else "\u001B[B"
             KeyEvent.KEYCODE_DPAD_RIGHT -> if (applicationCursorKeys) "\u001BOC" else "\u001B[C"
-            KeyEvent.KEYCODE_DPAD_LEFT -> if (applicationCursorKeys) "\u001BOD" else "\u001BD"[0].toString() + "\u001B[D"
+            // v0.1.20 BUGFIX: the old "else" branch was
+            //   "\u001BD"[0].toString() + "\u001B[D"  → ESC ESC [ D
+            // a stray extra ESC before the CSI, which readline interprets as
+            // Meta- prefix and then discards — left arrow appeared dead.
+            KeyEvent.KEYCODE_DPAD_LEFT -> if (applicationCursorKeys) "\u001BOD" else "\u001B[D"
             else -> null
         }
         if (seq != null) { s.write(seq.toByteArray()); return true }
@@ -554,8 +570,14 @@ class VtTerminalView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attr
     fun sendBytes(b: ByteArray) { session?.write(b) }
 
     override fun onCreateInputConnection(outAttrs: EditorInfo): InputConnection {
+        // v0.1.20 BUGFIX: TYPE_TEXT_VARIATION_VISIBLE_PASSWORD is the standard
+        // terminal trick (Termux uses it): every known soft keyboard disables
+        // autocorrect, capitalization and word suggestions for it, so composed
+        // text arrives verbatim instead of being silently "corrected". The old
+        // flags still let some IMEs suggest-replace, duplicating keystrokes.
         outAttrs.inputType = EditorInfo.TYPE_CLASS_TEXT or
-            EditorInfo.TYPE_TEXT_FLAG_NO_SUGGESTIONS or EditorInfo.TYPE_TEXT_FLAG_MULTI_LINE
+            EditorInfo.TYPE_TEXT_VARIATION_VISIBLE_PASSWORD or
+            EditorInfo.TYPE_TEXT_FLAG_NO_SUGGESTIONS
         outAttrs.imeOptions = EditorInfo.IME_FLAG_NO_EXTRACT_UI or EditorInfo.IME_FLAG_NO_FULLSCREEN
         return object : BaseInputConnection(this, false) {
             // v0.1.17 BUGFIX (keyboard could not type at all): the IME talks to
@@ -568,52 +590,71 @@ class VtTerminalView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attr
             // small local buffer (so surrounding-text / backspace queries work),
             // flush committed+composing text to the PTY, and translate IME
             // enter/delete into real terminal bytes.
+            // v0.1.20 BUGFIX (duplicated + lost characters): the old code kept a
+            // buffer `tx`, appended to it in BOTH setComposingText and commitText
+            // (so an IME that composes then commits sends the text twice), and
+            // CLEARED tx on Enter (so un-flushed composing text vanished). Now
+            // every character goes straight to the PTY immediately; `tx` only
+            // tracks the current composing run so backspace can erase it.
             private val tx = StringBuilder()
 
-            private fun flushToPty() {
-                val s = session ?: return
-                if (tx.isNotEmpty()) {
-                    s.write(tx.toString().toByteArray(Charsets.UTF_8))
-                    tx.setLength(0)
-                }
+            private fun writeToPty(text: CharSequence) {
+                if (text.isEmpty()) return
+                session?.write(text.toString().toByteArray(Charsets.UTF_8))
             }
 
             override fun commitText(text: CharSequence?, pos: Int): Boolean {
-                tx.append(text ?: "")
-                flushToPty()
+                // Composing runs are already on the PTY; committing NEW text means
+                // send exactly what isn't already streamed.
+                val t = text ?: ""
+                val sent = if (tx.isNotEmpty() && t.startsWith(tx)) t.substring(tx.length) else t
+                tx.setLength(0)
+                writeToPty(sent)
                 return true
             }
 
             override fun setComposingText(text: CharSequence?, pos: Int): Boolean {
-                // Replace our tracked composing run with the new one; do NOT send
-                // yet — it goes out when composed/committed or when the user hits
-                // enter/backspace.
-                tx.setLength(0)
-                tx.append(text ?: "")
+                val t = text ?: ""
+                // Stream only the DELTA vs the previous composing run; shrink → BS.
+                if (t.length < tx.length) {
+                    repeat(tx.length - t.length) { session?.write(byteArrayOf(0x7F)) }
+                } else if (t.length > tx.length && t.startsWith(tx)) {
+                    writeToPty(t.substring(tx.length))
+                } else if (t != tx) {
+                    // Whole-run replacement: erase ours, stream theirs.
+                    repeat(tx.length) { session?.write(byteArrayOf(0x7F)) }
+                    writeToPty(t)
+                }
+                tx.setLength(0); tx.append(t)
                 return true
             }
 
-            override fun finishComposingText(): Boolean { flushToPty(); return true }
+            override fun finishComposingText(): Boolean { tx.setLength(0); return true }
 
             // v0.1.17 NOTE: endBatchedEdit() is API 31+ — overriding it
             // unconditionally fails compilation against the app's minSdk stubs,
             // so we don't; composing text is flushed on commit/finish anyway.
 
             override fun deleteSurroundingText(before: Int, after: Int): Boolean {
-                if (tx.isNotEmpty()) { tx.setLength(tx.length - 1); return true }
-                session?.write(byteArrayOf(0x7F))   // DEL → readline backspace
+                // Characters are already ON the PTY, so backspace must ALWAYS be
+                // forwarded — dropping it into the local buffer (old behaviour)
+                // desynced the shell line from what we had typed.
+                val n = if (tx.isNotEmpty()) { tx.setLength(tx.length - 1); 0 } else 0
+                repeat((before.coerceAtLeast(1)) - n) { session?.write(byteArrayOf(0x7F)) }
                 return true
             }
 
             override fun sendKeyEvent(e: KeyEvent?): Boolean {
                 if (e?.action == KeyEvent.ACTION_DOWN) {
                     if (e.keyCode == KeyEvent.KEYCODE_ENTER) {
+                        // v0.1.20: NEVER discard tx here — the composing text is
+                        // already streamed to the PTY; just reset tracking + CR.
                         tx.setLength(0)
                         session?.write(byteArrayOf('\r'.code.toByte()))
                         return true
                     }
                     if (e.keyCode == KeyEvent.KEYCODE_DEL) {
-                        if (tx.isNotEmpty()) { tx.setLength(tx.length - 1); return true }
+                        if (tx.isNotEmpty()) tx.setLength(tx.length - 1)
                         session?.write(byteArrayOf(0x7F)); return true
                     }
                     onKeyDown(e.keyCode, e)

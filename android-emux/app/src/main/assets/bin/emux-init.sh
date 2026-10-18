@@ -23,9 +23,33 @@ LOADER=""
 for L in "$ROOT/lib/ld-musl-aarch64.so.1" "$ROOT/lib/ld-linux-aarch64.so.1"; do
   [ -x "$L" ] && { LOADER="$L"; break; }
 done
+# v0.1.20 BUGFIX (desktop never started): the script ALWAYS exec'd a plain
+# login shell and ignored its command argument, so TerminalSession's desktop
+# launches (`emux-x11 openbox`, `emux-capture 127.0.0.1:7001`) were silently
+# replaced by an interactive shell — Xvfb never ran, port 6000 never opened,
+# no frames ever arrived, pane stayed black forever. Now: when a command is
+# passed, run it through the distro shell via `-c`; with no args, plain login
+# shell as before.
+# v0.1.20: callers pass the command as MULTIPLE argv slots (no shell quoting
+# survives the Android sh + PTY-wrapper layers intact), so reassemble with "$@"
+# rather than relying on a single pre-quoted $1.
+CMD="$*"
 SHELL_BIN="$ROOT/bin/sh"
 if [ -x "$SHELL_BIN" ]; then
-  cd "${HOME:-/}" 2>/dev/null || true
+  # Alpine ships NO bash in the minirootfs —FsLayout exported SHELL=/bin/bash,
+  # which made every `$SHELL -c` / prompt lookup fail on fresh installs.
+  [ -x "$ROOT/bin/bash" ] || export SHELL=/bin/sh
+  cd "${EMUX_DISTRO_HOME:-$ROOT/home-emu}" 2>/dev/null \
+    || { mkdir -p "$ROOT/home-emu" 2>/dev/null; cd "$ROOT/home-emu" 2>/dev/null; } \
+    || cd "${HOME:-/}" 2>/dev/null || true
+  LOADER_ARGS=""
+  [ -n "$LOADER" ] && LOADER_ARGS="--library-path $LD_LIBRARY_PATH"
+  if [ -n "$CMD" ]; then
+    if [ -n "$LOADER" ]; then
+      exec $LOADER $LOADER_ARGS "$SHELL_BIN" -l -c "$CMD"
+    fi
+    exec "$SHELL_BIN" -l -c "$CMD"
+  fi
   if [ -n "$LOADER" ]; then
     exec "$LOADER" --library-path "$LD_LIBRARY_PATH" "$SHELL_BIN" -l
   fi

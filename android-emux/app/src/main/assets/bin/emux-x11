@@ -12,8 +12,15 @@ else
   # therefore NEVER succeed and the desktop died in State.ERROR every time.
   # "-listen tcp" enables it (loopback-only server; no external exposure).
   mkdir -p /tmp/.X11-unix
-  touch /tmp/xauth; chmod 600 /tmp/xauth 2>/dev/null
-  Xvfb :0 -screen 0 "$RES" -listen tcp -auth /tmp/xauth >/tmp/xvfb.log 2>&1 &
+  # v0.1.20 BUGFIX (control plane refused): "-auth /tmp/xauth" pointed at an
+  # EMPTY file, so X required a MIT-MAGIC-COOKIE the Android X11Client never
+  # sends → setup reply was "Access denied" even though TCP :6000 opened and
+  # waitForPort succeeded. "-ac" disables access control entirely (safe: the
+  # server is only reachable from this device's own loopback). Also clear a
+  # stale lock left by a killed previous attempt, which makes Xvfb exit with
+  # "server already running" forever after any crash.
+  rm -f /tmp/.X0-lock 2>/dev/null
+  Xvfb :0 -screen 0 "$RES" -listen tcp -ac >/tmp/xvfb.log 2>&1 &
 fi
 XPID=$!
 # wait for socket, max 15s

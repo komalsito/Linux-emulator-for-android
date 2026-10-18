@@ -207,8 +207,15 @@ class TerminalSession(
             // "emux-x11 openbox" etc.) instead of hardcoding a login shell, and
             // use one single-quoted payload with no nested double quotes so the
             // sh → su -c quoting chain survives intact on every Android shell.
+            // v0.1.20 BUGFIX: the old payload embedded ESCAPED DOUBLE QUOTES
+            // inside the single-quoted `su -c '…'` string — toybox sh passes
+            // them through VERBATIM, so su received `-c "cd && exec …"` with
+            // literal quote characters and died with a syntax error. Desktop
+            // sessions (`emux-x11 openbox`) therefore never started Xvfb. The
+            // command is passed UNQUOTED now; word-splitting inside the distro
+            // shell is harmless for our simple commands.
             ProcessBuilder("/system/bin/sh", "-c",
-                "su -c 'chroot $rootfs /bin/sh -l -c \"$shellCmd\"'")
+                "su -c 'chroot $rootfs /bin/sh -l -c $shellCmd'")
         } else if (init.isFile) {
             // v0.1.18 BUGFIX #2: the old gate was `init.canExecute()`. Bootstrap
             // sets the exec bit via File.setExecutable(true,false), which maps to
@@ -222,7 +229,18 @@ class TerminalSession(
             // insurance against any bootstrap-path regression), invoking through
             // the interpreter explicitly as a last hedge against noexec quirks.
             runCatching { init.setExecutable(true, false); init.setReadable(true, false) }
-            ProcessBuilder("/system/bin/sh", init.absolutePath, shellCmd)
+            // v0.1.20 BUGFIX (keyboard dead + desktop commands mangled): the old
+            // form `sh <init> "<shellCmd>"` handed the payload through TWO shell
+            // layers that each re-quote it — Android's toybox sh splits $1 per
+            // WORD once quoting is involved, and TtyWrap's inner `sh -c '<argv>'`
+            // turns any embedded quotes into literal syntax errors. Result: the
+            // distro launcher received garbage ("sh" alone, or a broken quoted
+            // blob), died instantly with zero output → "bootstrapped but cannot
+            // type / blank desktop". We now pass the command UNQUOTED across
+            // multiple argv slots; emux-init.sh reassembles them verbatim with
+            // "$*" and execs `$SHELL -l -c "$cmd"` INSIDE the distro, where the
+            // single remaining shell sees the pristine string.
+            ProcessBuilder("/system/bin/sh", init.absolutePath, *shellCmd.split(" ").toTypedArray())
         } else {
             // No launcher yet (partial bootstrap): plain Android shell PLUS an
             // explicit notice, so the screen is never silently blank.
@@ -263,11 +281,16 @@ class TerminalSession(
         } catch (_: Exception) { /* dead session; state flow already DEAD */ }
     }
 
-    fun resize(cols: Int, rows: Int) {
-        // Best-effort TIOCSWINSZ via stty on the tty; termux's JNI does this exactly.
-        // Without NDK we ask the child itself to re-read size on next prompt.
-        write("\u001b[999;999H\u001b[6n".toByteArray()) // cursor-position report trick
-    }
+    /**
+     * v0.1.20 BUGFIX: the old implementation WROTE raw escape sequences
+     * ("cursor position report" trick) into the shell's STDIN — i.e. it typed
+     * invisible garbage into whatever line the user was editing, corrupting
+     * input ("interface doesn't let me type" felt like random keys vanishing).
+     * Without an NDK there is no way to issue TIOCSWINSZ on the wrapper's pty
+     * from Java, so the honest fix is to do NOTHING here. The distro shells
+     * default to sane geometry and the renderer uses its own grid.
+     */
+    fun resize(cols: Int, rows: Int) { /* intentionally inert — see docstring */ }
 
     private fun touchWake() {
         if (!wakeLock.isHeld) runCatching { wakeLock.acquire(IDLE_WAKE_MS) }
@@ -323,6 +346,10 @@ object TtyWrap {
     @Volatile private var resolved: List<String>? = null
     @Volatile private var probed = false
 
+    /** Which script(1) argument dialect the probed binary actually speaks. */
+    enum class Dialect { TOYBOX, BBSTYLE }
+    @Volatile private var dialect: Dialect = Dialect.TOYBOX
+
     private fun probe(): List<String>? {
         if (probed) return resolved
         synchronized(this) {
@@ -340,12 +367,38 @@ object TtyWrap {
                         val out = p.inputStream.bufferedReader().use { it.readText() }
                         val wd = Thread { try { Thread.sleep(2_000); p.destroy() } catch (_: Exception) {} }.apply { isDaemon = true }
                         wd.start(); val code = try { p.waitFor() } catch (_: Exception) { -1 }; wd.interrupt()
-                        code == 0 && !out.contains("not found") && !out.contains("applet not found")
+                        if (!(code == 0 && !out.contains("not found") && !out.contains("applet not found"))) {
+                            false
+                        } else {
+                            // Applet exists — now find which arg dialect it speaks.
+                            fun bbTry(args: List<String>): Boolean = runCatching {
+                                val pp = ProcessBuilder(listOf(c, "script") + args)
+                                    .redirectErrorStream(true)
+                                    .redirectInput(ProcessBuilder.Redirect.from(File("/dev/null")))
+                                    .start()
+                                val wdx = Thread { try { Thread.sleep(3_000); pp.destroy() } catch (_: Exception) {} }.apply { isDaemon = true }
+                                wdx.start(); val cc = try { pp.waitFor() } catch (_: Exception) { -1 }; wdx.interrupt()
+                                cc == 0
+                            }.getOrDefault(false)
+                            when {
+                                bbTry(listOf("-q", "-f", "/dev/null", "true")) -> { dialect = Dialect.TOYBOX; true }
+                                bbTry(listOf("-q", "-c", "true", "/dev/null")) -> { dialect = Dialect.BBSTYLE; true }
+                                else -> false
+                            }
+                        }
                     }.getOrDefault(false)
                 } else {
-                    // Bare script(1): must accept -q and -c (toybox & busybox do).
-                    runCatching {
-                        val p = ProcessBuilder(c, "-qfc", "true", "/dev/null")
+                    // v0.1.20 BUGFIX (THE core keyboard bug): script(1) has TWO
+                    // incompatible dialects and the old probe used neither
+                    // correctly on stock Android:
+                    //   toybox   : script [-q] [-f TYPESCRIPT] COMMAND   (cmd POSITIONAL after file)
+                    //   busybox  : script [-q] [-c CMD] [TYPESCRIPT]     (cmd via -c, then file)
+                    // The old `-qfc true /dev/null` made toybox treat "true" as a
+                    // FILE and "/dev/null" as the COMMAND → probe failed → NO PTY
+                    // ever → fully-buffered pipes → zero output on screen ("cannot
+                    // type"). Probe BOTH dialects and remember which one works.
+                    fun tryArgs(args: List<String>): Boolean = runCatching {
+                        val p = ProcessBuilder(listOf(c) + args)
                             .redirectErrorStream(true)
                             .redirectInput(ProcessBuilder.Redirect.from(File("/dev/null")))
                             .start()
@@ -353,10 +406,18 @@ object TtyWrap {
                         wd.start(); val code = try { p.waitFor() } catch (_: Exception) { -1 }; wd.interrupt()
                         code == 0
                     }.getOrDefault(false)
+                    when {
+                        tryArgs(listOf("-q", "-f", "/dev/null", "true")) -> { dialect = Dialect.TOYBOX; true }
+                        tryArgs(listOf("-q", "-c", "true", "/dev/null")) -> { dialect = Dialect.BBSTYLE; true }
+                        else -> false
+                    }
                 }
                 if (ok) {
-                    com.emux.EmuXLog.i("TtyWrap: PTY wrapper = $c")
-                    resolved = if (c.endsWith("busybox")) listOf(c, "script") else listOf(c)
+                    com.emux.EmuXLog.i("TtyWrap: PTY wrapper = $c ($dialect)")
+                    resolved = when {
+                        c.endsWith("busybox") -> listOf(c, "script")
+                        else -> listOf(c)
+                    }
                     break
                 }
             }
@@ -373,8 +434,18 @@ object TtyWrap {
         val prefix = probe() ?: return
         val base = pb.command()
         if (base.isEmpty()) return
-        // Quote the inner argv for the wrapper's shell (-c payload).
-        val inner = base.joinToString(" ") { "'" + it.replace("'", "'\\''") + "'" }
-        pb.command(prefix + listOf("-qfc", inner, "/dev/null"))
+        // v0.1.20 BUGFIX: build argv per the PROBED dialect instead of the old
+        // one-size-fits-all `-qfc` form that neither toybox nor busybox accepted
+        // at runtime. Each argv entry is single-quoted for the wrapper's inner
+        // shell; our entries never contain apostrophes (bootstrap paths and the
+        // fixed commands above), so plain '<entry>' quoting is safe and keeps
+        // multi-word desktop commands intact.
+        val inner = base.joinToString(" ") { "'" + it + "'" }
+        pb.command(
+            when (dialect) {
+                Dialect.TOYBOX -> prefix + listOf("-q", "-f", "/dev/null", inner)
+                Dialect.BBSTYLE -> prefix + listOf("-q", "-c", inner, "/dev/null")
+            },
+        )
     }
 }
