@@ -116,6 +116,18 @@ class VtTerminalView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attr
     override fun onAttachedToWindow() {
         super.onAttachedToWindow()
         if (tag == null) tag = "term"
+        // v0.1.25 BUGFIX: request focus as soon as the view enters the window.
+        // Previously focus only came from MainActivity.onResume's tag lookup or
+        // a tap; if the activity was already resumed when this view got added
+        // (tab switch, session attach), nothing ever focused it -> onCreateInputConnection
+        // never ran -> IME had no editor to type into ("cannot write on the terminal").
+        post { requestFocus(); showKeyboard() }
+    }
+
+    override fun onFocusChanged(gainFocus: Boolean, direction: Int, previouslyFocusedRect: android.graphics.Rect?) {
+        super.onFocusChanged(gainFocus, direction, previouslyFocusedRect)
+        // Keep the soft keyboard bound to this view whenever it gains focus.
+        if (gainFocus) showKeyboard()
     }
 
     override fun onCheckIsTextEditor(): Boolean = true

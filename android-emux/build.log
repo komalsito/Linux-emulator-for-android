@@ -1,58 +1,17 @@
+nohup: ignoring input
 To honour the JVM settings for this build a single-use Daemon process will be forked. For more on this, please refer to https://docs.gradle.org/8.7/userguide/gradle_daemon.html#sec:disabling_the_daemon in the Gradle documentation.
-Daemon will be stopped at the end of the build 
-> Task :app:preBuild UP-TO-DATE
-> Task :app:preDebugBuild UP-TO-DATE
-> Task :app:mergeDebugNativeDebugMetadata NO-SOURCE
-> Task :app:checkKotlinGradlePluginConfigurationErrors
-> Task :app:dataBindingMergeDependencyArtifactsDebug UP-TO-DATE
-> Task :app:generateDebugResValues UP-TO-DATE
-> Task :app:generateDebugResources UP-TO-DATE
-> Task :app:mergeDebugResources UP-TO-DATE
-> Task :app:packageDebugResources UP-TO-DATE
-> Task :app:parseDebugLocalResources UP-TO-DATE
-> Task :app:dataBindingGenBaseClassesDebug UP-TO-DATE
-> Task :app:checkDebugAarMetadata UP-TO-DATE
-> Task :app:mapDebugSourceSetPaths UP-TO-DATE
-> Task :app:createDebugCompatibleScreenManifests
-> Task :app:extractDeepLinksDebug UP-TO-DATE
-> Task :app:processDebugMainManifest
-> Task :app:processDebugManifest
-> Task :app:javaPreCompileDebug UP-TO-DATE
-> Task :app:mergeDebugShaders UP-TO-DATE
-> Task :app:compileDebugShaders NO-SOURCE
-> Task :app:generateDebugAssets UP-TO-DATE
-> Task :app:mergeDebugAssets UP-TO-DATE
-> Task :app:processDebugManifestForPackage
-> Task :app:compressDebugAssets UP-TO-DATE
-> Task :app:desugarDebugFileDependencies UP-TO-DATE
-> Task :app:checkDebugDuplicateClasses UP-TO-DATE
-> Task :app:mergeDebugStartupProfile UP-TO-DATE
-> Task :app:mergeExtDexDebug UP-TO-DATE
-> Task :app:mergeLibDexDebug UP-TO-DATE
-> Task :app:mergeDebugJniLibFolders UP-TO-DATE
-> Task :app:mergeDebugNativeLibs NO-SOURCE
-> Task :app:stripDebugDebugSymbols NO-SOURCE
-> Task :app:validateSigningDebug UP-TO-DATE
-> Task :app:writeDebugAppMetadata UP-TO-DATE
-> Task :app:writeDebugSigningConfigVersions UP-TO-DATE
-> Task :app:processDebugResources
-> Task :app:compileDebugKotlin
-w: file:///workspace/android-emux/app/src/main/java/com/emux/terminal/TerminalSession.kt:386:16 Parameter 'cols' is never used
-w: file:///workspace/android-emux/app/src/main/java/com/emux/terminal/TerminalSession.kt:386:27 Parameter 'rows' is never used
-
-> Task :app:compileDebugJavaWithJavac
-> Task :app:dexBuilderDebug
-> Task :app:mergeDebugGlobalSynthetics UP-TO-DATE
-> Task :app:processDebugJavaRes UP-TO-DATE
-> Task :app:mergeDebugJavaResource UP-TO-DATE
-> Task :app:mergeProjectDexDebug
-> Task :app:packageDebug
-> Task :app:createDebugApkListingFileRedirect
-> Task :app:assembleDebug
-
-BUILD SUCCESSFUL in 1m 41s
-38 actionable tasks: 12 executed, 26 up-to-date
-To honour the JVM settings for this build a single-use Daemon process will be forked. For more on this, please refer to https://docs.gradle.org/8.7/userguide/gradle_daemon.html#sec:disabling_the_daemon in the Gradle documentation.
+Exception in thread "DisconnectableInputStream source reader" org.gradle.api.UncheckedIOException: java.io.IOException: Bad file descriptor
+	at org.gradle.internal.UncheckedException.throwAsUncheckedException(UncheckedException.java:62)
+	at org.gradle.internal.UncheckedException.throwAsUncheckedException(UncheckedException.java:41)
+	at org.gradle.util.internal.DisconnectableInputStream$1.run(DisconnectableInputStream.java:127)
+	at java.base/java.lang.Thread.run(Thread.java:840)
+Caused by: java.io.IOException: Bad file descriptor
+	at java.base/java.io.FileInputStream.readBytes(Native Method)
+	at java.base/java.io.FileInputStream.read(FileInputStream.java:276)
+	at java.base/java.io.BufferedInputStream.read1(BufferedInputStream.java:282)
+	at java.base/java.io.BufferedInputStream.read(BufferedInputStream.java:343)
+	at org.gradle.util.internal.DisconnectableInputStream$1.run(DisconnectableInputStream.java:98)
+	... 1 more
 Daemon will be stopped at the end of the build 
 > Task :app:preBuild UP-TO-DATE
 > Task :app:preDebugBuild UP-TO-DATE
@@ -91,17 +50,32 @@ Daemon will be stopped at the end of the build
 > Task :app:writeDebugAppMetadata UP-TO-DATE
 > Task :app:writeDebugSigningConfigVersions UP-TO-DATE
 > Task :app:compileDebugKotlin
-w: file:///workspace/android-emux/app/src/main/java/com/emux/MainActivity.kt:516:37 Unsafe use of a nullable receiver of type Any?
+w: file:///workspace/android-emux/app/src/main/java/com/emux/MainActivity.kt:537:37 Unsafe use of a nullable receiver of type Any?
+w: file:///workspace/android-emux/app/src/main/java/com/emux/SettingsActivity.kt:106:71 Unnecessary safe call on a non-null receiver of type Throwable?
+w: file:///workspace/android-emux/app/src/main/java/com/emux/SettingsActivity.kt:106:96 Unnecessary safe call on a non-null receiver of type Throwable?
+w: file:///workspace/android-emux/app/src/main/java/com/emux/api/EmuXExecuteService.kt:3:20 'IntentService' is deprecated. Deprecated in Java
+w: file:///workspace/android-emux/app/src/main/java/com/emux/api/EmuXExecuteService.kt:13:28 'constructor IntentService(String!)' is deprecated. Deprecated in Java
+w: file:///workspace/android-emux/app/src/main/java/com/emux/api/EmuXExecuteService.kt:13:28 'IntentService' is deprecated. Deprecated in Java
+w: file:///workspace/android-emux/app/src/main/java/com/emux/core/BootstrapReporter.kt:34:17 Parameter 'ctx' is never used
+w: file:///workspace/android-emux/app/src/main/java/com/emux/core/BootstrapReporter.kt:40:22 Parameter 'ctx' is never used
+w: file:///workspace/android-emux/app/src/main/java/com/emux/terminal/ExtraKeysView.kt:65:37 Parameter 'tv' is never used
+w: file:///workspace/android-emux/app/src/main/java/com/emux/terminal/TerminalSession.kt:395:16 Parameter 'cols' is never used
+w: file:///workspace/android-emux/app/src/main/java/com/emux/terminal/TerminalSession.kt:395:27 Parameter 'rows' is never used
+w: file:///workspace/android-emux/app/src/main/java/com/emux/terminal/VtTerminalView.kt:330:46 Parameter 'y1' is never used
+w: file:///workspace/android-emux/app/src/main/java/com/emux/terminal/VtTerminalView.kt:460:13 Variable 'fm' is never used
+w: file:///workspace/android-emux/app/src/main/java/com/emux/terminal/VtTerminalView.kt:518:9 'invalidate(Int, Int, Int, Int): Unit' is deprecated. Deprecated in Java
+w: file:///workspace/android-emux/app/src/main/java/com/emux/x11/DesktopView.kt:108:15 Elvis operator (?:) always returns the left operand of non-nullable type ScaleGestureDetector
+w: file:///workspace/android-emux/app/src/main/java/com/emux/x11/X11Client.kt:146:13 Variable 'release' is never used
 
-> Task :app:compileDebugJavaWithJavac UP-TO-DATE
+> Task :app:compileDebugJavaWithJavac
 > Task :app:dexBuilderDebug
 > Task :app:mergeDebugGlobalSynthetics UP-TO-DATE
 > Task :app:processDebugJavaRes UP-TO-DATE
 > Task :app:mergeDebugJavaResource UP-TO-DATE
 > Task :app:mergeProjectDexDebug
 > Task :app:packageDebug
-> Task :app:createDebugApkListingFileRedirect UP-TO-DATE
+> Task :app:createDebugApkListingFileRedirect
 > Task :app:assembleDebug
 
-BUILD SUCCESSFUL in 1m 22s
-38 actionable tasks: 5 executed, 33 up-to-date
+BUILD SUCCESSFUL in 3m 20s
+38 actionable tasks: 7 executed, 31 up-to-date

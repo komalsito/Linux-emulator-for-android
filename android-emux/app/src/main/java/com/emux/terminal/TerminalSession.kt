@@ -498,10 +498,15 @@ object TtyWrap {
                     // to any other candidate instead of shipping sessions where
                     // commands silently hang (the reported symptom).
                     if (bbDialectOk) {
-                        if (!verifyCtty(listOf(c, "script"))) {
-                            com.emux.EmuXLog.e("TtyWrap: $c script applet passed dialect probe but FAILED ctty/job-control test — skipping")
-                            false
-                        } else { hasCtty = true; true }
+                        // v0.1.25 BUGFIX: previously a failed ctty check made this
+                        // candidate return false and be SKIPPED entirely — combined
+                        // with the broken verifyCtty quoting, that meant even a good
+                        // busybox was discarded and no PTY wrapper survived. The
+                        // dialect probe already proved bytes relay; keep the wrapper
+                        // either way and just record whether ctty works.
+                        hasCtty = verifyCtty(listOf(c, "script"))
+                        if (!hasCtty) com.emux.EmuXLog.e("TtyWrap: $c script applet relays but FAILED ctty/job-control test — job control will misbehave")
+                        true
                     } else false
                 } else {
                     // v0.1.20 BUGFIX (THE core keyboard bug): script(1) has TWO
@@ -557,7 +562,17 @@ object TtyWrap {
      * output reaches us within the watchdog window.
      */
     private fun verifyCtty(prefix: List<String>): Boolean = runCatching {
-        val inner = "sh -c 'sleep 0.1 & wait; echo CTTYOK'"
+        // v0.1.25 BUGFIX: the old test was `sh -c 'sleep 0.1 & wait; echo CTTYOK'`
+        // wrapped in single quotes — and apply() ALSO single-quotes every argv
+        // entry for script's inner shell. Nested single quotes are impossible in
+        // POSIX sh, so the quoting broke mid-string ("Unexpected token"), the
+        // probe process exited non-zero, verifyCtty returned false for EVERY
+        // candidate (including a perfectly good busybox), TtyWrap resolved to
+        // null → NO PTY at all → raw pipes → fully buffered output → exactly the
+        // reported symptom on stock Android where /system/bin/script exists but
+        // busybox does not. Use apostrophe-free commands only: toybox/busybox
+        // ps both print a TTY column ('?' when no controlling terminal).
+        val inner = "sleep 0.1; ps -o tty= -p $$ ; echo CTTYOK"
         val args = when (dialect) {
             Dialect.TOYBOX -> listOf("-q", "-f", "/dev/null", inner)
             Dialect.BBSTYLE -> listOf("-q", "-c", inner, "/dev/null")
@@ -573,7 +588,12 @@ object TtyWrap {
         reader.start()
         val wd = Thread { try { Thread.sleep(4_000); p.destroy() } catch (_: Exception) {} }.apply { isDaemon = true }
         wd.start(); val code = try { p.waitFor() } catch (_: Exception) { -1 }; wd.interrupt()
-        code == 0 && sb.contains("CTTYOK")
+        // v0.1.25: CTTYOK proves the relay works; a TTY column that is NOT "?"
+        // proves the child actually has a controlling terminal (busybox yes,
+        // toybox script no). Accepting without ctty was the old behavior — we
+        // keep it but only after the strict check fails, via the caller's
+        // hasCtty flag, so sessions still get echo even on stock ROMs.
+        code == 0 && sb.contains("CTTYOK") && !sb.contains("?")
     }.getOrDefault(false)
 
     /** Public liveness check for callers/UI diagnostics. */

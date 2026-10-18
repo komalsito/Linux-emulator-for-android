@@ -14,7 +14,7 @@ import java.io.File
  *   cache/tmp        -> $TMPDIR (cleared by OS on demand = friendly to storage)
  */
 object FsLayout {
-    const val ENV_VERSION = 8   // v0.1.24: TtyWrap apostrophe-proof quoting + launcher body sanitization (the no-apostrophes guard made the sh -c path DEAD CODE — every session fell into the SELinux-denied direct exec)
+    const val ENV_VERSION = 9   // v0.1.25: broken verifyCtty quoting killed ALL PTY wrappers + focus never restored on tab switch + desktop diagnostics
 
     fun root(ctx: Context): File = ctx.filesDir
     fun usr(ctx: Context): File = File(root(ctx), "usr")

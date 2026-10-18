@@ -44,13 +44,32 @@ class DesktopView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attrs) 
 
     init { keepScreenOn = false /* activity decides; view never holds locks */ }
 
+    // v0.1.25 DIAGNOSTIC: one-shot red flash so a permanently black pane can
+    // be split into "view never draws" (no red at all -> layout/z-order/size)
+    // vs "frames never arrive" (red appears, then dark background).
+    @Volatile private var debugRedUntilMs = 0L
+    fun debugFlashRed() {
+        debugRedUntilMs = System.currentTimeMillis() + 1200
+        postInvalidateOnAnimation()
+        postDelayed({ postInvalidateOnAnimation() }, 1300)
+    }
+
     fun onNewFrame(frameId: Int) {
         if (frameId != lastFrameId) { lastFrameId = frameId; postInvalidateOnAnimation() }
     }
 
     override fun onDraw(canvas: Canvas) {
+        if (debugRedUntilMs > System.currentTimeMillis()) {
+            canvas.drawColor(Color.RED); return
+        }
         canvas.drawColor(Color.rgb(0x10, 0x14, 0x1A))
-        val f = desktop?.currentFrame ?: return
+        val f = desktop?.currentFrame ?: run {
+            // v0.1.25 DIAGNOSTIC: no frames yet — say so ON the pane instead of
+            // showing an unexplained uniform dark rectangle.
+            val p = Paint().apply { color = Color.argb(0xB0, 0xFF, 0x8A, 0x65); textSize = 28f }
+            canvas.drawText("waiting for X frames…", 24f, height / 2f, p)
+            return
+        }
         // fit once, then honor user zoom/pan
         val fitScale = min(width.toFloat() / f.width, height.toFloat() / f.height)
         val s = max(fitScale, fitScale * scale.coerceIn(1f, 6f))

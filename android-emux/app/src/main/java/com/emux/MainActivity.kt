@@ -170,12 +170,24 @@ class MainActivity : AppCompatActivity() {
         b.termContainer.visibility = android.view.View.VISIBLE
         b.tabTerm.isSelected = true; b.tabX11.isSelected = false
         ensureSessionAttached()
+        // v0.1.25 BUGFIX: returning from the desktop tab left the terminal
+        // unfocused (the desktop pane had eaten focus), so the IME connection
+        // was never re-created and typing did nothing until a tap. Force
+        // focus + keyboard on every switch back to the terminal.
+        b.termContainer.findViewWithTag<VtTerminalView>("term")?.let { t ->
+            t.requestFocus(); t.showKeyboard()
+        }
     }
 
     private fun showDesktop() {
         b.termContainer.visibility = android.view.View.GONE
         b.paneDesktop.visibility = android.view.View.VISIBLE
         b.tabTerm.isSelected = false; b.tabX11.isSelected = true
+        // v0.1.25 DIAGNOSTIC: paint the view once immediately. If this red
+        // background does not appear, the problem is layout/z-order/size —
+        // NOT the X pipeline. If it appears then turns dark, frames are
+        // simply never arriving (check the status line error text).
+        b.desktopView.debugFlashRed()
         if (desktop.state.value == DesktopService.State.IDLE) {
             b.desktopStatus.text = getString(R.string.x_starting)
             desktop.startDesktop(wmCommand = prefsWm())
@@ -235,6 +247,15 @@ class MainActivity : AppCompatActivity() {
                         view.session = s
                         pumpOutput(view, s)
                         watchLiveness(view, s)
+                        // v0.1.25 DIAGNOSTIC: surface PTY availability in the
+                        // terminal itself so users can report exactly which
+                        // layer is broken without adb/logcat access.
+                        val tty = com.emux.terminal.TtyWrap
+                        if (!tty.available()) {
+                            view.feed("\n[emux] WARNING: no PTY wrapper found on this ROM - typing will NOT echo and commands may hang. Install busybox or root the device.\n".toByteArray())
+                        } else if (!tty.hasCtty) {
+                            view.feed("\n[emux] NOTE: PTY relay active but WITHOUT controlling terminal (toybox script). Ctrl-Z / background jobs may misbehave; normal typing works.\n".toByteArray())
+                        }
                     }
                 }
             }
