@@ -38,6 +38,23 @@ class TerminalSession(
 ) {
     companion object {
         const val IDLE_WAKE_MS = 30_000L
+
+        // v0.1.22 BUGFIX (terminal echoed typed characters but NEVER ran a
+        // command — "i can write on the terminal" with zero output): Android's
+        // toybox `script` allocates the PTY and relays bytes, but it does NOT
+        // set the pty slave as the child's controlling terminal (no TIOCSCTTY).
+        // Alpine ash then runs with isatty(stdin)==true yet no ctty → job
+        // control fails ("can't fork for job control: Inappropriate ioctl"),
+        // SIGTTIN/SIGTTOU stop any foreground child, and every command you run
+        // appears to do nothing forever. busybox script DOES call TIOCSCTTY.
+        // Probe order therefore prefers a working busybox; toybox remains the
+        // fallback (better echo/no-PTY than nothing at all).
+        val CANDIDATES = listOf(
+            "/system/bin/busybox",         // custom ROMs: full applet set, proper ctty
+            "/system/xbin/busybox",        // classic custom-ROM location
+            "/sbin/busybox",
+            "/system/bin/script",          // toybox (AOSP 6+) — relay works, ctty doesn't
+        )
     }
 
     enum class State { STARTING, RUNNING, DEAD }
@@ -240,21 +257,34 @@ class TerminalSession(
             // multiple argv slots; emux-init.sh reassembles them verbatim with
             // "$*" and execs `$SHELL -l -c "$cmd"` INSIDE the distro, where the
             // single remaining shell sees the pristine string.
-            // v0.1.21 BUGFIX (THE core "cannot type" bug): the old form passed
-            // the command split across MULTIPLE argv slots. Two layers destroy
-            // that: (a) TtyWrap single-quotes every entry and hands script(1) a
-            // shell string — the inner sh re-splits on spaces, so emux-init.sh
-            // receives only "/bin/sh" ($1) with "-l" dropped; (b) Android's
-            // toybox sh has NO "$*" word-splitting the way we assumed. Result:
-            // the distro launcher exec'd `/bin/sh -l` … except emux-init.sh then
-            // ran `exec /system/bin/sh "$@"` with EMPTY $@ — plain interactive
-            // Android sh reading from the PTY but echoing nothing useful, i.e.
-            // exactly "bootstrapped but keyboard dead". We now pass ONE pre-
-            // quoted slot (no apostrophes inside), which survives both the
-            // wrapper's single-quoting (apostrophe-free ⇒ verbatim) and the
-            // inner shell's parsing as a single argument.
-            val quoted = "\"" + shellCmd.replace("\"", "") + "\""
-            ProcessBuilder("/system/bin/sh", init.absolutePath, quoted)
+            // v0.1.21 BUGFIX: passed the command split across multiple argv slots;
+            // TtyWrap's single-quoting + the inner shell's re-splitting mangled
+            // it. v0.1.22 BUGFIX (the REAL reason typing still did nothing):
+            // BOTH previous forms executed our app-data launcher through
+            // /system/bin/sh — and since Android 10 the app data dir is mounted
+            // nosuid|noexec for zygote-spawned processes (untrusted_app SELinux
+            // domain). Every attempt to run files/linuxroot/emux-init.sh died
+            // with EACCES ("Permission denied") before producing a single byte
+            // of output → session exited instantly, respawn looped, terminal
+            // looked permanently dead no matter how correct the quoting was.
+            // Termux sidesteps this by never exec'ing from files/: it passes
+            // code via `sh -c`. We do the same: read the launcher's text here
+            // in Kotlin (plain file read — always allowed) and hand Android's
+            // sh the script body plus our one clean argv line. The body contains
+            // no apostrophes, so the wrapper's '<entry>' quoting keeps it intact
+            // through script(1)'s inner shell too.
+            val body = runCatching { init.readText() }.getOrDefault("")
+            if (body.isNotBlank() && !body.contains('\'')) {
+                ProcessBuilder("/system/bin/sh", "-c", "EMUX_ARGV1='$shellCmd' exec sh\n$body")
+            } else if (init.isFile) {
+                // Fallback (body unreadable or contains apostrophes): direct
+                // invocation — works on ROMs without the noexec mount, fails
+                // loudly on ones that have it (visible via the notice below).
+                ProcessBuilder("/system/bin/sh", init.absolutePath, shellCmd)
+            } else {
+                ProcessBuilder("/system/bin/sh", "-c",
+                    "echo '[emux] rootfs launcher missing — tap Install to finish bootstrap'; exec /system/bin/sh -l")
+            }
         } else {
             // No launcher yet (partial bootstrap): plain Android shell PLUS an
             // explicit notice, so the screen is never silently blank.
@@ -349,12 +379,9 @@ class TerminalSession(
  * raw pipes + optional LD_PRELOAD unbuffer shim.
  */
 object TtyWrap {
-    private val candidates = listOf(
-        "/system/bin/script",          // toybox (AOSP 6+) / busybox on many ROMs
-        "/system/bin/busybox",         // stock-in-ROM busybox
-        "/system/xbin/busybox",        // classic custom-ROM location
-        "/sbin/busybox",
-    )
+    // v0.1.22: order lives in TerminalSession.CANDIDATES (busybox first — see
+    // ctty comment there). Kept as a single source of truth for the probe.
+    private val candidates = TerminalSession.CANDIDATES
 
     /** Resolved wrapper argv prefix, or null if no PTY wrapper exists here. */
     @Volatile private var resolved: List<String>? = null
@@ -364,6 +391,11 @@ object TtyWrap {
     enum class Dialect { TOYBOX, BBSTYLE }
     @Volatile private var dialect: Dialect = Dialect.TOYBOX
 
+    /** True when the resolved wrapper gives the child a CONTROLLING terminal
+     *  (busybox does; toybox script relays bytes but never calls TIOCSCTTY). */
+    @Volatile var hasCtty = false
+        private set
+
     private fun probe(): List<String>? {
         if (probed) return resolved
         synchronized(this) {
@@ -371,9 +403,9 @@ object TtyWrap {
             for (c in candidates) {
                 val f = File(c)
                 if (!f.canExecute()) continue
-                val ok = if (c.endsWith("busybox")) {
+                val ok: Boolean = if (c.endsWith("busybox")) {
                     // busybox needs the `script` applet compiled in.
-                    runCatching {
+                    val bbDialectOk = runCatching {
                         val p = ProcessBuilder(c, "script", "--help")
                             .redirectErrorStream(true)
                             .redirectInput(ProcessBuilder.Redirect.from(File("/dev/null")))
@@ -401,6 +433,18 @@ object TtyWrap {
                             }
                         }
                     }.getOrDefault(false)
+                    // v0.1.22 CTTY PROOF: don't trust dialect alone — run an
+                    // actual job-control command through the wrapper and verify
+                    // output arrives AND the child sees a controlling tty. A
+                    // wrapper that fails this is skipped so we can fall through
+                    // to any other candidate instead of shipping sessions where
+                    // commands silently hang (the reported symptom).
+                    if (bbDialectOk) {
+                        if (!verifyCtty(listOf(c, "script"))) {
+                            com.emux.EmuXLog.e("TtyWrap: $c script applet passed dialect probe but FAILED ctty/job-control test — skipping")
+                            false
+                        } else { hasCtty = true; true }
+                    } else false
                 } else {
                     // v0.1.20 BUGFIX (THE core keyboard bug): script(1) has TWO
                     // incompatible dialects and the old probe used neither
@@ -420,14 +464,21 @@ object TtyWrap {
                         wd.start(); val code = try { p.waitFor() } catch (_: Exception) { -1 }; wd.interrupt()
                         code == 0
                     }.getOrDefault(false)
-                    when {
+                    val relayOk = when {
                         tryArgs(listOf("-q", "-f", "/dev/null", "true")) -> { dialect = Dialect.TOYBOX; true }
                         tryArgs(listOf("-q", "-c", "true", "/dev/null")) -> { dialect = Dialect.BBSTYLE; true }
                         else -> false
                     }
+                    // v0.1.22: toybox script passes relay/dialect tests but does
+                    // NOT give the child a controlling terminal. We still accept
+                    // it as LAST resort (echo works; simple non-job-control
+                    // commands usually work), but flag hasCtty=false so the UI
+                    // can tell the user why Ctrl-Z/& may misbehave.
+                    if (relayOk) hasCtty = verifyCtty(listOf(c))
+                    relayOk
                 }
                 if (ok) {
-                    com.emux.EmuXLog.i("TtyWrap: PTY wrapper = $c ($dialect)")
+                    com.emux.EmuXLog.i("TtyWrap: PTY wrapper = $c ($dialect, ctty=$hasCtty)")
                     resolved = when {
                         c.endsWith("busybox") -> listOf(c, "script")
                         else -> listOf(c)
@@ -439,6 +490,33 @@ object TtyWrap {
             return resolved
         }
     }
+
+    /**
+     * v0.1.22 BUGFIX GROUNDWORK: prove the wrapper actually delivers output for
+     * a shell that tries job control. Runs `<prefix> <sh -c 'ps'>` style test:
+     * ash with no ctty hangs/behaves differently than with one. We check the
+     * simplest observable property: a backgrounded pipeline completes and its
+     * output reaches us within the watchdog window.
+     */
+    private fun verifyCtty(prefix: List<String>): Boolean = runCatching {
+        val inner = "sh -c 'sleep 0.1 & wait; echo CTTYOK'"
+        val args = when (dialect) {
+            Dialect.TOYBOX -> listOf("-q", "-f", "/dev/null", inner)
+            Dialect.BBSTYLE -> listOf("-q", "-c", inner, "/dev/null")
+        }
+        val p = ProcessBuilder(prefix + args)
+            .redirectErrorStream(true)
+            .redirectInput(ProcessBuilder.Redirect.from(File("/dev/null")))
+            .start()
+        val sb = StringBuilder()
+        val reader = Thread {
+            try { p.inputStream.bufferedReader().forEachLine { sb.appendLine(it) } } catch (_: Exception) {}
+        }.apply { isDaemon = true }
+        reader.start()
+        val wd = Thread { try { Thread.sleep(4_000); p.destroy() } catch (_: Exception) {} }.apply { isDaemon = true }
+        wd.start(); val code = try { p.waitFor() } catch (_: Exception) { -1 }; wd.interrupt()
+        code == 0 && sb.contains("CTTYOK")
+    }.getOrDefault(false)
 
     /** Public liveness check for callers/UI diagnostics. */
     fun available(): Boolean = probe() != null

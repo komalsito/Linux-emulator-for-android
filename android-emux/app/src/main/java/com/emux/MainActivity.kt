@@ -264,6 +264,23 @@ class MainActivity : AppCompatActivity() {
                 // which the service's watcher turns into exactly one bounded
                 // respawn — instead of an eternal silent zombie.
                 runCatching { s.debugKillForDiagnostics() }
+            } else if (s.outputSeen.value) {
+                // v0.1.22 DIAGNOSTIC BANNER: the user reported "i can write on
+                // the terminal" but commands never ran / desktop stayed black.
+                // Output flowing only proves the PTY relay works — whether the
+                // shell has a CONTROLLING terminal (job control, foreground
+                // commands completing) depends on which wrapper we resolved.
+                // Print the exact engine once per session so device feedback
+                // tells us precisely which layer to fix next.
+                val tty = com.emux.terminal.TtyWrap
+                val line = if (!tty.available()) {
+                    "[emux] WARNING: no PTY wrapper (script/busybox) found on this ROM — running with raw pipes; interactive shells may not work. Install Termux busybox or root.\n"
+                } else if (!tty.hasCtty) {
+                    "[emux] PTY via toybox script (no controlling terminal): typing echoes, but Ctrl-Z and some job-control use cases are limited. Commands should still run.\n"
+                } else {
+                    ""
+                }
+                if (line.isNotEmpty()) view.feed(line.toByteArray())
             }
         }
     }

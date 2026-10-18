@@ -14,7 +14,7 @@ import java.io.File
  *   cache/tmp        -> $TMPDIR (cleared by OS on demand = friendly to storage)
  */
 object FsLayout {
-    const val ENV_VERSION = 5   // v0.1.21: launcher argv-quoting + helper-script PATH/rootfs-path fixes must re-install helper scripts
+    const val ENV_VERSION = 6   // v0.1.22: musl loader bridge + TMPDIR socket paths + FIFO/nc frame push — helper scripts must re-install
 
     fun root(ctx: Context): File = ctx.filesDir
     fun usr(ctx: Context): File = File(root(ctx), "usr")
