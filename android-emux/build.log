@@ -37,22 +37,15 @@ Daemon will be stopped at the end of the build
 > Task :app:writeDebugAppMetadata UP-TO-DATE
 > Task :app:writeDebugSigningConfigVersions UP-TO-DATE
 > Task :app:compileDebugKotlin
-w: file:///workspace/android-emux/app/src/main/java/com/emux/MainActivity.kt:463:37 Unsafe use of a nullable receiver of type Any?
-w: file:///workspace/android-emux/app/src/main/java/com/emux/terminal/TerminalSession.kt:266:16 Parameter 'cols' is never used
-w: file:///workspace/android-emux/app/src/main/java/com/emux/terminal/TerminalSession.kt:266:27 Parameter 'rows' is never used
-w: file:///workspace/android-emux/app/src/main/java/com/emux/terminal/VtTerminalView.kt:306:46 Parameter 'y1' is never used
-w: file:///workspace/android-emux/app/src/main/java/com/emux/terminal/VtTerminalView.kt:436:13 Variable 'fm' is never used
-w: file:///workspace/android-emux/app/src/main/java/com/emux/terminal/VtTerminalView.kt:494:9 'invalidate(Int, Int, Int, Int): Unit' is deprecated. Deprecated in Java
-
-> Task :app:compileDebugJavaWithJavac
+> Task :app:compileDebugJavaWithJavac UP-TO-DATE
 > Task :app:dexBuilderDebug
 > Task :app:mergeDebugGlobalSynthetics UP-TO-DATE
 > Task :app:processDebugJavaRes UP-TO-DATE
 > Task :app:mergeDebugJavaResource UP-TO-DATE
 > Task :app:mergeProjectDexDebug
 > Task :app:packageDebug
-> Task :app:createDebugApkListingFileRedirect
+> Task :app:createDebugApkListingFileRedirect UP-TO-DATE
 > Task :app:assembleDebug
 
-BUILD SUCCESSFUL in 1m 55s
-38 actionable tasks: 7 executed, 31 up-to-date
+BUILD SUCCESSFUL in 47s
+38 actionable tasks: 5 executed, 33 up-to-date

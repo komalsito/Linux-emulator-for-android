@@ -14,7 +14,7 @@ import java.io.File
  *   cache/tmp        -> $TMPDIR (cleared by OS on demand = friendly to storage)
  */
 object FsLayout {
-    const val ENV_VERSION = 2   // v0.1.18: bumped — forces one clean re-bootstrap so old installs get the patched launcher+helpers
+    const val ENV_VERSION = 3   // v0.1.19: bumped again — old installs must re-bootstrap to get patched helper scripts
 
     fun root(ctx: Context): File = ctx.filesDir
     fun usr(ctx: Context): File = File(root(ctx), "usr")
