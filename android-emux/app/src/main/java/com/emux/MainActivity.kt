@@ -24,6 +24,8 @@ import com.emux.terminal.TerminalService
 import com.emux.terminal.VtTerminalView
 import com.emux.x11.DesktopService
 import com.emux.x11.DesktopView
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 
 /**
@@ -232,8 +234,36 @@ class MainActivity : AppCompatActivity() {
                     if (view.session !== s) {
                         view.session = s
                         pumpOutput(view, s)
+                        watchLiveness(view, s)
                     }
                 }
+            }
+        }
+    }
+
+    /**
+     * v0.1.19 BUGFIX J: "Bootstrapped" + a RUNNING session is NOT proof bytes
+     * flow. If the launcher exec'd something that dies silently, or stdio stays
+     * buffered behind a pipe, the user sees a dead black screen and blames the
+     * keyboard. Give every fresh session 12 s to produce its first output byte;
+     * otherwise print an explicit diagnostic on-screen (and force one respawn
+     * attempt through the normal death path by destroying the wedged child).
+     */
+    private fun watchLiveness(view: VtTerminalView, s: com.emux.terminal.TerminalSession) {
+        lifecycleScope.launch {
+            kotlinx.coroutines.withTimeoutOrNull(12_000) {
+                while (currentCoroutineContext().isActive && !s.outputSeen.value) {
+                    kotlinx.coroutines.delay(250)
+                }
+            }
+            if (!s.outputSeen.value && s.state.value == com.emux.terminal.TerminalSession.State.RUNNING) {
+                view.feed(
+                    "\n[emux] shell produced no output for 12s — restarting it with diagnostics…\n".toByteArray()
+                )
+                // Destroying the child drives state→DEAD (exitedCleanly=false),
+                // which the service's watcher turns into exactly one bounded
+                // respawn — instead of an eternal silent zombie.
+                runCatching { s.debugKillForDiagnostics() }
             }
         }
     }

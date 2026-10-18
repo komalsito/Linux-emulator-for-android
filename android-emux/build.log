@@ -19,57 +19,40 @@ Daemon will be stopped at the end of the build
 > Task :app:processDebugManifest UP-TO-DATE
 > Task :app:processDebugManifestForPackage UP-TO-DATE
 > Task :app:processDebugResources UP-TO-DATE
-> Task :app:compileDebugKotlin UP-TO-DATE
 > Task :app:javaPreCompileDebug UP-TO-DATE
-> Task :app:compileDebugJavaWithJavac
 > Task :app:mergeDebugShaders UP-TO-DATE
 > Task :app:compileDebugShaders NO-SOURCE
 > Task :app:generateDebugAssets UP-TO-DATE
 > Task :app:mergeDebugAssets UP-TO-DATE
 > Task :app:compressDebugAssets UP-TO-DATE
 > Task :app:desugarDebugFileDependencies UP-TO-DATE
-> Task :app:dexBuilderDebug
-> Task :app:mergeDebugGlobalSynthetics
-> Task :app:processDebugJavaRes
-> Task :app:mergeDebugJavaResource UP-TO-DATE
 > Task :app:checkDebugDuplicateClasses UP-TO-DATE
 > Task :app:mergeDebugStartupProfile UP-TO-DATE
-> Task :app:mergeLibDexDebug
-> Task :app:mergeProjectDexDebug
-> Task :app:mergeDebugJniLibFolders
-> Task :app:mergeExtDexDebug
+> Task :app:mergeExtDexDebug UP-TO-DATE
+> Task :app:mergeLibDexDebug UP-TO-DATE
+> Task :app:mergeDebugJniLibFolders UP-TO-DATE
 > Task :app:mergeDebugNativeLibs NO-SOURCE
 > Task :app:stripDebugDebugSymbols NO-SOURCE
-> Task :app:validateSigningDebug
+> Task :app:validateSigningDebug UP-TO-DATE
 > Task :app:writeDebugAppMetadata UP-TO-DATE
 > Task :app:writeDebugSigningConfigVersions UP-TO-DATE
-> Task :app:packageDebug
-> Task :app:createDebugApkListingFileRedirect UP-TO-DATE
-> Task :app:assembleDebug
+> Task :app:compileDebugKotlin
+w: file:///workspace/android-emux/app/src/main/java/com/emux/MainActivity.kt:463:37 Unsafe use of a nullable receiver of type Any?
+w: file:///workspace/android-emux/app/src/main/java/com/emux/terminal/TerminalSession.kt:266:16 Parameter 'cols' is never used
+w: file:///workspace/android-emux/app/src/main/java/com/emux/terminal/TerminalSession.kt:266:27 Parameter 'rows' is never used
+w: file:///workspace/android-emux/app/src/main/java/com/emux/terminal/VtTerminalView.kt:306:46 Parameter 'y1' is never used
+w: file:///workspace/android-emux/app/src/main/java/com/emux/terminal/VtTerminalView.kt:436:13 Variable 'fm' is never used
+w: file:///workspace/android-emux/app/src/main/java/com/emux/terminal/VtTerminalView.kt:494:9 'invalidate(Int, Int, Int, Int): Unit' is deprecated. Deprecated in Java
 
-BUILD SUCCESSFUL in 1m 12s
-38 actionable tasks: 11 executed, 27 up-to-date
-=== v0.1.14 rebuild (resolver-config stall fix) ===
-Sat Oct 17 23:35:08 UTC 2026
+> Task :app:compileDebugJavaWithJavac
+> Task :app:dexBuilderDebug
+> Task :app:mergeDebugGlobalSynthetics UP-TO-DATE
+> Task :app:processDebugJavaRes UP-TO-DATE
+> Task :app:mergeDebugJavaResource UP-TO-DATE
+> Task :app:mergeProjectDexDebug
+> Task :app:packageDebug
 > Task :app:createDebugApkListingFileRedirect
 > Task :app:assembleDebug
 
-BUILD SUCCESSFUL in 1m 11s
-38 actionable tasks: 11 executed, 27 up-to-date
-
-=== v0.1.15 build (helper-scripts stall fix + download audit) ===
-gradle --no-daemon assembleDebug -> BUILD SUCCESSFUL in 1m14s (38 tasks, 0 errors)
-versionCode 15 / versionName 0.1.15; aapt2 badging OK; apksigner verify OK
-Dex check (classes3.dex): per-script heartbeat labels, second-cleanup-pass log,
-markBootstrappedChecked, rootfs-completeness check, bounded asset read — all present.
-
-=== v0.1.16 build (concurrent-pass hijack + helper-scripts hardening) ===
-gradle --no-daemon assembleDebug -> BUILD SUCCESSFUL in 1m14s (38 tasks, 0 errors; fixed expression-body 'if' compile error in releaseSlot first)
-versionCode 16 / versionName 0.1.16; aapt2 badging OK (minSdk 24/targetSdk 34); apksigner verify OK
-Dex check: isStalePass/raiseFloorTo/stageHelperAssets symbols + STALE role + per-script labels present.
-Fixes: single-pass slot floor (stale collectors short-circuit instead of re-running),
-report() stale-guard, guarded isBootstrapped short-circuit, bounded asset pre-stage
-with rootfs-copy fallback so 'Installing helper scripts' can never wedge on AAsset.
-
-=== v0.1.17 build (keyboard input + desktop fixes) ===
-BUILD SUCCESSFUL in 1m 54s
+BUILD SUCCESSFUL in 1m 55s
+38 actionable tasks: 7 executed, 31 up-to-date

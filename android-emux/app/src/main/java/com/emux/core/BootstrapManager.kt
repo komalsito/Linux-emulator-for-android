@@ -824,6 +824,28 @@ class BootstrapManager(private val ctx: Context) {
                 }
             }
         } catch (_: Exception) { /* convenience only, non-fatal */ }
+        // v0.1.19 BUGFIX L: install the helpers into files/bin/ as well. That
+        // directory is the FIRST entry of FsLayout.sessionEnv()'s PATH, so bare
+        // `emux-x11` / `emux-capture` lookups from any distro shell now resolve;
+        // previously they existed only at the rootfs root + $HOME, neither of
+        // which is on PATH — desktop sessions died instantly with
+        // "emux-x11: not found" while bootstrap cheerfully said "Bootstrapped".
+        try {
+            val binDir = java.io.File(ctx.filesDir, "bin").apply { mkdirs() }
+            listOf("emux-init.sh", "emux-x11", "emux-capture").forEach { name ->
+                val src = File(dest, name)
+                if (!src.isFile) return@forEach
+                runCatching {
+                    withHardTimeout(8_000L) {
+                        val bytes = staged[name] ?: FileInputStream(src).use { readBounded(it, MAX_ASSET_BYTES) }
+                        if (replaceRegularFileWith(java.io.File(binDir, name)) { dst ->
+                                dst.outputStream().use { it.write(bytes) } }) {
+                            java.io.File(binDir, name).setExecutable(true, false)
+                        }
+                    }
+                }
+            }
+        } catch (_: Exception) { /* convenience mirror, non-fatal */ }
     }
 
     /** Max size accepted for a helper-script asset (real ones are <1 KiB). */

@@ -93,7 +93,16 @@ object FsLayout {
         // no distro binaries → empty-looking terminal where nothing works.
         "EMUX_ROOTFS" to linuxRoot(ctx).absolutePath,
         "EMUX_ROOT" to linuxRoot(ctx).absolutePath,
-        "PATH" to "${linuxRoot(ctx)}/usr/local/bin:${linuxRoot(ctx)}/usr/bin:" +
+        // v0.1.19 BUGFIX L: files/bin holds the emux-* helper scripts (installed
+        // by BootstrapManager since this version) and is prepended to PATH below
+        // so bare `emux-x11` / `emux-capture` resolve from any distro shell.
+        "EMUX_BIN" to File(root(ctx), "bin").absolutePath,
+        // v0.1.19 BUGFIX L: files/bin was NOT on PATH at all — bare `emux-x11` /
+        // `emux-capture` lookups from any distro shell failed with "not found",
+        // both desktop helper sessions died instantly (pane stayed black) while
+        // the terminal tab looked healthy. Prepend it so helpers resolve first,
+        // before any same-named file inside the rootfs.
+        "PATH" to "${File(root(ctx), "bin")}:${linuxRoot(ctx)}/usr/local/bin:${linuxRoot(ctx)}/usr/bin:" +
             "${linuxRoot(ctx)}/bin:${linuxRoot(ctx)}/usr/local/sbin:" +
             "${linuxRoot(ctx)}/usr/sbin:${linuxRoot(ctx)}/sbin:" +
             "${usr(ctx)}/bin:${usr(ctx)}/sbin:/system/bin:/system/xbin",

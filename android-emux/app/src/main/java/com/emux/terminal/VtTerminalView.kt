@@ -95,8 +95,18 @@ class VtTerminalView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attr
 
     init {
         isFocusableInTouchMode = true
+        // v0.1.19 BUGFIX I: without onCheckIsTextEditor() == true the framework
+        // treats this View as a NON-text-editor: showSoftInput() is ignored, no
+        // InputConnection is ever created (onCreateInputConnection never runs),
+        // and physical/IME keys bypass onKeyDown entirely. That is precisely
+        // "keyboard cannot type on the interface" even though everything else
+        // looked right. Termux's emulated-UI terminal declares itself a text
+        // editor the same way.
+        isFocusable = true
         screen = buildScreen(rows, cols)
     }
+
+    override fun onCheckIsTextEditor(): Boolean = true
 
     private fun buildScreen(r: Int, c: Int): Array<Row> =
         Array(r) { Row(IntArray(c) { 0x20 }, ByteArray(c)) }

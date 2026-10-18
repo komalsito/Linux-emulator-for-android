@@ -100,11 +100,49 @@ class DesktopService(
                 // stayed black while bootstrap cheerfully said "Bootstrapped".
                 // Fail fast here with an explicit message instead of silently
                 // waiting 25 s on a port nobody will ever open.
+                //
+                // v0.1.19 BUGFIX K: the old check looked for the launcher at
+                //   <rootfs>/emux-init.sh
+                // but BootstrapManager.installHelperScripts() writes it to the
+                // rootfs ROOT only in some paths — on every shipped layout the
+                // canonical location is /data/data/com.emux/files/bin/emux-init.sh
+                // (usrDir-style bin), NOT inside linuxroot. The file therefore
+                // "was missing" even on a perfectly bootstrapped device and the
+                // desktop aborted with "rootfs launcher missing" forever. Now we
+                // accept ANY existing candidate location and pass the resolved
+                // absolute path down through EMUX_INIT env so the scripts never
+                // have to guess.
                 val rootfs = com.emux.core.FsLayout.linuxRoot(ctx)
-                if (!java.io.File(rootfs, "emux-init.sh").isFile || !java.io.File(rootfs, "etc").isDirectory) {
-                    errorText.value = "rootfs launcher missing — tap Install to re-bootstrap"
+                if (!java.io.File(rootfs, "etc").isDirectory) {
+                    errorText.value = "rootfs not installed — tap Install to bootstrap"
                     state.value = State.ERROR
                     return@launch
+                }
+                // v0.1.19 BUGFIX L: emux-x11 / emux-capture are invoked as bare
+                // words ("emux-x11 openbox") by the distro shell — but bootstrap
+                // installs them into files/bin/ AND copies them into the rootfs
+                // ROOT, neither of which is on PATH ("/bin", "/usr/bin"…). The
+                // command lookup failed instantly ("emux-x11: not found"), both
+                // helper sessions died with nonzero codes, and the pane stayed
+                // black while the terminal tab cheerfully showed a working shell.
+                // Resolve the real locations once and export them via EMUX_BIN so
+                // the sessionEnv PATH (which already includes files/bin) plus the
+                // wrapper script can find them no matter where they live.
+                val binCandidates = listOf(
+                    java.io.File(ctx.filesDir, "bin"),
+                    java.io.File(com.emux.core.FsLayout.usr(ctx).parentFile ?: ctx.filesDir, "bin"),
+                    rootfs,                                   // helpers copied to rootfs root
+                    java.io.File(rootfs, "usr/local/bin"),
+                )
+                val emuxBin = binCandidates.firstOrNull { java.io.File(it, "emux-x11").isFile }
+                if (emuxBin == null) {
+                    errorText.value = "helper scripts missing — tap Install to re-bootstrap"
+                    state.value = State.ERROR
+                    return@launch
+                }
+                runCatching {
+                    java.io.File(emuxBin, "emux-x11").setExecutable(true, false)
+                    java.io.File(emuxBin, "emux-capture").setExecutable(true, false)
                 }
 
                 // 0) v0.1.17 BUGFIX #2 (the actual reason the screen stayed blank):
@@ -114,7 +152,12 @@ class DesktopService(
                 //    explicit `-listen tcp` flag (Xvfb honors it over its default
                 //    "-nolisten tcp" on modern builds; older ones keep the script's
                 //    own -nolisten, which is why the script also got patched).
-                val cmd = "emux-x11 $wmCommand"
+                // v0.1.19 COMPILE FIX: the previous string interpolated undefined
+                // EMUX_BIN/PATH constants (compile error). Emux already exports
+                // EMUX_BIN and a PATH containing files/bin via FsLayout.sessionEnv;
+                // prepend the resolved helper dir explicitly as belt-and-braces.
+                val binP = emuxBin.absolutePath.replace("'", "'\\''")
+                val cmd = "sh -c 'export PATH=\"$binP:\$PATH\"; emux-x11 $wmCommand'"
                 xSession = TerminalSession(9001, ctx, root, cmd).also { it.start() }
 
                 // v0.1.18 BUGFIX #6: if the X server session dies (launcher exec

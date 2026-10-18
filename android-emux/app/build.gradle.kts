@@ -14,8 +14,8 @@ android {
         applicationId = "com.emux"
         minSdk = 24
         targetSdk = 34
-        versionCode = 18
-        versionName = "0.1.18"
+        versionCode = 19
+        versionName = "0.1.19"
 
         ndk {
             abiFilters += listOf("arm64-v8a", "armeabi-v7a", "x86_64")

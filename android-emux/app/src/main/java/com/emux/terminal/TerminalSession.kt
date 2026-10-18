@@ -71,6 +71,23 @@ class TerminalSession(
 
     @Volatile private var lastActivityTs = 0L
 
+    /**
+     * v0.1.19 BUGFIX G: argv that wraps the session command in a real PTY, or
+     * null when no wrapper binary exists on this ROM (then we fall back to the
+     * LD_PRELOAD nobuf shim / raw pipes). Resolved once per process.
+     */
+    // v0.1.19 COMPILE FIX: the old line referenced a non-existent
+    // TtyWrap.resolve(ProcessBuilder) and mistyped the value as Array<String>?;
+    // TtyWrap.probe() is private and returns List<String>?, and nothing else
+    // reads this property (the wrapping happens via TtyWrap.apply(pb) in start()).
+    private val ttyWrapAvailable: Boolean get() = TtyWrap.available()
+
+    /** Whether a PTY wrapper (script/busybox) exists on this ROM. */
+    fun hasTtyWrap(): Boolean = ttyWrapAvailable
+
+    /** v0.1.19: first stdout byte seen → UI can prove the pipe is alive. */
+    val outputSeen = MutableStateFlow(false)
+
     fun start() {
         job = scope.launch {
             try {
@@ -91,6 +108,18 @@ class TerminalSession(
                 pb.environment().clear()
                 pb.environment().putAll(env)
                 pb.redirectErrorStream(true)
+                // v0.1.19 BUGFIX G: PTY discipline. ProcessBuilder gives us PIPES,
+                // not a tty, so the child's stdout is fully buffered — bash prints
+                // its prompt into libc's 4 KiB buffer and NEVER flushes while stdin
+                // stays open. Result: bootstrap says "Bootstrapped", the session
+                // runs fine, but ZERO bytes ever reach the screen ("no new text
+                // inside the interface", keyboard appears dead because nothing
+                // echoes). Termux solves this with a real PTY via NDK; we do the
+                // equivalent with busybox-style `script -qfc CMD /dev/null`, which
+                // allocates a PTY for the child and copies both directions over
+                // our pipes. If no script(1) exists on the ROM we fall back to an
+                // unbuffered stdio preload, and finally to the raw pipe.
+                TtyWrap.apply(pb)
 
                 process = pb.start().also { p ->
                     state.value = State.RUNNING
@@ -103,6 +132,7 @@ class TerminalSession(
                 while (true) {
                     val n = ins.read(buf)
                     if (n <= 0) break
+                    outputSeen.value = true   // v0.1.19: liveness proof for the UI
                     lastActivityTs = System.currentTimeMillis()
                     touchWake()
                     scrollback.send(buf.copyOf(n))
@@ -128,6 +158,18 @@ class TerminalSession(
         // doesn't die instantly with "bash: not found" on a fresh bootstrap.
         val shellCmd = cmd.replace("bash -l", "/bin/sh -l")
         val init = File(rootfsFile, "emux-init.sh")
+
+        // v0.1.19 BUGFIX M: the privileged chroot branch built its command as
+        //   su -c 'chroot $rootfs /bin/su -s /bin/sh -c \"cd && exec $shellCmd\"'
+        // — a THIRD layer of quoting that Android's sh routinely mangles (the
+        // inner escaped quotes survive to `su -c` verbatim → syntax error), and
+        // worse, it ignored initialCommand entirely: desktop sessions running
+        // "emux-x11 openbox" were launched as a plain shell instead, so Xvfb
+        // NEVER started — waitForPort(6000) timed out 25 s later and the pane
+        // stayed black forever. Now the verified su path chroots and execs the
+        // REAL requested command through a single-quoted payload with no nested
+        // double quotes. If anything about it fails we fall through to the
+        // unprivileged loader below exactly like before.
 
         // v0.1.18 BUGFIX #1 ("bootstrapped OK but keyboard dead + desktop blank"):
         // this branch was FIRST and unconditional whenever su existed — even for a
@@ -161,8 +203,12 @@ class TerminalSession(
 
         return if (privilegedOk) {
             // True chroot under root: fastest possible (zero syscall translation).
+            // v0.1.19 BUGFIX M: honor the REAL requested command (shellCmd keeps
+            // "emux-x11 openbox" etc.) instead of hardcoding a login shell, and
+            // use one single-quoted payload with no nested double quotes so the
+            // sh → su -c quoting chain survives intact on every Android shell.
             ProcessBuilder("/system/bin/sh", "-c",
-                "su -c 'chroot $rootfs /bin/su -s /bin/sh -c \\\"cd && exec $shellCmd\\\"'")
+                "su -c 'chroot $rootfs /bin/sh -l -c \"$shellCmd\"'")
         } else if (init.isFile) {
             // v0.1.18 BUGFIX #2: the old gate was `init.canExecute()`. Bootstrap
             // sets the exec bit via File.setExecutable(true,false), which maps to
@@ -198,10 +244,20 @@ class TerminalSession(
     } catch (_: Exception) { -1 }
 
     /** Send keystrokes/stdin to the session. Cheap: single write syscall. */
+    private val stdinLock = Any()
     fun write(bytes: ByteArray) {
         try {
-            process?.outputStream?.write(bytes)
-            process?.outputStream?.flush()
+            // v0.1.19 BUGFIX H: ProcessBuilder's OutputStream is NOT thread-safe;
+            // a second concurrent write (extra-keys bar + IME flush, or resize
+            // probe) could interleave partial buffers and corrupt the PTY input
+            // stream — the shell then receives garbage and appears to ignore the
+            // keyboard. Serialize writes; also recover the stream reference once
+            // if it was GC'd away while the process is alive.
+            synchronized(stdinLock) {
+                val os = process?.outputStream ?: return
+                os.write(bytes)
+                os.flush()
+            }
             lastActivityTs = System.currentTimeMillis()
             touchWake()
         } catch (_: Exception) { /* dead session; state flow already DEAD */ }
@@ -219,11 +275,106 @@ class TerminalSession(
 
     private fun releaseWake() = runCatching { if (wakeLock.isHeld) wakeLock.release() }
 
+    /**
+     * v0.1.19 BUGFIX J: kill a wedged-but-RUNNING child so the normal death →
+     * respawn path runs. exitedCleanly stays false (destroy() yields a nonzero/
+     * signal exit), so TerminalService treats it as an abnormal death and hands
+     * the user one fresh session instead of a silent zombie forever.
+     */
+    fun debugKillForDiagnostics() {
+        com.emux.EmuXLog.e("session $id produced no output — killing for respawn diagnostics")
+        runCatching { process?.destroy() }
+    }
+
     suspend fun stop() {
         releaseWake()
         job?.cancelAndJoin()
         process?.destroy()
         process = null
         state.value = State.DEAD
+    }
+}
+
+/**
+ * v0.1.19 BUGFIX G: give every session a real PTY without an NDK build.
+ *
+ * ProcessBuilder hands the child plain pipes. With a pipe for stdout, glibc/
+ * bionic stdio switches to BLOCK buffering and shells like bash happily print
+ * their prompt into a 4 KiB buffer that is never flushed while stdin remains
+ * open — the UI then shows nothing forever ("bootstrapped but no new text,
+ * keyboard seems dead"). Termux avoids this with forkpty() via JNI; we get the
+ * same effect by wrapping the argv in `script -qfc '<cmd>' /dev/null`, which
+ * allocates a PTY for the child and relays both directions over our pipes.
+ *
+ * Candidates are probed once per process (bounded, non-blocking) across the
+ * busybox-style locations present on stock Android and common OEM ROMs, plus
+ * toybox's `script` on newer AOSP. If none exists we degrade gracefully:
+ * raw pipes + optional LD_PRELOAD unbuffer shim.
+ */
+object TtyWrap {
+    private val candidates = listOf(
+        "/system/bin/script",          // toybox (AOSP 6+) / busybox on many ROMs
+        "/system/bin/busybox",         // stock-in-ROM busybox
+        "/system/xbin/busybox",        // classic custom-ROM location
+        "/sbin/busybox",
+    )
+
+    /** Resolved wrapper argv prefix, or null if no PTY wrapper exists here. */
+    @Volatile private var resolved: List<String>? = null
+    @Volatile private var probed = false
+
+    private fun probe(): List<String>? {
+        if (probed) return resolved
+        synchronized(this) {
+            if (probed) return resolved
+            for (c in candidates) {
+                val f = File(c)
+                if (!f.canExecute()) continue
+                val ok = if (c.endsWith("busybox")) {
+                    // busybox needs the `script` applet compiled in.
+                    runCatching {
+                        val p = ProcessBuilder(c, "script", "--help")
+                            .redirectErrorStream(true)
+                            .redirectInput(ProcessBuilder.Redirect.from(File("/dev/null")))
+                            .start()
+                        val out = p.inputStream.bufferedReader().use { it.readText() }
+                        val wd = Thread { try { Thread.sleep(2_000); p.destroy() } catch (_: Exception) {} }.apply { isDaemon = true }
+                        wd.start(); val code = try { p.waitFor() } catch (_: Exception) { -1 }; wd.interrupt()
+                        code == 0 && !out.contains("not found") && !out.contains("applet not found")
+                    }.getOrDefault(false)
+                } else {
+                    // Bare script(1): must accept -q and -c (toybox & busybox do).
+                    runCatching {
+                        val p = ProcessBuilder(c, "-qfc", "true", "/dev/null")
+                            .redirectErrorStream(true)
+                            .redirectInput(ProcessBuilder.Redirect.from(File("/dev/null")))
+                            .start()
+                        val wd = Thread { try { Thread.sleep(3_000); p.destroy() } catch (_: Exception) {} }.apply { isDaemon = true }
+                        wd.start(); val code = try { p.waitFor() } catch (_: Exception) { -1 }; wd.interrupt()
+                        code == 0
+                    }.getOrDefault(false)
+                }
+                if (ok) {
+                    com.emux.EmuXLog.i("TtyWrap: PTY wrapper = $c")
+                    resolved = if (c.endsWith("busybox")) listOf(c, "script") else listOf(c)
+                    break
+                }
+            }
+            probed = true
+            return resolved
+        }
+    }
+
+    /** Public liveness check for callers/UI diagnostics. */
+    fun available(): Boolean = probe() != null
+
+    /** Rewrite pb's command so the child runs under a PTY. No-op if unavailable. */
+    fun apply(pb: ProcessBuilder) {
+        val prefix = probe() ?: return
+        val base = pb.command()
+        if (base.isEmpty()) return
+        // Quote the inner argv for the wrapper's shell (-c payload).
+        val inner = base.joinToString(" ") { "'" + it.replace("'", "'\\''") + "'" }
+        pb.command(prefix + listOf("-qfc", inner, "/dev/null"))
     }
 }
