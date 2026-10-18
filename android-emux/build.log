@@ -55,3 +55,5 @@ w: file:///workspace/android-emux/app/src/main/java/com/emux/terminal/VtTerminal
 
 BUILD SUCCESSFUL in 1m 41s
 38 actionable tasks: 14 executed, 24 up-to-date
+=== v0.1.21 assembleDebug Z ===
+BUILD SUCCESSFUL in 1m 22s

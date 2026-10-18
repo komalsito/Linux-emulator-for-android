@@ -1,4 +1,4 @@
-#!/bin/sh
+#!/system/bin/sh
 # emux-capture HOST:PORT — push framebuffer frames to the Android UI.
 # v0.1.17 REWRITE (desktop showed nothing): the previous version was a literal
 # pseudocode stub — its loop body contained "..." so it NEVER sent a single
@@ -30,12 +30,34 @@ have() { command -v "$1" >/dev/null 2>&1; }
 # "ffmpeg unavailable" — zero frames, black pane, no explanation. We now use the
 # much smaller `xwd` (x11-apps) + netpbm `pnmtoplainpnm`, and fall back through
 # several candidates before giving up loudly.
-if ! have xwd || ! have pnmtoplainpnm; then
-  apk add --no-cache x11-apps netpbm >/dev/null 2>&1
-fi
-if ! have xwd; then
-  # last resort: try ffmpeg again (some images ship it via community)
-  apk add --no-cache ffmpeg >/dev/null 2>&1
+# v0.1.21 BUGFIX (capture stalled ~forever on fresh installs): like emux-x11,
+# this script runs OUTSIDE any chroot — `have xwd` searched ANDROID's PATH and
+# always failed, so EVERY launch ran `apk add --no-cache x11-apps netpbm`
+# against the DISTRO db from an Android view of the world. With no writable
+# etc/apk/protected-path.d and no cache dir visible outside the rootfs, apk
+# either hung or silently errored (output was sent to /dev/null), and capture
+# exited with "no grabber available" — zero frames, black pane forever. We now
+# check the REAL rootfs paths first and only pay for apk when the binaries are
+# genuinely absent; apk failures are LOUD (stderr → terminal tab) instead of
+# swallowed.
+ROOT="${EMUX_ROOTFS:-${EMUX_ROOT:-}}"
+XWD=""
+PNM=""
+for c in "$ROOT/usr/bin/xwd" /usr/bin/xwd "$(command -v xwd 2>/dev/null)"; do
+  [ -n "$c" ] && [ -x "$c" ] && { XWD="$c"; break; }
+done
+for c in "$ROOT/usr/bin/pnmtoplainpnm" /usr/bin/pnmtoplainpnm "$(command -v pnmtoplainpnm 2>/dev/null)"; do
+  [ -n "$c" ] && [ -x "$c" ] && { PNM="$c"; break; }
+done
+if [ -z "$XWD" ] || [ -z "$PNM" ]; then
+  echo "emux-capture: installing x11-apps+netpbm into the distro (one-time, needs network)" >&2
+  apk add --no-cache x11-apps netpbm >&2
+  for c in "$ROOT/usr/bin/xwd" /usr/bin/xwd "$(command -v xwd 2>/dev/null)"; do
+    [ -n "$c" ] && [ -x "$c" ] && { XWD="$c"; break; }
+  done
+  for c in "$ROOT/usr/bin/pnmtoplainpnm" /usr/bin/pnmtoplainpnm "$(command -v pnmtoplainpnm 2>/dev/null)"; do
+    [ -n "$c" ] && [ -x "$c" ] && { PNM="$c"; break; }
+  done
 fi
 if ! have xwd && ! have ffmpeg; then
   echo "emux-capture: no grabber available (apk add x11-apps netpbm failed)" >&2
@@ -43,9 +65,22 @@ if ! have xwd && ! have ffmpeg; then
 fi
 
 # --- geometry -----------------------------------------------------------------
-GEOM=$(xdpyinfo 2>/dev/null | awk '/dimensions:/{print $2; exit}')
+# v0.1.21 BUGFIX: xdpyinfo ships in xorg-server-utils (NOT installed by us) —
+# the geometry probe always failed and capture exited with "cannot read display
+# geometry" even when everything else worked. Derive W/H from the Xvfb screen
+# spec (EMUX_X_RES, same default emux-x11 uses) and verify against a real xwd
+# dump header when available.
+RES_DEFAULT="720x1280x24"
+GEOM="${EMUX_X_RES:-$RES_DEFAULT}"
+GEOM="${GEOM%%x*}x$(echo "${GEOM#*x}" | sed 's/x.*//')"   # strip bit depth -> WxH
 W=$(echo "$GEOM" | cut -dx -f1); H=$(echo "$GEOM" | cut -dx -f2)
-[ -n "$W" ] && [ -n "$H" ] || { echo "emux-capture: cannot read display geometry" >&2; exit 1; }
+if [ -n "$XWD" ]; then
+  # xwd header line: "width height" after -silent dump through pnm converter if present
+  G2=$("$XWD" -root -silent 2>/dev/null | head -c 2000 | tr '\0' '\n' | grep -oE '[0-9]+ [0-9]+' | head -1)
+  [ -n "$G2" ] && { W=$(echo "$G2" | cut -d' ' -f1); H=$(echo "$G2" | cut -d' ' -f2); }
+fi
+case "$W$H" in (*[!0-9]*|'') W="";; esac
+[ -n "$W" ] && [ -n "$H" ] || { echo "emux-capture: cannot read display geometry (tried $GEOM)" >&2; exit 1; }
 
 # --- connect to the Android frame listener ------------------------------------
 ok=0
@@ -77,8 +112,8 @@ TMP=/tmp/emux_frame.ppm
 RAW=/tmp/emux_frame.rgb
 seq=0
 grab_frame() {
-  if have xwd && have pnmtoplainpnm; then
-    xwd -root -silent 2>/dev/null | pnmtoplainpnm 2>/dev/null > "$TMP" || return 1
+  if [ -n "$XWD" ] && [ -n "$PNM" ]; then
+    "$XWD" -root -silent 2>/dev/null | "$PNM" 2>/dev/null > "$TMP" || return 1
     [ -s "$TMP" ] || return 1
     # P6 conversion from P3 plain PPM: parse header, emit rgb565le raw bytes.
     awk -v OFS=' ' '

@@ -1,4 +1,4 @@
-#!/bin/sh
+#!/system/bin/sh
 # emux-x11 WM — start Xvfb (or real Xorg under root) + window manager inside distro.
 WM="${1:-openbox}"
 RES="${EMUX_X_RES:-720x1280x24}"
@@ -6,7 +6,22 @@ export HOME="${HOME:-/root}"
 if [ "$(id -u)" = "0" ] && [ -x /usr/bin/Xorg ]; then
   Xorg :0 -config /etc/X11/emux-xorg.conf &
 else
-  [ -x /usr/bin/Xvfb ] || apk add --no-cache xorg-server-xvfb openbox xterm >/dev/null 2>&1
+  # v0.1.21 BUGFIX (black desktop forever): the old guard was `[ -x /usr/bin/Xvfb ]`
+  # — but these helper scripts run OUTSIDE any chroot, so that path is ANDROID's
+  # /usr (which never exists on Android), making the check ALWAYS false. Every
+  # single desktop launch therefore ran `apk add --no-cache xorg-server-xvfb
+  # openbox xterm` first: apk cannot install into a non-bootstrapped Android
+  # view of the world, usually hung on its own network call for tens of seconds
+  # and then silently failed (output redirected to /dev/null) → Xvfb exec'd,
+  # died with "not found", port 6000 never opened, pane stayed black. Test the
+  # REAL target: the binary inside the distro rootfs.
+  XVFB="$ROOT/usr/bin/Xvfb"
+  [ -n "$ROOT" ] || ROOT="${EMUX_ROOTFS:-${EMUX_ROOT:-}}"
+  [ -x "$XVFB" ] || XVFB="${ROOT}/usr/bin/Xvfb"
+  if [ ! -x "$XVFB" ]; then
+    echo "emux-x11: Xvfb missing in $ROOT/usr/bin — installing (needs network, may take a minute)" >&2
+    apk add --no-cache xorg-server-xvfb openbox xterm >&2
+  fi
   # v0.1.17 BUGFIX (desktop blank): "-nolisten tcp" made Xvfb refuse TCP, but the
   # Android-side X11Client talks over loopback TCP :6000 — waitForPort(6000) could
   # therefore NEVER succeed and the desktop died in State.ERROR every time.
@@ -20,7 +35,7 @@ else
   # stale lock left by a killed previous attempt, which makes Xvfb exit with
   # "server already running" forever after any crash.
   rm -f /tmp/.X0-lock 2>/dev/null
-  Xvfb :0 -screen 0 "$RES" -listen tcp -ac >/tmp/xvfb.log 2>&1 &
+  "$XVFB" :0 -screen 0 "$RES" -listen tcp -ac >/tmp/xvfb.log 2>&1 &
 fi
 XPID=$!
 # wait for socket, max 15s
@@ -30,9 +45,28 @@ export DISPLAY=:0
 [ -x /usr/bin/xhost ] && xhost +local: >/dev/null 2>&1
 # v0.1.17: if the configured WM is missing (fresh rootfs has no openbox), fall
 # back through installed WMs to xterm so SOMETHING always draws on screen.
-run_wm() { command -v "$1" >/dev/null 2>&1 && { "$1" 2>/tmp/wm.log & return 0; } || return 1; }
+# v0.1.21 BUGFIX (black desktop): command -v looked in ANDROID's PATH (outside
+# chroot) — openbox/twm/icewm were NEVER found, and the fallback exec'd bare
+# `xterm` which also does not exist on Android, so NOTHING ever drew on the
+# X server even though Xvfb was up. Resolve each candidate inside the rootfs
+# first, and make sure SOMETHING is displayed: when no WM is installed we grab
+# the root window directly (xwd works without any client) and install a minimal
+# xterm login shell only if that package really exists in the distro.
+run_wm() {
+  for c in "$ROOT/usr/bin/$1" "/usr/bin/$1" "$(command -v "$1" 2>/dev/null)"; do
+    [ -n "$c" ] && [ -x "$c" ] && { "$c" 2>/tmp/wm.log & return 0; }
+  done
+  return 1
+}
+ROOT="${EMUX_ROOTFS:-${EMUX_ROOT:-}}"
 run_wm "$WM" || run_wm openbox || run_wm twm || run_wm icewm || {
-  [ -x /usr/bin/xterm ] || apk add --no-cache xterm >/dev/null 2>&1
-  xterm -e /bin/sh -l 2>/tmp/wm.log &
+  # No WM available — at least put a cursor/window on screen via xterm if the
+  # distro has it; otherwise exit 0 quietly (the capture loop will show the
+  # plain Xvfb root window, which is better than a dead pane).
+  XT=""
+  for c in "$ROOT/usr/bin/xterm" /usr/bin/xterm "$(command -v xterm 2>/dev/null)"; do
+    [ -n "$c" ] && [ -x "$c" ] && { XT="$c"; break; }
+  done
+  [ -n "$XT" ] && "$XT" -e /bin/sh -l 2>/tmp/wm.log &
 }
 wait $XPID

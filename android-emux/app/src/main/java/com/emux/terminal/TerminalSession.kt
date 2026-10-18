@@ -240,7 +240,21 @@ class TerminalSession(
             // multiple argv slots; emux-init.sh reassembles them verbatim with
             // "$*" and execs `$SHELL -l -c "$cmd"` INSIDE the distro, where the
             // single remaining shell sees the pristine string.
-            ProcessBuilder("/system/bin/sh", init.absolutePath, *shellCmd.split(" ").toTypedArray())
+            // v0.1.21 BUGFIX (THE core "cannot type" bug): the old form passed
+            // the command split across MULTIPLE argv slots. Two layers destroy
+            // that: (a) TtyWrap single-quotes every entry and hands script(1) a
+            // shell string — the inner sh re-splits on spaces, so emux-init.sh
+            // receives only "/bin/sh" ($1) with "-l" dropped; (b) Android's
+            // toybox sh has NO "$*" word-splitting the way we assumed. Result:
+            // the distro launcher exec'd `/bin/sh -l` … except emux-init.sh then
+            // ran `exec /system/bin/sh "$@"` with EMPTY $@ — plain interactive
+            // Android sh reading from the PTY but echoing nothing useful, i.e.
+            // exactly "bootstrapped but keyboard dead". We now pass ONE pre-
+            // quoted slot (no apostrophes inside), which survives both the
+            // wrapper's single-quoting (apostrophe-free ⇒ verbatim) and the
+            // inner shell's parsing as a single argument.
+            val quoted = "\"" + shellCmd.replace("\"", "") + "\""
+            ProcessBuilder("/system/bin/sh", init.absolutePath, quoted)
         } else {
             // No launcher yet (partial bootstrap): plain Android shell PLUS an
             // explicit notice, so the screen is never silently blank.

@@ -1177,14 +1177,21 @@ class BootstrapManager(private val ctx: Context) {
         // EMUX=1 marker is appended IDEMPOTENTLY (no duplicate on retry).
         val profile = File(dest, "etc/profile.d/emux.sh")
         replaceRegularFileWith(profile) {
+            // v0.1.21 BUGFIX (desktop blank): the old line REPLACED PATH with
+            // distro dirs only — every login shell therefore lost files/bin
+            // (where emux-x11 / emux-capture live) and /system/bin, so
+            // `emux-x11 openbox` died with "not found" inside the otherwise
+            // healthy distro shell. Prepend distro dirs instead of overwriting,
+            // and pin $EMUX_BIN + Android bins first. Plain string concatenation
+            // (no Kotlin interpolation) keeps the shell $vars literal.
             it.writeText(
-                """
-                export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
-                export PS1='\[\e[38;5;39m\]emux:\w\[\e[0m\] \$ '
-                alias ll='ls -alF'
-                # apk wrapper that works without root inside proot/chroot-lite
-                alias apk='apk --no-interactive'
-                """.trimIndent()
+                "# v0.1.21: keep inherited PATH; prepend distro + helper dirs\n" +
+                "export PATH=\"/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:\$PATH\"\n" +
+                "[ -n \"\$EMUX_BIN\" ] && export PATH=\"\$EMUX_BIN:/system/bin:/system/xbin:\$PATH\"\n" +
+                "export PS1='\\[\\e[38;5;39m\\]emux:\\w\\[\\e[0m\\] \\$ '\n" +
+                "alias ll='ls -alF'\n" +
+                "# apk wrapper that works without root inside proot/chroot-lite\n" +
+                "alias apk='apk --no-interactive'\n"
             )
         }
 

@@ -9,8 +9,25 @@
 ROOT="${EMUX_ROOTFS:-${EMUX_ROOT:-$HOME/../linuxroot}}"
 [ -d "$ROOT/etc" ] || ROOT="$HOME/linuxroot"
 [ -d "$ROOT/etc" ] || ROOT="$(dirname "$HOME")/linuxroot"
-export PATH="$ROOT/usr/local/bin:$ROOT/usr/bin:$ROOT/bin:$ROOT/usr/local/sbin:$ROOT/usr/sbin:$ROOT/sbin:$PATH"
+# v0.1.21 BUGFIX (desktop helpers died with "not found"): the old PATH rewrite
+# REPLACED Android's PATH entirely, and every desktop helper session runs under
+# a PTY wrapper resolved from /system/bin/script — which is looked up by the
+# kernel execve BEFORE PATH matters for us, but busybox fallbacks and apk's
+# helpers resolve through PATH at runtime. Keep Android dirs in PATH (prepend
+# distro) instead of dropping them.
+export PATH="$ROOT/usr/local/bin:$ROOT/usr/bin:$ROOT/bin:$ROOT/usr/local/sbin:$ROOT/usr/sbin:$ROOT/sbin:/system/bin:/system/xbin:$PATH"
+# v0.1.21 BUGFIX (apk add failed on fresh rootfs → black desktop forever): musl
+# binaries executed OUTSIDE a chroot need their own libc; without this every
+# distro command (apk, xwd, Xvfb…) died with CANNOT LINK EXECUTABLE: library
+# "libc.musl-aarch64.so.1" not found. The loader itself was launched with
+# --library-path, but its CHILDREN inherit only the environment — so musl must
+# be findable via LD_LIBRARY_PATH too.
 export LD_LIBRARY_PATH="$ROOT/lib:$ROOT/usr/lib"
+# apk/X do mktemp, PID files and sockets under /tmp — inside an app data dir
+# there is no writable system /tmp visible to the distro unless we point TMPDIR
+# (and create $ROOT/tmp) ourselves.
+export TMPDIR="${TMPDIR:-$ROOT/tmp}"
+mkdir -p "$ROOT/tmp" 2>/dev/null
 export SHELL=/bin/sh
 if [ ! -d "$ROOT/etc" ]; then
   echo "emux: rootfs missing at $ROOT — tap Install (or re-install) to bootstrap." >&2
@@ -34,6 +51,7 @@ done
 # survives the Android sh + PTY-wrapper layers intact), so reassemble with "$@"
 # rather than relying on a single pre-quoted $1.
 CMD="$*"
+[ -n "$CMD" ] || CMD="$1"
 SHELL_BIN="$ROOT/bin/sh"
 if [ -x "$SHELL_BIN" ]; then
   # Alpine ships NO bash in the minirootfs —FsLayout exported SHELL=/bin/bash,
@@ -45,8 +63,16 @@ if [ -x "$SHELL_BIN" ]; then
   LOADER_ARGS=""
   [ -n "$LOADER" ] && LOADER_ARGS="--library-path $LD_LIBRARY_PATH"
   if [ -n "$CMD" ]; then
+    # v0.1.21 BUGFIX (desktop helpers "not found" inside distro shell): apk's
+    # scripts and busybox fallbacks resolve through PATH at runtime; the old
+    # PATH rewrite dropped /system/bin entirely for children of this launcher.
+    # Also: emux-x11/emux-capture live in files/bin (first PATH entry from
+    # FsLayout.sessionEnv) — but when we exec the DISTRO shell it rewrites
+    # PATH again via /etc/profile.d; keep our bin dir pinned FIRST here so a
+    # profile rewrite can't bury it.
+    export EMUX_PINNED_BIN="$(dirname "$0"):$PATH"
     if [ -n "$LOADER" ]; then
-      exec $LOADER $LOADER_ARGS "$SHELL_BIN" -l -c "$CMD"
+      exec $LOADER $LOADER_ARGS "$SHELL_BIN" -l -c "export PATH=\"$ROOT/usr/local/bin:$ROOT/usr/bin:$ROOT/bin:/system/bin:/system/xbin:\$PATH\"; $CMD"
     fi
     exec "$SHELL_BIN" -l -c "$CMD"
   fi

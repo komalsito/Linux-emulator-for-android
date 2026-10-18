@@ -14,7 +14,7 @@ import java.io.File
  *   cache/tmp        -> $TMPDIR (cleared by OS on demand = friendly to storage)
  */
 object FsLayout {
-    const val ENV_VERSION = 4   // v0.1.20: PTY probe + IME + X11 frame fixes must re-install helper scripts
+    const val ENV_VERSION = 5   // v0.1.21: launcher argv-quoting + helper-script PATH/rootfs-path fixes must re-install helper scripts
 
     fun root(ctx: Context): File = ctx.filesDir
     fun usr(ctx: Context): File = File(root(ctx), "usr")
