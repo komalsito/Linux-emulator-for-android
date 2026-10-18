@@ -493,9 +493,30 @@ class VtTerminalView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attr
 
     // ------------------------------------------------------------------ input
     override fun onTouchEvent(event: android.view.MotionEvent?): Boolean {
-        // Long-press-free tap focuses keyboard; selection later via extra-keys row.
-        requestFocus()
+        // v0.1.17 BUGFIX (keyboard dead): two defects combined made typing impossible.
+        //  1. The view was added programmatically WITHOUT a tag, but MainActivity
+        //     calls findViewWithTag<VtTerminalView>("term")?.requestFocus() in
+        //     onResume — always null, so focus was never restored after the IME
+        //     or another window stole it. Now we set our own tag here as a
+        //     belt-and-suspenders fix that works regardless of how we're added.
+        //  2. A tap only called requestFocus(); if the view already HAD focus the
+        //     call is a no-op and the soft keyboard stayed hidden forever (the
+        //     IME is only shown on the focus transition). Now every tap forces
+        //     focus + explicitly shows the keyboard again.
+        if (tag == null) tag = "term"
+        if (!isFocused) requestFocus()
+        if (event?.actionMasked == android.view.MotionEvent.ACTION_UP) showKeyboard()
         return true
+    }
+
+    /** Explicitly (re-)open the soft keyboard against this view's input connection. */
+    fun showKeyboard() {
+        requestFocus()
+        runCatching {
+            val imm = context.getSystemService(android.content.Context.INPUT_METHOD_SERVICE)
+                as? InputMethodManager
+            imm?.showSoftInput(this, InputMethodManager.SHOW_IMPLICIT)
+        }
     }
 
     override fun onKeyDown(keyCode: Int, event: KeyEvent): Boolean {
@@ -527,16 +548,74 @@ class VtTerminalView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attr
             EditorInfo.TYPE_TEXT_FLAG_NO_SUGGESTIONS or EditorInfo.TYPE_TEXT_FLAG_MULTI_LINE
         outAttrs.imeOptions = EditorInfo.IME_FLAG_NO_EXTRACT_UI or EditorInfo.IME_FLAG_NO_FULLSCREEN
         return object : BaseInputConnection(this, false) {
+            // v0.1.17 BUGFIX (keyboard could not type at all): the IME talks to
+            // the input connection's EDITABLE TEXT buffer, not to commitText().
+            // Gboard in particular writes typed characters through
+            // setComposingText()/finishComposingText() and only calls commitText
+            // for whole-word candidates. The old IC implemented neither composing
+            // path nor a text buffer, so every keystroke went into a no-op —
+            // exactly "keyboard cannot type on the interface". We now maintain a
+            // small local buffer (so surrounding-text / backspace queries work),
+            // flush committed+composing text to the PTY, and translate IME
+            // enter/delete into real terminal bytes.
+            private val tx = StringBuilder()
+
+            private fun flushToPty() {
+                val s = session ?: return
+                if (tx.isNotEmpty()) {
+                    s.write(tx.toString().toByteArray(Charsets.UTF_8))
+                    tx.setLength(0)
+                }
+            }
+
             override fun commitText(text: CharSequence?, pos: Int): Boolean {
-                session?.write((text ?: "").toString().toByteArray()); return true
-            }
-            override fun deleteSurroundingText(before: Int, after: Int): Boolean {
-                session?.write(byteArrayOf(0x7F)); return true
-            }
-            override fun sendKeyEvent(e: KeyEvent?): Boolean {
-                if (e?.action == KeyEvent.ACTION_DOWN) onKeyDown(e.keyCode, e)
+                tx.append(text ?: "")
+                flushToPty()
                 return true
             }
+
+            override fun setComposingText(text: CharSequence?, pos: Int): Boolean {
+                // Replace our tracked composing run with the new one; do NOT send
+                // yet — it goes out when composed/committed or when the user hits
+                // enter/backspace.
+                tx.setLength(0)
+                tx.append(text ?: "")
+                return true
+            }
+
+            override fun finishComposingText(): Boolean { flushToPty(); return true }
+
+            // v0.1.17 NOTE: endBatchedEdit() is API 31+ — overriding it
+            // unconditionally fails compilation against the app's minSdk stubs,
+            // so we don't; composing text is flushed on commit/finish anyway.
+
+            override fun deleteSurroundingText(before: Int, after: Int): Boolean {
+                if (tx.isNotEmpty()) { tx.setLength(tx.length - 1); return true }
+                session?.write(byteArrayOf(0x7F))   // DEL → readline backspace
+                return true
+            }
+
+            override fun sendKeyEvent(e: KeyEvent?): Boolean {
+                if (e?.action == KeyEvent.ACTION_DOWN) {
+                    if (e.keyCode == KeyEvent.KEYCODE_ENTER) {
+                        tx.setLength(0)
+                        session?.write(byteArrayOf('\r'.code.toByte()))
+                        return true
+                    }
+                    if (e.keyCode == KeyEvent.KEYCODE_DEL) {
+                        if (tx.isNotEmpty()) { tx.setLength(tx.length - 1); return true }
+                        session?.write(byteArrayOf(0x7F)); return true
+                    }
+                    onKeyDown(e.keyCode, e)
+                }
+                return true
+            }
+
+            // Honest (empty) editing state: the "document" is the live PTY stream.
+            override fun getTextBeforeCursor(length: Int, flags: Int): CharSequence =
+                if (tx.length > 0) tx.substring(0, minOf(length, tx.length)) else ""
+            override fun getTextAfterCursor(length: Int, flags: Int): CharSequence = ""
+            override fun getSelectedText(flags: Int): CharSequence = ""
         }
     }
 

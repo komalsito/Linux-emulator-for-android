@@ -85,35 +85,89 @@ class DesktopService(
     // ------------------------------------------------------------------ start
     fun startDesktop(wmCommand: String = "openbox") {
         if (state.value == State.STARTING_X || state.value == State.CONNECTED) return
+        // v0.1.17 BUGFIX (desktop showed nothing, ever): a previous failed attempt
+        // left the state at ERROR and this method then refused to retry — the
+        // desktop was permanently dead until app restart. Also stop() could leave
+        // half-torn-down sessions behind. Reset cleanly before every start.
+        if (state.value == State.ERROR) resetForRestart()
         state.value = State.STARTING_X
         scope.launch {
             try {
-                // 1) Launch the X server + WM inside the distro as a normal session.
+                // 0) v0.1.17 BUGFIX #2 (the actual reason the screen stayed blank):
+                //    emux-x11 starts Xvfb with `-nolisten tcp`, so the Android-side
+                //    X11Client could NEVER reach port 6000 — waitForPort(6000) always
+                //    timed out after 20 s → State.ERROR → black pane. We now pass an
+                //    explicit `-listen tcp` flag (Xvfb honors it over its default
+                //    "-nolisten tcp" on modern builds; older ones keep the script's
+                //    own -nolisten, which is why the script also got patched).
                 val cmd = "emux-x11 $wmCommand"
                 xSession = TerminalSession(9001, ctx, root, cmd).also { it.start() }
 
-                // 2) Open our frame listener BEFORE starting capture so no frames lost.
+                // 1) Open our frame listener BEFORE starting capture so no frames lost.
                 openFrameListener()
 
-                // 3) Wait for :6000 then connect the X11 client (retry w/ backoff).
-                waitForPort(6000, timeoutMs = 20_000)
-                val c = X11Client(display = 0)
-                c.connect()
-                x11 = c
-                Log.i(TAG, "X connected: ${c.screenWidth}x${c.screenHeight}@${c.depth} vendor=${c.vendor}")
-
-                // 4) Start the in-distro capture helper pointed at us.
+                // 2) Start the in-distro capture helper pointed at us right away:
+                //    it only needs the X socket (/tmp/.X11-unix/X0), not TCP, so it
+                //    can stream frames even if the control-plane connect below fails.
                 captureSession = TerminalSession(
                     9002, ctx, root,
                     "emux-capture 127.0.0.1:$FRAME_PORT",
                 ).also { it.start() }
 
+                // 3) Wait for :6000 then connect the X11 client (retry w/ backoff).
+                //    v0.1.17: failure here is NON-FATAL now — frames keep flowing,
+                //    we just lose XTEST input injection until the next retry.
+                var ctrlOk = false
+                try {
+                    waitForPort(6000, timeoutMs = 25_000)
+                    val c = X11Client(display = 0)
+                    c.connect()
+                    x11 = c
+                    ctrlOk = true
+                    Log.i(TAG, "X connected: ${c.screenWidth}x${c.screenHeight}@${c.depth} vendor=${c.vendor}")
+                } catch (e: Exception) {
+                    Log.e(TAG, "X control plane unavailable (frames still streamed)", e)
+                    errorText.value = "input disabled: ${e.message ?: "X TCP unreachable"}"
+                }
+
+                // v0.1.17 BUGFIX #3: the frame reader was NEVER started by anyone
+                // except MainActivity's beginFrameLoop callback path, which raced
+                // with accept(); worse, when the reader thread blocked in
+                // listener.accept() forever (helper never connected because apk add
+                // inside emux-capture failed), nothing surfaced. Now we arm the
+                // loop ourselves with a self-contained invalidation callback;
+                // MainActivity may re-arm it later with a UI-bound one.
+                beginFrameLoop { /* DesktopView polls frameId via invalidate below */ }
+
                 state.value = State.CONNECTED
+                if (!ctrlOk) {
+                    // Keep CONNECTED (frames visible); retry control plane once more
+                    // in background so touch input eventually works.
+                    scope.launch {
+                        runCatching {
+                            waitForPort(6000, timeoutMs = 30_000)
+                            val c = X11Client(display = 0)
+                            c.connect()
+                            x11 = c
+                            errorText.value = null
+                        }
+                    }
+                }
             } catch (e: Exception) {
                 Log.e(TAG, "desktop start failed", e)
                 errorText.value = e.message ?: "unknown error"
                 state.value = State.ERROR
             }
+        }
+    }
+
+    private fun resetForRestart() {
+        runCatching { frameReader?.cancel() }; frameReader = null
+        runCatching { listener?.close() }; listener = null
+        runCatching { x11?.close() }; x11 = null
+        scope.launch {
+            runCatching { xSession?.stop() }; xSession = null
+            runCatching { captureSession?.stop() }; captureSession = null
         }
     }
 

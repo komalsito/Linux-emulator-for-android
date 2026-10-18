@@ -85,8 +85,18 @@ object FsLayout {
         "HOME" to home(ctx).absolutePath,
         "PREFIX" to usr(ctx).absolutePath,
         "TMPDIR" to tmp(ctx).absolutePath,
-        "PATH" to "${usr(ctx)}/bin:${usr(ctx)}/sbin:" +
-            "${linuxRoot(ctx)}/usr/bin:${linuxRoot(ctx)}/usr/sbin",
+        // v0.1.17 BUGFIX: EMUX_ROOTFS was never exported. emux-init.sh resolves
+        // the distro as ROOT="${EMUX_ROOT:-$HOME/../linuxroot}" — with HOME set
+        // to files/home that expands to the NON-EXISTENT files/linuxroot (the
+        // real tree is files/linuxroot, one level shallower), so the rootfs
+        // check failed and the launcher exec'd plain Android sh: no distro PATH,
+        // no distro binaries → empty-looking terminal where nothing works.
+        "EMUX_ROOTFS" to linuxRoot(ctx).absolutePath,
+        "EMUX_ROOT" to linuxRoot(ctx).absolutePath,
+        "PATH" to "${linuxRoot(ctx)}/usr/local/bin:${linuxRoot(ctx)}/usr/bin:" +
+            "${linuxRoot(ctx)}/bin:${linuxRoot(ctx)}/usr/local/sbin:" +
+            "${linuxRoot(ctx)}/usr/sbin:${linuxRoot(ctx)}/sbin:" +
+            "${usr(ctx)}/bin:${usr(ctx)}/sbin:/system/bin:/system/xbin",
         "LANG" to "en_US.UTF-8",
         "TERM" to "xterm-256color",
         "SHELL" to "/bin/bash",

@@ -70,3 +70,6 @@ Dex check: isStalePass/raiseFloorTo/stageHelperAssets symbols + STALE role + per
 Fixes: single-pass slot floor (stale collectors short-circuit instead of re-running),
 report() stale-guard, guarded isBootstrapped short-circuit, bounded asset pre-stage
 with rootfs-copy fallback so 'Installing helper scripts' can never wedge on AAsset.
+
+=== v0.1.17 build (keyboard input + desktop fixes) ===
+BUILD SUCCESSFUL in 1m 54s

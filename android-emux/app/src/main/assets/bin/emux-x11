@@ -6,14 +6,26 @@ export HOME="${HOME:-/root}"
 if [ "$(id -u)" = "0" ] && [ -x /usr/bin/Xorg ]; then
   Xorg :0 -config /etc/X11/emux-xorg.conf &
 else
-  [ -x /usr/bin/Xvfb ] || apk add --no-cache xorg-server-xvfb openbox xterm
-  Xvfb :0 -screen 0 "$RES" -nolisten tcp -auth /tmp/xauth >/tmp/xvfb.log 2>&1 &
+  [ -x /usr/bin/Xvfb ] || apk add --no-cache xorg-server-xvfb openbox xterm >/dev/null 2>&1
+  # v0.1.17 BUGFIX (desktop blank): "-nolisten tcp" made Xvfb refuse TCP, but the
+  # Android-side X11Client talks over loopback TCP :6000 — waitForPort(6000) could
+  # therefore NEVER succeed and the desktop died in State.ERROR every time.
+  # "-listen tcp" enables it (loopback-only server; no external exposure).
+  mkdir -p /tmp/.X11-unix
+  touch /tmp/xauth; chmod 600 /tmp/xauth 2>/dev/null
+  Xvfb :0 -screen 0 "$RES" -listen tcp -auth /tmp/xauth >/tmp/xvfb.log 2>&1 &
 fi
 XPID=$!
 # wait for socket, max 15s
 i=0; while [ ! -e /tmp/.X11-unix/X0 ] && [ $i -lt 150 ]; do sleep 0.1; i=$((i+1)); done
 export DISPLAY=:0
-# enable TCP for the Android-side X11 client (loopback only)
+# enable local connections for the Android-side X11 client (loopback only)
 [ -x /usr/bin/xhost ] && xhost +local: >/dev/null 2>&1
-"$WM" 2>/tmp/wm.log &
+# v0.1.17: if the configured WM is missing (fresh rootfs has no openbox), fall
+# back through installed WMs to xterm so SOMETHING always draws on screen.
+run_wm() { command -v "$1" >/dev/null 2>&1 && { "$1" 2>/tmp/wm.log & return 0; } || return 1; }
+run_wm "$WM" || run_wm openbox || run_wm twm || run_wm icewm || {
+  [ -x /usr/bin/xterm ] || apk add --no-cache xterm >/dev/null 2>&1
+  xterm -e /bin/sh -l 2>/tmp/wm.log &
+}
 wait $XPID

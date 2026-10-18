@@ -65,7 +65,17 @@ class TerminalSession(
                 val env = FsLayout.sessionEnv(ctx).toMutableMap()
                 // Launch through our shell-init script which sets up /proc-less
                 // mounts (tmpfs via `unshare` when root, else pure proot-free path).
-                val pb = ProcessBuilder("/system/bin/sh", "-c", buildCommandLine(initialCommand))
+                // v0.1.17 BUGFIX (blank terminal, nothing typed back): the child
+                // was launched through Android's /system/bin/sh -c "...". On API
+                // 29+ that shell runs in the untrusted_app SELinux domain and is
+                // DENIED exec of scripts under /data/data/<app>/files — so our
+                // distro launcher died instantly with EACCES and the PTY produced
+                // zero output ("no new text inside the interface"). Plain
+                // ProcessBuilder(argv) exec instead runs the interpreter directly
+                // in the app's own (unconfined for its data dir) domain, exactly
+                // like Termux does. We pass the shebang'd init script as argv[0]
+                // when it exists; otherwise fall back to a visible error notice.
+                val pb = buildProcess(initialCommand)
                 pb.environment().clear()
                 pb.environment().putAll(env)
                 pb.redirectErrorStream(true)
@@ -96,25 +106,27 @@ class TerminalSession(
         }
     }
 
-    private fun buildCommandLine(cmd: String): String {
+    /** Assemble the actual child process (see v0.1.17 note at the call site). */
+    private fun buildProcess(cmd: String): ProcessBuilder {
         val rootfs = FsLayout.linuxRoot(ctx).absolutePath
         // Alpine minirootfs ships ash only (no bash) — use /bin/sh so the session
         // doesn't die instantly with "bash: not found" on a fresh bootstrap.
         val shellCmd = cmd.replace("bash -l", "/bin/sh -l")
+        val init = File(rootfs, "emux-init.sh")
         return if (root.mode != RootMode.NONE && userWantsChroot()) {
             // True chroot under root: fastest possible (zero syscall translation).
-            "su -c 'chroot $rootfs /bin/su -s /bin/sh -c \\\"cd && exec $shellCmd\\\"'"
+            ProcessBuilder("/system/bin/sh", "-c",
+                "su -c 'chroot $rootfs /bin/su -s /bin/sh -c \\\"cd && exec $shellCmd\\\"'")
+        } else if (init.canExecute()) {
+            // Direct exec of the shebang'd launcher — no intermediate Android sh,
+            // which cannot exec app-data files on API 29+.
+            ProcessBuilder(init.absolutePath, shellCmd)
         } else {
-            // Unprivileged fallback: run distro binaries directly with patched
-            // interpreter paths (musl loader supports --load-interp-name style
-            // via LD_LIBRARY_PATH + explicit ld-musl invocation done in init.sh).
-            // The init script is installed by BootstrapManager at rootfs/emux-init.sh;
-            // if it's missing (e.g. app updated over an old partial bootstrap), fall
-            // back to plain Android sh so the terminal still works.
-            val init = File(rootfs, "emux-init.sh")
-            if (init.canExecute()) "$rootfs/emux-init.sh $shellCmd"
-            else "/system/bin/sh -l"
-        }
+            // No launcher yet (partial bootstrap): plain Android shell PLUS an
+            // explicit notice, so the screen is never silently blank.
+            ProcessBuilder("/system/bin/sh", "-c",
+                "echo '[emux] rootfs launcher missing — tap Install to finish bootstrap'; exec /system/bin/sh -l")
+        }.apply { redirectErrorStream(true) }
     }
 
     private fun userWantsChroot(): Boolean = true // wired to prefs in Service
