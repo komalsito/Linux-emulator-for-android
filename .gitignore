@@ -1,2 +1,9 @@
 .gradle/
 build/
+*.apk
+*.dex
+*.bin
+*.lock
+*.ap_
+.idea/
+.vscode/

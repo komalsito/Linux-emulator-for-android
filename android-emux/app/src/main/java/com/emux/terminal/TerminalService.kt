@@ -100,6 +100,9 @@ class TerminalService : LifecycleService() {
         const val EXTRA_SESSION_ID = "session_id"
         const val EXTRA_COMMAND = "command"
 
+        /** v0.1.18: cap on automatic respawns of abnormally-exited sessions. */
+        const val MAX_AUTO_RESTARTS = 2
+
         /**
          * v0.1.2 CRASH FIX #2: on Android 12+ a startService() call that lands
          * while the app is in the *background* (e.g. user swipes the crashed app
@@ -178,10 +181,37 @@ class TerminalService : LifecycleService() {
             sessions += s
             s.start()
             refresh()
+            // v0.1.18 BUGFIX #4: when a session's child dies (exit code != 0 or a
+            // dead-on-arrival launcher), the registry kept the corpse forever and
+            // MainActivity re-attached to it — the UI looked "bootstrapped but
+            // totally inert". Watch the state flow; on death with a nonzero exit
+            // code, respawn ONE replacement automatically (bounded by
+            // MAX_AUTO_RESTARTS so a permanently broken environment can't spawn a
+            // busy-loop of processes). Clean exits (code 0, e.g. `exit`) are left
+            // alone — the user closed the shell intentionally.
+            lifecycleScope.launch {
+                var restartsUsed = autoRestarts
+                s.state.collect { st ->
+                    if (st == TerminalSession.State.DEAD && !s.exitedCleanly &&
+                        s.id < 9000 && restartsUsed < MAX_AUTO_RESTARTS) {
+                        restartsUsed++
+                        autoRestarts = restartsUsed
+                        sessions.remove(s)
+                        refresh()
+                        com.emux.EmuXLog.e("session ${s.id} died abnormally — respawning")
+                        newSession(command)
+                    } else if (st == TerminalSession.State.DEAD) {
+                        sessions -= s
+                        refresh()
+                    }
+                }
+            }
         } catch (e: Throwable) {
             com.emux.EmuXLog.e("newSession('$command') failed", e)
         }
     }
+
+    private var autoRestarts = 0
 
     private fun refresh() {
         registry.value = sessions.toList()

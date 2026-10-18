@@ -93,6 +93,20 @@ class DesktopService(
         state.value = State.STARTING_X
         scope.launch {
             try {
+                // v0.1.18 BUGFIX #5 ("desktop tab shows nothing"): emux-x11 and
+                // emux-capture run INSIDE the distro shell launched by
+                // TerminalSession — so if that launcher is broken/denied, both
+                // desktop sessions died instantly with zero output and the pane
+                // stayed black while bootstrap cheerfully said "Bootstrapped".
+                // Fail fast here with an explicit message instead of silently
+                // waiting 25 s on a port nobody will ever open.
+                val rootfs = com.emux.core.FsLayout.linuxRoot(ctx)
+                if (!java.io.File(rootfs, "emux-init.sh").isFile || !java.io.File(rootfs, "etc").isDirectory) {
+                    errorText.value = "rootfs launcher missing — tap Install to re-bootstrap"
+                    state.value = State.ERROR
+                    return@launch
+                }
+
                 // 0) v0.1.17 BUGFIX #2 (the actual reason the screen stayed blank):
                 //    emux-x11 starts Xvfb with `-nolisten tcp`, so the Android-side
                 //    X11Client could NEVER reach port 6000 — waitForPort(6000) always
@@ -102,6 +116,18 @@ class DesktopService(
                 //    own -nolisten, which is why the script also got patched).
                 val cmd = "emux-x11 $wmCommand"
                 xSession = TerminalSession(9001, ctx, root, cmd).also { it.start() }
+
+                // v0.1.18 BUGFIX #6: if the X server session dies (launcher exec
+                // failed, su denied, Xvfb crashed), say so immediately instead of
+                // leaving a black pane with no explanation.
+                scope.launch {
+                    xSession?.state?.collect { st ->
+                        if (st == TerminalSession.State.DEAD && state.value != State.ERROR) {
+                            errorText.value = "X server exited (code ${xSession?.exitCode}) — check terminal tab for launcher errors"
+                            state.value = State.ERROR
+                        }
+                    }
+                }
 
                 // 1) Open our frame listener BEFORE starting capture so no frames lost.
                 openFrameListener()

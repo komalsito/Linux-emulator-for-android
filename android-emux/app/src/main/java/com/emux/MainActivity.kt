@@ -209,8 +209,23 @@ class MainActivity : AppCompatActivity() {
         lifecycleScope.launch {
             repeatOnLifecycle(Lifecycle.State.STARTED) {
                 TerminalService.sessions().collect { list ->
-                    val s = list.firstOrNull { it.id < 9000 }
+                    val s = list.firstOrNull { it.id < 9000 && it.state.value != com.emux.terminal.TerminalSession.State.DEAD }
                         ?: run {
+                            // v0.1.18 BUGFIX #3 ("keyboard dead, nothing typed, no
+                            // new text"): the old filter was `id < 9000` ONLY. When
+                            // the first session's child process died (denied su,
+                            // missing launcher, …), its DEAD TerminalSession object
+                            // stayed in the registry forever, so this collect block
+                            // kept re-attaching the view to that corpse and NEVER
+                            // started a fresh session. Every keystroke went to the
+                            // dead process's closed stream (write() swallowed the
+                            // exception) → literally zero bytes reached any shell:
+                            // "cannot type", "no new text inside the interface".
+                            // Now dead sessions are skipped and a replacement is
+                            // spawned; pumpOutput prints the exit notice instead.
+                            if (list.any { it.id < 9000 && it.state.value == com.emux.terminal.TerminalSession.State.DEAD }) {
+                                view.feed("\n[emux] previous shell exited — starting a new one…\n".toByteArray())
+                            }
                             TerminalService.startSession(this@MainActivity, "bash -l")
                             return@collect
                         }
@@ -236,11 +251,17 @@ class MainActivity : AppCompatActivity() {
                 }
                 launch {
                     if (s.state.value == com.emux.terminal.TerminalSession.State.DEAD) {
-                        view.feed("[emux] session #${s.id} already exited — tap Install to re-bootstrap.\n".toByteArray())
+                        view.feed("[emux] session #${s.id} already exited (code ${s.exitCode}) — starting a new shell…\n".toByteArray())
                     } else {
                         s.state.collect { st ->
                             if (st == com.emux.terminal.TerminalSession.State.DEAD) {
-                                view.feed("\n[emux] process exited — press ENTER for a new shell.\n".toByteArray())
+                                // v0.1.18: show the real exit code + whether it was
+                                // clean, instead of the old generic ENTER hint. The
+                                // service auto-respawns abnormal deaths; a clean
+                                // `exit` just ends the session visibly.
+                                val why = if (s.exitedCleanly) "exited cleanly"
+                                    else "exited abnormally (code ${s.exitCode})"
+                                view.feed("\n[emux] process $why — ${if (s.exitedCleanly) "press ENTER or tap Install for a new shell." else "restarting…" }\n".toByteArray())
                             }
                         }
                     }

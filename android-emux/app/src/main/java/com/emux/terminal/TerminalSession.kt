@@ -43,6 +43,18 @@ class TerminalSession(
     enum class State { STARTING, RUNNING, DEAD }
 
     val state = MutableStateFlow(State.STARTING)
+
+    /**
+     * v0.1.18: true when the child exited with code 0 (user typed `exit`).
+     * False for crashes / denied su / missing launcher — those are exactly the
+     * cases TerminalService auto-respawns and the UI must flag loudly.
+     */
+    @Volatile var exitedCleanly: Boolean = false
+        private set
+
+    /** Last observed exit code (-1 unknown), surfaced in the UI notice. */
+    @Volatile var exitCode: Int = -1
+        private set
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private var job: Job? = null
     private var process: Process? = null
@@ -96,6 +108,8 @@ class TerminalSession(
                     scrollback.send(buf.copyOf(n))
                 }
                 val code = process!!.waitFor()
+                exitCode = code
+                exitedCleanly = code == 0
                 state.value = State.DEAD
                 releaseWake()
                 // notify listeners via flow collectors (UI shows "[process exited $code]")
@@ -108,19 +122,61 @@ class TerminalSession(
 
     /** Assemble the actual child process (see v0.1.17 note at the call site). */
     private fun buildProcess(cmd: String): ProcessBuilder {
-        val rootfs = FsLayout.linuxRoot(ctx).absolutePath
+        val rootfsFile = FsLayout.linuxRoot(ctx)
+        val rootfs = rootfsFile.absolutePath
         // Alpine minirootfs ships ash only (no bash) — use /bin/sh so the session
         // doesn't die instantly with "bash: not found" on a fresh bootstrap.
         val shellCmd = cmd.replace("bash -l", "/bin/sh -l")
-        val init = File(rootfs, "emux-init.sh")
-        return if (root.mode != RootMode.NONE && userWantsChroot()) {
+        val init = File(rootfsFile, "emux-init.sh")
+
+        // v0.1.18 BUGFIX #1 ("bootstrapped OK but keyboard dead + desktop blank"):
+        // this branch was FIRST and unconditional whenever su existed — even for a
+        // user who DENIED the Magisk prompt or whose su policy blocks the app.
+        // `su -c 'chroot …'` then exits immediately (denied → exit 1), the PTY
+        // produced zero bytes, and MainActivity's pump printed
+        // "[emux] process exited — press ENTER for a new shell." after EVERY
+        // ENTER keystroke. The exact reported symptom: nothing typed, nothing on
+        // the desktop tab (its emux-x11/emux-capture sessions died identically).
+        // We now require PROOF the privileged path works before using it; the
+        // unprivileged loader (which needs no root at all) is the default.
+        val privilegedOk = root.mode != RootMode.NONE && userWantsChroot() &&
+            runCatching {
+                val p = ProcessBuilder("/system/bin/sh", "-c",
+                    "su -c 'chroot $rootfs /bin/sh -c id' 2>/dev/null")
+                    .redirectErrorStream(true)
+                    .redirectInput(ProcessBuilder.Redirect.from(File("/dev/null")))
+                    .start()
+                val out = p.inputStream.bufferedReader().use { it.readText() }
+                // 10 s watchdog: a hung su (prompt waiting on invisible stdin) must
+                // never hang session startup.
+                val wd = Thread {
+                    try { Thread.sleep(10_000); p.destroy() } catch (_: Exception) {}
+                }.apply { isDaemon = true }
+                wd.start()
+                val code = try { p.waitFor() } catch (_: Exception) { -1 }
+                wd.interrupt()
+                code == 0 && out.contains("uid=0")
+            }.getOrDefault(false)
+        root.chrootVerified = privilegedOk
+
+        return if (privilegedOk) {
             // True chroot under root: fastest possible (zero syscall translation).
             ProcessBuilder("/system/bin/sh", "-c",
                 "su -c 'chroot $rootfs /bin/su -s /bin/sh -c \\\"cd && exec $shellCmd\\\"'")
-        } else if (init.canExecute()) {
-            // Direct exec of the shebang'd launcher — no intermediate Android sh,
-            // which cannot exec app-data files on API 29+.
-            ProcessBuilder(init.absolutePath, shellCmd)
+        } else if (init.isFile) {
+            // v0.1.18 BUGFIX #2: the old gate was `init.canExecute()`. Bootstrap
+            // sets the exec bit via File.setExecutable(true,false), which maps to
+            // chmod 700 *owner-only* — and some OEM file managers / SELinux-aware
+            // chmod implementations leave modes that canExecute() reports false
+            // for. When that happened we fell into the "launcher missing" branch
+            // and ran PLAIN ANDROID sh forever: no distro PATH, no emux-x11, no
+            // bash — keyboard echoed nothing useful and the desktop stayed blank
+            // even though bootstrap said "Bootstrapped". Now we accept the file
+            // whenever it exists and FIX the mode ourselves right here (double
+            // insurance against any bootstrap-path regression), invoking through
+            // the interpreter explicitly as a last hedge against noexec quirks.
+            runCatching { init.setExecutable(true, false); init.setReadable(true, false) }
+            ProcessBuilder("/system/bin/sh", init.absolutePath, shellCmd)
         } else {
             // No launcher yet (partial bootstrap): plain Android shell PLUS an
             // explicit notice, so the screen is never silently blank.

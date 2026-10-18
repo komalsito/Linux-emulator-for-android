@@ -25,6 +25,13 @@ class RootManager(private val ctx: Context) {
     @Volatile var mode: RootMode = RootMode.NONE
         private set
 
+    /**
+     * v0.1.18: set by TerminalSession after it PROVES (or fails to prove) that a
+     * real chroot exec works on this device. Session/desktop launches consult the
+     * verified flag so a denied su never becomes the default execution path.
+     */
+    @Volatile var chrootVerified: Boolean = false
+
     private val suBinary: String? by lazy {
         // Probe common su locations without executing anything first.
         listOf("/system/bin/su", "/system/xbin/su", "/sbin/su", "/debug/bin/su")
