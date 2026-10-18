@@ -62,3 +62,11 @@ gradle --no-daemon assembleDebug -> BUILD SUCCESSFUL in 1m14s (38 tasks, 0 error
 versionCode 15 / versionName 0.1.15; aapt2 badging OK; apksigner verify OK
 Dex check (classes3.dex): per-script heartbeat labels, second-cleanup-pass log,
 markBootstrappedChecked, rootfs-completeness check, bounded asset read — all present.
+
+=== v0.1.16 build (concurrent-pass hijack + helper-scripts hardening) ===
+gradle --no-daemon assembleDebug -> BUILD SUCCESSFUL in 1m14s (38 tasks, 0 errors; fixed expression-body 'if' compile error in releaseSlot first)
+versionCode 16 / versionName 0.1.16; aapt2 badging OK (minSdk 24/targetSdk 34); apksigner verify OK
+Dex check: isStalePass/raiseFloorTo/stageHelperAssets symbols + STALE role + per-script labels present.
+Fixes: single-pass slot floor (stale collectors short-circuit instead of re-running),
+report() stale-guard, guarded isBootstrapped short-circuit, bounded asset pre-stage
+with rootfs-copy fallback so 'Installing helper scripts' can never wedge on AAsset.

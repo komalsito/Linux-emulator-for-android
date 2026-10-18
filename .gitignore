@@ -1,15 +1,2 @@
 build/
 .gradle/
-*.dex
-*.class
-*.bin
-*.at
-*.tab
-*.keystream
-*.len
-*.i
-*.s
-*.values
-*.snap
-*.snapshot
-*.log

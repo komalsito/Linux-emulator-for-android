@@ -66,6 +66,56 @@ class BootstrapManager(private val ctx: Context) {
 
         fun rootfsUrl(distro: String = DEFAULT_DISTRO, version: String = ALPINE_VERSION): String =
             "$MIRROR/${majorVersion(version)}/releases/${archName()}/${distro}-$version-${archName()}.tar.gz"
+
+        // ---- v0.1.16 single-pass machinery (process-wide state) ------------
+        // Process-wide because the W-M worker and the in-process runner use
+        // DIFFERENT BootstrapManager instances — instance state would not dedupe.
+        val activeLock = Any()
+        @Volatile private var activeId: Long = 0L
+        @Volatile private var activeSlot: Slot? = null
+        // Monotonic progress floor: a later phase may never be overwritten by
+        // an earlier phase's label (guards against any residual label hijack).
+        val progressLock = Any()
+        private var lastPhaseRank = -1
+        private var lastPhasePassId = -1L
+
+        /**
+         * v0.1.16 STALL FIX #5b — PROCESS-WIDE PASS FLOOR. Once a pass reaches a
+         * terminal state, every pass with a LOWER id is permanently stale: it
+         * must neither run nor emit progress frames. Without this, a straggler
+         * collector (e.g. MainActivity's 8-second safety net attaching after the
+         * WorkManager pass already finished) could acquire a fresh OWNER slot
+         * and re-announce "Resolving mirror"/"Downloading rootfs"/"Installing
+         * helper scripts", hijacking the UI back onto an old label — the exact
+         * "helper scripts taking forever" symptom reported for v0.1.15.
+         */
+        @Volatile private var completedFloorId: Long = 0L
+        fun isStalePass(id: Long): Boolean = id <= completedFloorId
+        fun raiseFloorTo(id: Long) = synchronized(activeLock) {
+            if (id > completedFloorId) completedFloorId = id
+        }
+
+        /** Order of bootstrap phases; unknown/pct updates map to the current rank. */
+        private val PHASES = listOf(
+            "Resolving mirror",
+            "Downloading rootfs",
+            "Cleaning previous rootfs",
+            "Extracting rootfs",
+            "Linking /data/data paths",
+            "Pruning special files",
+            "Finalizing rootfs config",
+            "Installing helper script",      // prefix-match (per-script frames)
+            "Bootstrapped",
+        )
+
+        fun phaseRank(step: String): Int {
+            for (i in PHASES.indices) {
+                if (step.startsWith(PHASES[i])) return i
+            }
+            return -1
+        }
+
+        internal fun nextPassId(): Long = synchronized(activeLock) { ++activeId }
     }
 
     /** Streams download+extract progress as a Flow so UI can render a single bar. */
@@ -78,27 +128,148 @@ class BootstrapManager(private val ctx: Context) {
         // thread's UncaughtExceptionHandler and killed the whole process when
         // Install was tapped. Now the launch is guarded twice: explicit
         // supervisorContext for cancellation semantics + runCatching belt.
-        val ioScope = kotlinx.coroutines.CoroutineScope(
-            kotlinx.coroutines.SupervisorJob() + Dispatchers.IO)
-        ioScope.launch {
-            runCatching { runBootstrapInternal { res -> trySend(res) } }
-                .onFailure { e ->
-                    com.emux.EmuXLog.e("bootstrap internal escape (guarded)", e)
-                    BootstrapReporter.publishError(
-                        ctx, "${e.javaClass.simpleName}: ${e.message ?: "no message"}")
-                    trySend(Result.failure(e))
+        //
+        // v0.1.16 STALL FIX #5 — CONCURRENT-PASS PROGRESS HIJACK (the reason
+        // "Installing helper scripts" STILL looked stuck after fix #4). The
+        // WorkManager pass and MainActivity's 8-second in-process safety net
+        // (ensureBootstrapCompletes → BootstrapRunner.run) each started their
+        // OWN full download+extract pass against the same dest/ and tarball.
+        // The second pass re-announced every earlier label through the shared
+        // LiveData mirror, overwriting the leader's newer labels — so the UI
+        // froze on whatever label the straggler happened to be at, forever,
+        // while both passes fought over rootfs.tar.gz mid-extraction.
+        // Now exactly ONE pass ever runs per process: late collectors ATTACH to
+        // the in-flight pass instead of starting a duplicate.
+        val self = this@BootstrapManager
+        val listener: (Result<Unit>) -> Unit = { res -> trySend(res) }
+        val slot = self.acquireSlot(listener)
+        when (slot.role) {
+            Slot.Role.ATTACHED -> { /* leader drives our channel; just wait */ }
+            // v0.1.16 STALL FIX #5b: a terminal pass already completed in this
+            // process — acquireSlot short-circuited and delivered success via
+            // `emit` above. Never start a duplicate download/extract pass.
+            Slot.Role.STALE -> { /* result already delivered; nothing to run */ }
+            Slot.Role.OWNER -> {
+                val ioScope = kotlinx.coroutines.CoroutineScope(
+                    kotlinx.coroutines.SupervisorJob() + Dispatchers.IO)
+                ioScope.launch {
+                    runCatching { self.runBootstrapInternal(slot) }
+                        .onFailure { e ->
+                            com.emux.EmuXLog.e("bootstrap internal escape (guarded)", e)
+                            BootstrapReporter.publishError(
+                                self.ctx, "${e.javaClass.simpleName}: ${e.message ?: "no message"}")
+                            slot.finish(Result.failure(e))
+                        }
                 }
+            }
         }
-        awaitClose { ioScope.coroutineContext[kotlinx.coroutines.Job]?.cancel() }
+        awaitClose { self.releaseSlot(slot, listener) }
     }
 
-    private suspend fun runBootstrapInternal(emit: (Result<Unit>) -> Unit) {
+    // ---- v0.1.16 single-pass machinery ------------------------------------
+
+    /** One in-flight bootstrap pass; fan-outs results to every attached flow. */
+    private class Slot(val id: Long) {
+        enum class Role { OWNER, ATTACHED, STALE }
+        var role: Role = Role.OWNER
+        var attachedTo: Slot? = null
+        private val listeners = java.util.concurrent.CopyOnWriteArrayList<(Result<Unit>) -> Unit>()
+        fun addListener(l: (Result<Unit>) -> Unit) { listeners.add(l) }
+        fun removeListener(l: (Result<Unit>) -> Unit) { listeners.remove(l) }
+        @Volatile private var terminalDelivered = false
+        fun broadcast(r: Result<Unit>) { listeners.forEach { l -> runCatching { l(r) } } }
+        /** Deliver the terminal result once, then mark the slot finished. */
+        fun finish(r: Result<Unit>) {
+            if (r.isSuccess || r.exceptionOrNull() !is BootstrapProgress) {
+                synchronized(this) {
+                    if (!terminalDelivered) {
+                        terminalDelivered = true
+                        // v0.1.16: raise the process-wide floor BEFORE fanning
+                        // out so any straggler collector that reacts to this
+                        // terminal event immediately sees its own pass as stale.
+                        if (id > 0L) raiseFloorTo(id)
+                        broadcast(r)
+                    }
+                    finished.set(true)
+                }
+                // Clear the process-wide slot so the next call starts a fresh
+                // pass (a completed rootfs short-circuits anyway via
+                // isBootstrapped; this only matters for retry passes).
+                synchronized(activeLock) { if (activeSlot === this) activeSlot = null }
+            } else broadcast(r)   // progress frame: fan out to all collectors
+        }
+        val finished = java.util.concurrent.atomic.AtomicBoolean(false)
+    }
+
+    private fun acquireSlot(emit: (Result<Unit>) -> Unit): Slot = synchronized(activeLock) {
+        val cur = activeSlot
+        if (cur != null && !cur.finished.get()) {
+            // Late collector: attach its channel listener to the leader pass and
+            // do NOT start a duplicate download/extract.
+            cur.addListener(emit)
+            Slot(-1L).also { it.role = Slot.Role.ATTACHED; it.attachedTo = cur }
+        } else {
+            val s = Slot(++activeId)
+            // v0.1.16 STALL FIX #5b: if a terminal pass with id >= our new id
+            // already completed (e.g. the WorkManager pass won the race against
+            // MainActivity's 8-second safety net), this caller is late — do NOT
+            // start a duplicate full pass. Deliver success immediately instead.
+            if (isStalePass(s.id)) {
+                s.role = Slot.Role.STALE
+                emit(Result.success(Unit))
+                return@synchronized s
+            }
+            s.addListener(emit)
+            activeSlot = s
+            s
+        }
+    }
+
+    private fun releaseSlot(slot: Slot, listener: (Result<Unit>) -> Unit): Unit = synchronized(activeLock) {
+        when (slot.role) {
+            Slot.Role.ATTACHED -> {
+                // Detach this flow's channel from the leader so a cancelled
+                // collector never receives (or blocks) further broadcasts.
+                slot.attachedTo?.removeListener(listener)
+            }
+            Slot.Role.OWNER -> {
+                slot.removeListener(listener)
+                // If the owner pass already reached a terminal state, clear the
+                // process-wide slot so the next caller starts a fresh attempt.
+                if (activeSlot === slot && slot.finished.get()) {
+                    activeSlot = null
+                }
+            }
+            Slot.Role.STALE -> { /* never registered as leader; nothing to release */ }
+        }
+        Unit
+    }
+
+    private suspend fun runBootstrapInternal(slot: Slot) {
         // v0.1.8: the caller (BootstrapWorker) already runs us on Dispatchers.IO;
         // progress is additionally mirrored to WorkManager via BootstrapReporter.
         val ctx = this.ctx
         fun report(step: String, pct: Int) {
+            // v0.1.16 STALL FIX #5b: a pass that became stale mid-flight (another
+            // collector's terminal result raised the floor while we were still
+            // running — possible because the leader can outlive its own flow if
+            // the UI detaches and re-attaches) must stop emitting frames entirely
+            // so it can never hijack the displayed label back to an old phase.
+            if (isStalePass(slot.id)) return
+            // v0.1.16: monotonic phase ordering. Never let a frame regress the
+            // displayed phase (e.g. a straggler re-announcing "Downloading
+            // rootfs" after we reached "Installing helper scripts"). Same-phase
+            // updates (download percentages) always pass. Reset per pass.
+            val rank = phaseRank(step)
+            synchronized(progressLock) {
+                if (lastPhasePassId != slot.id) { lastPhasePassId = slot.id; lastPhaseRank = -1 }
+                if (rank >= 0) {
+                    if (rank < lastPhaseRank) return
+                    lastPhaseRank = rank
+                } else if (lastPhaseRank >= 0 && step.isEmpty()) return
+            }
             BootstrapReporter.publish(ctx, step, pct)
-            emit(Result.failure(BootstrapProgress(step, pct)))
+            slot.broadcast(Result.failure(BootstrapProgress(step, pct)))
         }
         try {
             // v0.1.9 CRASH FIX (the real Install-button one, found by tracing the
@@ -120,6 +291,20 @@ class BootstrapManager(private val ctx: Context) {
             // file that passes the gzip-magic check but explodes during extraction.
             // Always start from a clean slate.
             runCatching { if (tmpFile.exists()) tmpFile.delete() }
+            // v0.1.16: short-circuit if a concurrent pass already finished the
+            // install while we were acquiring the slot (e.g. the W-M worker won
+            // the race against MainActivity's 8-second safety net). Without this
+            // the second caller would wipe and re-download a perfectly good rootfs.
+            // v0.1.16b: guard the whole check — FsLayout.isBootstrapped touches
+            // files/prefs and any escaped Throwable here used to abort bootstrap
+            // right after extraction with no progress frame, which surfaced as
+            // "the step never passes". On doubt we proceed rather than throw.
+            val alreadyDone = runCatching { FsLayout.isBootstrapped(ctx) }.getOrDefault(false)
+            if (alreadyDone || isStalePass(slot.id)) {
+                report("Bootstrapped", 100)
+                slot.finish(Result.success(Unit))
+                return
+            }
             report("Resolving mirror", -1)
 
             // v0.1.13 STALL FIX #1 — top-down deleteRecursively() pre-wipe.
@@ -292,7 +477,28 @@ class BootstrapManager(private val ctx: Context) {
             // reports a per-script frame ("Installing helper script: <name>") so
             // the UI advances through every copy instead of freezing on one label.
             report("Installing helper scripts", -1)
-            installHelperScripts(dest) { step, pct -> report(step, pct) }
+            // v0.1.16 STALL FIX #5c — ASSET PRE-STAGE. The per-script work is
+            // ~700-byte copies that take milliseconds; the only way this step
+            // can burn minutes is a wedged AAsset handle (assets.open() /
+            // read() blocking in native code under storage pressure — seen on
+            // several OEM ROMs). withHardTimeout's watchdog returns after 8 s
+            // but the *daemon thread stays blocked forever*, and its open FD
+            // makes subsequent assets.open() calls queue behind it — so pass 2+
+            // still stalls even though bootstrap "continues". Fix: pre-read ALL
+            // helper assets ONCE through a single hard-timeout stage before the
+            // per-script loop. If staging times out we skip the asset layer
+            // entirely and fall back to copying from the already-extracted rootfs
+            // (dest/emux-* survive every previous successful extract), which is
+            // pure file I/O and can never wedge on AAsset internals.
+            val staged = stageHelperAssets()
+            installHelperScripts(dest, staged) { step, pct -> report(step, pct) }
+            // v0.1.16: the per-script frames above are "Installing helper
+            // script: <name>" (rank 7). Emit a terminal-rank frame so the label
+            // floor advances PAST the helper phase — a residual late/old-pass
+            // frame can then never re-pin the UI on "Installing helper scripts"
+            // again (the exact reported symptom), and the user sees the phase
+            // actually complete instead of hanging on the last sub-step name.
+            report("Bootstrapped", 100)
 
             // v0.1.15 AUDIT FIX — verified completion before marking. The old code
             // wrote .env_version unconditionally; if that single write threw (full
@@ -306,13 +512,13 @@ class BootstrapManager(private val ctx: Context) {
             }
             val marked = runCatching {
                 var ok = FsLayout.markBootstrappedChecked(ctx)
-                if (!ok) { Thread.sleep(200); ok = FsLayout.markBootstrappedChecked(ctx) }
+                if (!ok) { try { Thread.sleep(150) } catch (_: InterruptedException) {}; ok = FsLayout.markBootstrappedChecked(ctx) }
                 ok
             }.getOrDefault(false)
             if (!marked) {
                 throw java.io.IOException("rootfs installed, but completion marker could not be written (storage full?)")
             }
-            emit(Result.success(Unit))
+            slot.finish(Result.success(Unit))
         } catch (e: Throwable) {
             // v0.1.8: surface the real reason to the observing UI through the
             // WorkManager progress data too (the Flow path only works in-process).
@@ -321,7 +527,7 @@ class BootstrapManager(private val ctx: Context) {
             com.emux.core.BootstrapDiagnostics.dumpFull(ctx, e)
             BootstrapReporter.publishError(
                 ctx, com.emux.core.BootstrapDiagnostics.describe(e))
-            emit(Result.failure(e))
+            slot.finish(Result.failure(e))
         }
     }
 
@@ -524,47 +730,78 @@ class BootstrapManager(private val ctx: Context) {
      * The $HOME staging copy is likewise guarded and bounded (it used to run a
      * recursive Kotlin copyTo against a possibly-symlinked destination).
      */
-    private fun installHelperScripts(dest: File, report: (String, Int) -> Unit) {
+    /**
+     * v0.1.16 STALL FIX #5c — read every helper asset ONCE into memory under a
+     * single hard-timeout watchdog. Returns name→bytes for whatever completed;
+     * missing entries fall back to the already-extracted copy in dest/ (see
+     * [installHelperScripts]). The whole staging pass is bounded: worst case it
+     * costs ~4 s and then bootstrap proceeds without the asset layer at all,
+     * so "Installing helper scripts" can never again be held hostage by a
+     * wedged AAsset handle on OEM ROMs.
+     */
+    private fun stageHelperAssets(): Map<String, ByteArray> {
+        val names = listOf("emux-init.sh", "emux-x11", "emux-capture")
+        val result = java.util.concurrent.ConcurrentHashMap<String, ByteArray>()
+        withHardTimeout(4_000L) {
+            for (name in names) {
+                try {
+                    ctx.assets.open("bin/$name").use { input ->
+                        result[name] = readBounded(input, MAX_ASSET_BYTES)
+                    }
+                } catch (e: Throwable) {
+                    com.emux.EmuXLog.e("asset stage $name failed (will use rootfs copy)", e)
+                }
+            }
+        }
+        return result
+    }
+
+    private fun installHelperScripts(
+        dest: File,
+        staged: Map<String, ByteArray>,
+        report: (String, Int) -> Unit,
+    ) {
         listOf("emux-init.sh", "emux-x11", "emux-capture").forEach { name ->
             // Heartbeat BEFORE each unit of work so the UI always advances even
             // if the following operation hits its timeout.
             report("Installing helper script: $name", -1)
             val out = File(dest, name)
-            // assets.open() itself can wedge on a corrupt AAsset handle, so it
-            // must run INSIDE the watchdog — which means pre-reading the asset
-            // bytes into memory first is NOT an option; instead the whole
-            // open+copy runs under withHardTimeout and we surface failures via
-            // this holder (lambdas assigned into captured vars are fine here).
-            val failure = arrayOfNulls<Throwable>(1)
-            val ok = arrayOf(false)
-            withHardTimeout(8_000L) {
-                try {
-                    ctx.assets.open("bin/$name").use { input ->
-                        val bytes = readBounded(input, MAX_ASSET_BYTES)
-                        // Never open a hostile target: guarantee a fresh regular
-                        // file, then write from memory (instant, cannot block).
-                        if (!replaceRegularFileWith(out) { f -> f.outputStream().use { it.write(bytes) } }) {
-                            throw java.io.IOException("could not create ${out.absolutePath}")
-                        }
-                    }
-                    out.setExecutable(true, false)
-                    out.setReadable(true, false)
-                    ok[0] = true
-                } catch (e: Throwable) {
-                    failure[0] = e
-                }
+            // v0.1.16: bytes come from the pre-staged map when available. The
+            // per-script work is now pure file I/O (replaceRegularFileWith +
+            // an in-memory write) — instant, no AAsset call inside the hot loop.
+            // If staging didn't produce this asset (timed-out/corrupt), fall
+            // back to the copy already present in the extracted rootfs; only if
+            // NEITHER source exists do we fail — and even then non-fatally for
+            // convenience scripts, fatally only for emux-init.sh which the shell
+            // launcher requires.
+            var bytes = staged[name]
+            if (bytes == null) {
+                bytes = runCatching {
+                    if (out.isFile && out.length() in 1..MAX_ASSET_BYTES) FileInputStream(out).use {
+                        readBounded(it, MAX_ASSET_BYTES)
+                    } else null
+                }.getOrNull()
             }
-            when {
-                ok[0] -> {}   // done
-                failure[0] != null ->
-                    throw RuntimeException("Missing/unwritable asset bin/$name in APK", failure[0])
-                else ->
-                    // Watchdog expired with the copy still running in background:
-                    // don't abort bootstrap over one convenience script — log and
-                    // continue so the step ALWAYS passes (v0.1.15 stall fix: the
-                    // old hard throw here was itself an "installation not
-                    // completing" path when combined with the frozen label).
-                    com.emux.EmuXLog.e("helper script $name timed out (continuing)")
+            if (bytes == null) {
+                if (name == "emux-init.sh") {
+                    throw RuntimeException("Missing/unreadable asset bin/$name in APK")
+                }
+                com.emux.EmuXLog.e("helper script $name unavailable (continuing)")
+                return@forEach
+            }
+            val written = arrayOf(false)
+            withHardTimeout(8_000L) {
+                // Never open a hostile target: guarantee a fresh regular file,
+                // then write from memory (instant, cannot block).
+                if (!replaceRegularFileWith(out) { f -> f.outputStream().use { it.write(bytes) } }) {
+                    throw java.io.IOException("could not create ${out.absolutePath}")
+                }
+                out.setExecutable(true, false)
+                out.setReadable(true, false)
+                written[0] = true
+            }
+            if (!written[0]) {
+                com.emux.EmuXLog.e("helper script $name timed out (continuing)")
             }
         }
         // Also stage them under $HOME so they're on PATH-ish locations for users.
