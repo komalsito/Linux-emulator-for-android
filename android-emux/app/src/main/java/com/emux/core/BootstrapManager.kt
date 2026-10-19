@@ -336,10 +336,8 @@ class BootstrapManager(private val ctx: Context) {
                 // while shell components are missing, so we land here instead).
                 report("Seeding native bridge", -1)
                 installNativeBridge()
-                if (!installDistroExtras(dest, null) { step, pct -> report(step, pct) }) {
-                    throw java.io.IOException(
-                        "shell components (util-linux/bash) could not be installed via apk — check network/mirror and retry")
-                }
+                val extrasErr = installDistroExtras(dest, null) { step, pct -> report(step, pct) }
+                if (extrasErr != null) throw java.io.IOException(extrasErr)
                 val restamped = runCatching { FsLayout.markBootstrappedChecked(ctx) }.getOrDefault(false)
                 if (!restamped) {
                     throw java.io.IOException("existing rootfs found, but completion marker could not be written (storage full?)")
@@ -547,10 +545,8 @@ class BootstrapManager(private val ctx: Context) {
             // hasCompleteRootfs is fixed — no re-download), which retries apk.
             report("Seeding native bridge", -1)
             installNativeBridge()
-            if (!installDistroExtras(dest, workingMirrorBase) { step, pct -> report(step, pct) }) {
-                throw java.io.IOException(
-                    "shell components (util-linux/bash) could not be installed via apk — check network/mirror and retry")
-            }
+            val extrasErr = installDistroExtras(dest, workingMirrorBase) { step, pct -> report(step, pct) }
+            if (extrasErr != null) throw java.io.IOException(extrasErr)
             // v0.1.16: the per-script frames above are "Installing helper
             // script: <name>" (rank 7). Emit a terminal-rank frame so the label
             // floor advances PAST the helper phase — a residual late/old-pass
@@ -984,54 +980,133 @@ class BootstrapManager(private val ctx: Context) {
      * Desktop components (Xvfb/xkbcomp/openbox/xterm/xwd/xhost/netpbm) are
      * best-effort unless disabled in Settings.
      */
+    /**
+     * Install the distro components with the rootfs' own apk.
+     *
+     * v0.1.29 CRITICAL FIX — v0.1.28 ran apk HOST-side through the musl loader
+     * and that fails on real devices: musl resolves DNS via /etc/resolv.conf,
+     * which DOES NOT EXIST on Android → musl falls back to 127.0.0.1:53
+     * (nothing listens) → every mirror lookup dies → "shell components could
+     * not be installed" with the rootfs otherwise fine. (Sandbox testing
+     * missed this because the test host OS has a real /etc/resolv.conf.)
+     *
+     * apk now runs INSIDE the bundled proot: guest /etc/resolv.conf is our
+     * seeded one (net.dns* or 8.8.8.8/1.1.1.1), /dev+/proc are bound,
+     * package triggers execute natively (absolute distro paths resolve) and
+     * TLS uses the rootfs' own CA bundle — exactly how proot-distro drives
+     * apt/apk/pacman on unrooted Android.
+     *
+     * Fallbacks (should proot be blocked on some ROM, e.g. ptrace restrictions):
+     * host-side loader exec, then host-side exec with IP-literal repositories
+     * (Java resolves the hostnames through Android's resolver, bypassing
+     * musl's dead localhost DNS). Success is judged by the ACTUAL BINARIES on
+     * disk (apk may exit nonzero on benign trigger noise) and the apk output
+     * tail is returned so failures surface verbatim in the bootstrap UI.
+     *
+     * @return null on success, else a human-readable failure summary.
+     */
     private fun installDistroExtras(
         dest: File,
         mirrorBase: String?,
         report: (String, Int) -> Unit,
-    ): Boolean {
+    ): String? {
         seedDevNodes(dest)
         seedApkRepositories(dest, mirrorBase)
+        val proot = FsLayout.prootBin(ctx)
         val loader = runCatching {
             File(dest, "lib").listFiles()?.firstOrNull {
                 it.name.startsWith("ld-musl-") && it.name.endsWith(".so.1") && it.isFile
             }
         }.getOrNull()
-        val apk = File(dest, "sbin/apk")
-        if (loader == null || !apk.isFile) {
-            com.emux.EmuXLog.e("distro extras: loader/apk missing (loader=$loader apk=${apk.isFile})")
-            return false
+        if (!File(dest, "sbin/apk").isFile) {
+            return "rootfs has no sbin/apk — extraction incomplete? Tap Install to retry."
         }
-        val shellOk = runApk(dest, loader, listOf("util-linux", "bash"),
-            "Installing shell components", report)
-        if (!shellOk) {
-            // One more shot with rotated mirrors before giving up.
+        if (!proot.isFile && loader == null) {
+            return "no execution engine (proot missing at ${proot.absolutePath}, no musl loader in rootfs) — cannot run apk"
+        }
+
+        val shellPkgs = listOf("util-linux", "bash")
+        fun shellOk() = File(dest, "usr/bin/script").isFile && File(dest, "bin/bash").isFile
+
+        var tail = ""
+        report("Installing shell components", -1)
+        var ok = false
+        // 1) proot (primary)
+        if (!ok && proot.isFile) {
+            val r = runApkProot(proot, dest, shellPkgs, "Installing shell components", report)
+            tail = "proot-apk: ${r.tail}"
+            ok = r.ok || shellOk()
+        }
+        // 2) host-side loader exec (ROMs where proot cannot run)
+        if (!ok && loader != null) {
             seedApkRepositories(dest, null, rotate = true)
-            if (!runApk(dest, loader, listOf("util-linux", "bash"),
-                    "Installing shell components", report)) return false
+            val r = runApkLoader(loader, dest, shellPkgs, "Installing shell components", report)
+            tail = "loader-apk: ${r.tail}\n$tail"
+            ok = r.ok || shellOk()
         }
+        // 3) host-side loader + IP-literal repos (musl has no DNS on Android)
+        if (!ok && loader != null && rewriteRepositoriesToIps(dest)) {
+            val r = runApkLoader(loader, dest, shellPkgs, "Installing shell components", report)
+            tail = "ip-repo-apk: ${r.tail}\n$tail"
+            ok = r.ok || shellOk()
+        }
+        if (!ok) {
+            return "shell components (util-linux/bash) could not be installed via apk.\n${tail.take(700)}"
+        }
+
         val desktopWanted = runCatching {
             androidx.preference.PreferenceManager.getDefaultSharedPreferences(ctx)
                 .getBoolean("desktop_components", true)
         }.getOrDefault(true)
         if (desktopWanted) {
-            val deskOk = runApk(dest, loader,
-                listOf("xvfb", "xkbcomp", "xkeyboard-config", "openbox", "xterm", "xwd", "xhost", "netpbm"),
-                "Installing desktop components", report)
-            if (!deskOk) {
-                com.emux.EmuXLog.e("desktop components failed (non-fatal) — desktop tab will report missing Xvfb")
+            val deskPkgs = listOf("xvfb", "xkbcomp", "xkeyboard-config", "openbox",
+                "xterm", "xwd", "xhost", "netpbm")
+            report("Installing desktop components", -1)
+            var dok = false
+            var dtail = ""
+            if (proot.isFile) {
+                val r = runApkProot(proot, dest, deskPkgs, "Installing desktop components", report)
+                dtail = "proot-apk: ${r.tail}"
+                dok = r.ok || File(dest, "usr/bin/Xvfb").isFile
+            }
+            if (!dok && loader != null) {
+                val r = runApkLoader(loader, dest, deskPkgs, "Installing desktop components", report)
+                dtail = "loader-apk: ${r.tail}\n$dtail"
+                dok = File(dest, "usr/bin/Xvfb").isFile
+            }
+            if (!dok) {
+                com.emux.EmuXLog.e("desktop components failed (non-fatal): $dtail")
             }
         }
-        return true
+        return null
     }
 
-    /** Run one `apk add` through the musl loader; streams progress heartbeats. */
-    private fun runApk(
-        dest: File,
-        loader: File,
-        pkgs: List<String>,
-        phase: String,
-        report: (String, Int) -> Unit,
-    ): Boolean {
+    /** Outcome of one apk run: exit status + last output lines for diagnostics. */
+    private class ApkRun(val ok: Boolean, val tail: String)
+
+    /** apk inside the bundled proot — guest DNS/certs/triggers are all native. */
+    private fun runApkProot(
+        proot: File, dest: File, pkgs: List<String>, phase: String, report: (String, Int) -> Unit,
+    ): ApkRun {
+        val argv = listOf(
+            proot.absolutePath, "-0", "-r", dest.absolutePath,
+            "-b", "/dev", "-b", "/proc", "-b", "/sys", "-w", "/",
+            "/sbin/apk", "add", "--arch", archName(), "--no-cache",
+        ) + pkgs
+        val env = mapOf(
+            "LD_LIBRARY_PATH" to FsLayout.nativeBridgeDir(ctx).absolutePath,
+            "TMPDIR" to "/tmp",
+            "HOME" to "/root",
+            "PATH" to "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+            "LANG" to "C",
+        )
+        return runApkProcess(argv, env, pkgs, phase, report)
+    }
+
+    /** apk host-side via the musl loader (fallback; Android has no /etc/resolv.conf). */
+    private fun runApkLoader(
+        loader: File, dest: File, pkgs: List<String>, phase: String, report: (String, Int) -> Unit,
+    ): ApkRun {
         val argv = listOf(
             loader.absolutePath, "--library-path",
             "${File(dest, "lib").absolutePath}:${File(dest, "usr/lib").absolutePath}",
@@ -1040,32 +1115,71 @@ class BootstrapManager(private val ctx: Context) {
             "--arch", archName(),
             "add", "--no-cache",
         ) + pkgs
-        return runCatching {
-            val pb = ProcessBuilder(argv)
-            pb.environment().clear()
-            pb.environment()["TMPDIR"] = File(dest, "tmp").absolutePath
-            pb.environment()["HOME"] = File(dest, "root").absolutePath
-            pb.environment()["PATH"] = "/system/bin:/system/xbin"
-            pb.environment()["LANG"] = "C"
-            pb.redirectErrorStream(true)
-            val p = pb.start()
-            val watchdog = Thread {
-                try { Thread.sleep(15 * 60_000L); if (p.isAlive) p.destroy() } catch (_: Exception) {}
-            }.apply { isDaemon = true; start() }
-            try {
-                var lines = 0
-                BufferedReader(InputStreamReader(p.inputStream)).forEachLine { line ->
-                    // apk emits ~2-60 lines; forward a heartbeat for each so the
-                    // UI label stays alive, but never more than the phase itself.
-                    if (++lines % 2 == 0) report(phase, -1)
-                    com.emux.EmuXLog.i("apk: $line")
+        val env = mapOf(
+            "TMPDIR" to File(dest, "tmp").absolutePath,
+            "HOME" to File(dest, "root").absolutePath,
+            "PATH" to "/system/bin:/system/xbin",
+            "LANG" to "C",
+        )
+        return runApkProcess(argv, env, pkgs, phase, report)
+    }
+
+    private fun runApkProcess(
+        argv: List<String>,
+        env: Map<String, String>,
+        pkgs: List<String>,
+        phase: String,
+        report: (String, Int) -> Unit,
+    ): ApkRun = runCatching {
+        val pb = ProcessBuilder(argv)
+        pb.environment().clear()
+        pb.environment().putAll(env)
+        pb.redirectErrorStream(true)
+        val p = pb.start()
+        val watchdog = Thread {
+            try { Thread.sleep(15 * 60_000L); if (p.isAlive) p.destroy() } catch (_: Exception) {}
+        }.apply { isDaemon = true; start() }
+        try {
+            val tail = ArrayDeque<String>()
+            var lines = 0
+            BufferedReader(InputStreamReader(p.inputStream)).forEachLine { line ->
+                if (++lines % 2 == 0) report(phase, -1)
+                com.emux.EmuXLog.i("apk: $line")
+                if (line.isNotBlank()) {
+                    tail.addLast(line)
+                    if (tail.size > 15) tail.removeFirst()
                 }
-                p.waitFor() == 0
-            } finally { watchdog.interrupt() }
-        }.getOrElse { e ->
-            com.emux.EmuXLog.e("apk ${pkgs.joinToString(",")} failed", e)
-            false
-        }
+            }
+            val code = p.waitFor()
+            ApkRun(code == 0, tail.joinToString("\n"))
+        } finally { watchdog.interrupt() }
+    }.getOrElse { e ->
+        com.emux.EmuXLog.e("apk ${pkgs.joinToString(",")} failed to even start", e)
+        ApkRun(false, "${e.javaClass.simpleName}: ${e.message}")
+    }
+
+    /**
+     * Last-ditch DNS fallback for host-side apk: resolve the repository
+     * hostnames with Java (Android's resolver) and rewrite
+     * etc/apk/repositories with IP literals over http:// (https to a bare IP
+     * fails certificate hostname validation). Alpine mirrors serve plain http
+     * and apk follows https redirects where issued.
+     */
+    private fun rewriteRepositoriesToIps(dest: File): Boolean {
+        val rc = File(dest, "etc/apk/repositories")
+        return runCatching {
+            val out = rc.readLines().filter { it.isNotBlank() }.mapNotNull { line ->
+                val u = runCatching { java.net.URL(line) }.getOrNull() ?: return@mapNotNull null
+                if (u.host.matches(Regex("[0-9.]+"))) return@mapNotNull line
+                val ip = runCatching { java.net.InetAddress.getByName(u.host).hostAddress }.getOrNull()
+                    ?: return@mapNotNull null
+                "http://$ip${u.path}"
+            }
+            if (out.isEmpty()) return false
+            replaceRegularFileWith(rc) { it.writeText(out.joinToString("\n") + "\n") }
+            com.emux.EmuXLog.i("apk repositories rewritten to IP literals: $out")
+            true
+        }.getOrDefault(false)
     }
 
     /**
