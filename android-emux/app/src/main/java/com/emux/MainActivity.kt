@@ -138,7 +138,11 @@ class MainActivity : AppCompatActivity() {
                 com.emux.EmuXLog.e("root detect failed", e)
             }
             runCatching {
-                b.statusRoot.text = when (root.mode) {
+                // v0.1.30: show the running version in the top bar so the field
+                // can confirm which build is actually installed (tap-installs of
+                // a stale APK were suspected in the HarmonyOS report).
+                val ver = runCatching { com.emux.EmuXLog.appVersion(this@MainActivity) }.getOrDefault("?")
+                b.statusRoot.text = "v$ver · " + when (root.mode) {
                     com.emux.core.RootMode.NONE -> getString(R.string.root_none)
                     else -> getString(R.string.root_available, root.mode.name)
                 }
@@ -381,6 +385,12 @@ class MainActivity : AppCompatActivity() {
                         else append("[emux]   musl loader/busybox: FAILED -> " + probe.lineSequence().filter { it.isNotBlank() && !it.startsWith("EMUXPROBE") }.take(3).joinToString(" | ") + "\n")
                         if (probe.contains("APK_OK")) append("[emux]   apk tool: OK\n")
                         else append("[emux]   apk tool: cannot run\n")
+                        // v0.1.30: raw platform-layer markers (SELinux domain,
+                        // host exec permission, proot ptrace) — decisive for
+                        // OEM-hardened ROMs (HarmonyOS field report).
+                        probe.lineSequence()
+                            .filter { it.startsWith("DOMAIN=") || it.startsWith("HOSTEXEC") || it.startsWith("PROOT_PTRACE") }
+                            .forEach { append("[emux]   ").append(it).append("\n") }
                         append("[emux] ------------------------------\n")
                     }
                     kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) { view.feed(summary.toByteArray()) }

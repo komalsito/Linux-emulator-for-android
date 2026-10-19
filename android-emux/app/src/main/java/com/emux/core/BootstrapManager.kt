@@ -41,6 +41,10 @@ class BootstrapManager(private val ctx: Context) {
         val MIRRORS = listOf(
             "https://dlcdn.alpinelinux.org/alpine/v",
             "https://mirror.leaseweb.com/alpine/v",
+            // v0.1.30: TUNA (Tsinghua) mirror — dlcdn/leaseweb can be slow or
+            // unreachable from mainland-China networks (HarmonyOS field report);
+            // also used as a rotation target for the apk repositories.
+            "https://mirrors.tuna.tsinghua.edu.cn/alpine/v",
             "https://ftp.halifax.rwth-aachen.de/alpine/v",
         )
         // Kept for compatibility with older call sites; the actual bootstrap loop
@@ -1031,15 +1035,23 @@ class BootstrapManager(private val ctx: Context) {
         var tail = ""
         report("Installing shell components", -1)
         var ok = false
-        // 1) proot (primary)
+        // 1) proot (primary) — DNS works via the seeded guest resolv.conf
         if (!ok && proot.isFile) {
             val r = runApkProot(proot, dest, shellPkgs, "Installing shell components", report)
             tail = "proot-apk: ${r.tail}"
             ok = r.ok || shellOk()
         }
+        // 1b) proot again with a rotated mirror (regional blocks: dlcdn or
+        //     leaseweb may be unreachable on some networks — TUNA etc.)
+        if (!ok && proot.isFile) {
+            seedApkRepositories(dest, null, rotate = 2)
+            val r = runApkProot(proot, dest, shellPkgs, "Installing shell components", report)
+            tail = "proot-apk(mirror2): ${r.tail}\n$tail"
+            ok = r.ok || shellOk()
+        }
         // 2) host-side loader exec (ROMs where proot cannot run)
         if (!ok && loader != null) {
-            seedApkRepositories(dest, null, rotate = true)
+            seedApkRepositories(dest, null, rotate = 1)
             val r = runApkLoader(loader, dest, shellPkgs, "Installing shell components", report)
             tail = "loader-apk: ${r.tail}\n$tail"
             ok = r.ok || shellOk()
@@ -1051,7 +1063,11 @@ class BootstrapManager(private val ctx: Context) {
             ok = r.ok || shellOk()
         }
         if (!ok) {
-            return "shell components (util-linux/bash) could not be installed via apk.\n${tail.take(700)}"
+            // v0.1.30: embed a device probe so ONE screenshot pinpoints the
+            // broken layer (HarmonyOS/OEM hardening vs ptrace block vs DNS).
+            val probe = runCatching { deviceProbe(dest) }.getOrDefault("probe unavailable")
+            return "shell components (util-linux/bash) could not be installed via apk.\n" +
+                "--- device probe ---\n$probe--- apk output ---\n${tail.take(600)}"
         }
 
         val desktopWanted = runCatching {
@@ -1083,6 +1099,65 @@ class BootstrapManager(private val ctx: Context) {
 
     /** Outcome of one apk run: exit status + last output lines for diagnostics. */
     private class ApkRun(val ok: Boolean, val tail: String)
+
+    /**
+     * v0.1.30: layered device probe appended to apk-failure messages so ONE
+     * screenshot from the field pinpoints the broken layer. HarmonyOS/OEM ROMs
+     * can harden SELinux beyond AOSP (exec of app_data_file even for the
+     * legacy untrusted_app_27 domain, or ptrace for proot) — each layer is
+     * probed individually:
+     *   android/model · effective targetSdk · SELinux domain (/proc/self/attr/current)
+     *   exec(loader) · exec(proot) · proot-ptrace (tiny real proot run) · java DNS · resolv.conf
+     */
+    private fun deviceProbe(dest: File): String {
+        val sb = StringBuilder()
+        runCatching {
+            sb.append("android=${android.os.Build.VERSION.SDK_INT} model=${android.os.Build.MODEL}\n")
+            sb.append("targetSdk=${ctx.applicationInfo.targetSdkVersion}\n")
+            val domain = runCatching {
+                File("/proc/self/attr/current").readText().trim('\u0000', '\n', '\r')
+            }.getOrNull()
+            sb.append("selinux=${domain ?: "?"}\n")
+            val loader = runCatching {
+                File(dest, "lib").listFiles()?.firstOrNull {
+                    it.name.startsWith("ld-musl-") && it.name.endsWith(".so.1") && it.isFile
+                }
+            }.getOrNull()
+            sb.append(if (loader == null) "loader=missing\n"
+                      else "exec(loader)=${probeExec(listOf(loader.absolutePath))}\n")
+            val proot = FsLayout.prootBin(ctx)
+            val nb = mapOf("LD_LIBRARY_PATH" to FsLayout.nativeBridgeDir(ctx).absolutePath)
+            sb.append(if (!proot.isFile) "proot=missing\n"
+                      else "exec(proot)=${probeExec(listOf(proot.absolutePath, "--version"), nb)}\n")
+            if (proot.isFile) {
+                sb.append("proot-ptrace=${probeExec(
+                    listOf(proot.absolutePath, "-0", "-r", dest.absolutePath, "-b", "/dev", "/bin/true"),
+                    nb)}\n")
+            }
+            sb.append("dns(java)=${runCatching {
+                java.net.InetAddress.getByName("mirrors.tuna.tsinghua.edu.cn").hostAddress
+            }.getOrElse { "FAIL ${it.javaClass.simpleName}" }}\n")
+            sb.append("resolv.conf=${runCatching {
+                File(dest, "etc/resolv.conf").readText().trim().replace("\n", " | ")
+            }.getOrDefault("?")}")
+        }
+        return sb.toString()
+    }
+
+    /** Start [argv] and classify the outcome: started(exit=N) vs DENIED(msg). */
+    private fun probeExec(argv: List<String>, env: Map<String, String> = emptyMap()): String = runCatching {
+        val pb = ProcessBuilder(argv)
+        pb.environment().putAll(env)
+        pb.redirectErrorStream(true)
+        pb.redirectInput(ProcessBuilder.Redirect.from(File("/dev/null")))
+        val p = pb.start()
+        val wd = Thread { try { Thread.sleep(8_000); p.destroy() } catch (_: Exception) {} }.apply { isDaemon = true }
+        wd.start()
+        val out = runCatching { p.inputStream.bufferedReader().readText().take(140) }.getOrDefault("")
+        val code = try { p.waitFor() } catch (_: Exception) { -1 }
+        wd.interrupt()
+        if (code == 0) "ok" else "exit=$code ${out.replace('\n', ' ').trim()}"
+    }.getOrElse { e -> "DENIED(${e.message?.take(90)})" }
 
     /** apk inside the bundled proot — guest DNS/certs/triggers are all native. */
     private fun runApkProot(
@@ -1205,11 +1280,9 @@ class BootstrapManager(private val ctx: Context) {
     }
 
     /** Write etc/apk/repositories for <branch>/main + <branch>/community. */
-    private fun seedApkRepositories(dest: File, mirrorBase: String?, rotate: Boolean = false) {
+    private fun seedApkRepositories(dest: File, mirrorBase: String?, rotate: Int = 0) {
         val branch = branchUrl(mirrorBase)
-            ?: (if (rotate) MIRRORS.drop(1).firstOrNull() ?: MIRRORS[0] else MIRRORS[0]).let {
-                it.trimEnd('/') + majorVersion()
-            }
+            ?: (MIRRORS[rotate.coerceIn(0, MIRRORS.size - 1)].trimEnd('/') + majorVersion())
         val rc = File(dest, "etc/apk/repositories")
         runCatching { rc.parentFile?.mkdirs() }
         replaceRegularFileWith(rc) {
