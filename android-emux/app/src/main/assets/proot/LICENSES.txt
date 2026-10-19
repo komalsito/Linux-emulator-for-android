@@ -1,0 +1,12 @@
+Bundled runtime helpers (prebuilt binaries, unmodified, from the Termux
+package repository https://packages.termux.dev/apt/termux-main/):
+
+  proot 5.1.107.98        GPL-2.0-or-later   source: https://github.com/proot-me/proot
+  libtalloc 2.5.0         LGPL-3.0-or-later  source: https://gitlab.com/samba-team/samba (talloc)
+  libandroid-shmem 0.7    BSD-3-Clause       source: https://github.com/termux/libandroid-shmem
+
+These are loaded at runtime from the app-private directory
+files/native-bridge/ (they use DT_RUNPATH, so LD_LIBRARY_PATH redirects
+their library search — verified per-ABI). Full license texts are available
+from the source URLs above; binaries are redistributed unmodified as
+ permitted by each license.

@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- v0.1.28: exclude the multi-MB generated trees from Auto Backup. They are
+     reproducible by bootstrap (and backing them up churned the 25 MB quota and
+     was a source of marker/rootfs restore skew). -->
+<full-backup-content>
+    <exclude domain="file" path="linuxroot" />
+    <exclude domain="file" path="usr" />
+    <exclude domain="file" path="native-bridge" />
+    <exclude domain="file" path="bin" />
+    <exclude domain="file" path="log" />
+    <exclude domain="database" path="." />
+    <exclude domain="root" path="." />
+</full-backup-content>

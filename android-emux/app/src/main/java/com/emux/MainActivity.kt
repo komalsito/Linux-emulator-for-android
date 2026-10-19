@@ -165,6 +165,24 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    /**
+     * v0.1.28 FIX (the literal "wants to install every time I open the app"
+     * symptom): hide the ENTIRE bootstrap pane on success. The old code hid
+     * only the inner children (bar/label/button) while the pane itself —
+     * with its static "Install the Linux environment (Alpine minirootfs,
+     * ~3 MB)? Runs once…" prompt — stayed visible on every launch, even
+     * fully-bootstrapped ones. The layout now defaults the pane to GONE and
+     * only showBootstrapUiOnly() reveals it.
+     */
+    private fun hideBootstrapUi() {
+        runCatching {
+            b.bootstrapBar.visibility = android.view.View.GONE
+            b.bootstrapLabel.visibility = android.view.View.GONE
+            b.btnInstall.visibility = android.view.View.GONE
+            b.bootstrapPane.visibility = android.view.View.GONE
+        }
+    }
+
     /** Bootstrap banner without auto-starting anything (fresh install path). */
     private fun showBootstrapUiOnly() {
         b.bootstrapPane.visibility = android.view.View.VISIBLE
@@ -205,8 +223,13 @@ class MainActivity : AppCompatActivity() {
         b.desktopView.debugFlashRed()
         if (desktop.state.value == DesktopService.State.IDLE) {
             b.desktopStatus.text = getString(R.string.x_starting)
+            // v0.1.28: set the UI callback BEFORE startDesktop — startDesktop
+            // owns the single frame reader now (the old duplicate
+            // beginFrameLoop() here raced with the internal one and lost).
+            desktop.frameCallback = { runOnUiThread { b.desktopView.onNewFrame(desktop.frameId) } }
             desktop.startDesktop(wmCommand = prefsWm())
-            desktop.beginFrameLoop { runOnUiThread { b.desktopView.onNewFrame(desktop.frameId) } }
+        } else {
+            desktop.frameCallback = { runOnUiThread { b.desktopView.onNewFrame(desktop.frameId) } }
         }
         b.desktopView.desktop = desktop
         lifecycleScope.launch {
@@ -345,10 +368,19 @@ class MainActivity : AppCompatActivity() {
                     }.getOrDefault("[emux] probe failed to run\n")
                     val summary = buildString {
                         append("\n[emux] --- environment self-test ---\n")
-                        if (probe.contains("LOADER_OK")) append("[emux]   distro shell + musl loader: OK\n")
-                        else append("[emux]   distro shell/loader: FAILED -> " + probe.lineSequence().filter { it.isNotBlank() && !it.startsWith("EMUXPROBE") }.take(3).joinToString(" | ") + "\n")
-                        if (probe.contains("APK_OK")) append("[emux]   apk tool runs inside distro: OK\n")
-                        else append("[emux]   apk tool cannot run (see failure above)\n")
+                        if (probe.contains("PROOT_OK")) append("[emux]   proot (unrooted distro engine): OK\n")
+                        else if (probe.contains("PROBE_PROOT_MISSING")) append("[emux]   proot: MISSING — tap Install to re-seed native bridge\n")
+                        else append("[emux]   proot: FAILED\n")
+                        if (probe.contains("SCRIPT_OK")) append("[emux]   PTY wrapper (util-linux script): OK\n")
+                        else append("[emux]   PTY wrapper: MISSING — keyboard will not echo; tap Install\n")
+                        if (probe.contains("BASH_OK")) append("[emux]   bash: OK\n")
+                        else append("[emux]   bash: missing (busybox sh fallback)\n")
+                        if (probe.contains("XVFB_OK")) append("[emux]   Xvfb (desktop): OK\n")
+                        else append("[emux]   Xvfb: missing — desktop unavailable; enable desktop components in Settings and re-Install\n")
+                        if (probe.contains("LOADER_OK")) append("[emux]   musl loader + busybox: OK\n")
+                        else append("[emux]   musl loader/busybox: FAILED -> " + probe.lineSequence().filter { it.isNotBlank() && !it.startsWith("EMUXPROBE") }.take(3).joinToString(" | ") + "\n")
+                        if (probe.contains("APK_OK")) append("[emux]   apk tool: OK\n")
+                        else append("[emux]   apk tool: cannot run\n")
                         append("[emux] ------------------------------\n")
                     }
                     kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) { view.feed(summary.toByteArray()) }
@@ -429,9 +461,7 @@ class MainActivity : AppCompatActivity() {
                     b.bootstrapBar.isIndeterminate = false
                     if (r.isSuccess) {
                         ensureSessionAttached()
-                        b.bootstrapBar.visibility = android.view.View.GONE
-                        b.bootstrapLabel.visibility = android.view.View.GONE
-                        b.btnInstall.visibility = android.view.View.GONE
+                        hideBootstrapUi()
                     } else {
                         b.bootstrapLabel.text = getString(
                             R.string.bootstrap_failed_reason,
@@ -475,9 +505,7 @@ class MainActivity : AppCompatActivity() {
                         b.bootstrapBar.isIndeterminate = false
                         if (r.isSuccess) {
                             ensureSessionAttached()
-                            b.bootstrapBar.visibility = android.view.View.GONE
-                            b.bootstrapLabel.visibility = android.view.View.GONE
-                            b.btnInstall.visibility = android.view.View.GONE
+                            hideBootstrapUi()
                         } else {
                             b.bootstrapLabel.text = getString(
                                 R.string.bootstrap_failed_reason,
@@ -502,9 +530,7 @@ class MainActivity : AppCompatActivity() {
                 b.bootstrapBar.isIndeterminate = false
                 if (r.getOrNull()?.isSuccess == true) {
                     ensureSessionAttached()
-                    b.bootstrapBar.visibility = android.view.View.GONE
-                    b.bootstrapLabel.visibility = android.view.View.GONE
-                    b.btnInstall.visibility = android.view.View.GONE
+                    hideBootstrapUi()
                 } else {
                     b.bootstrapLabel.text = getString(
                         R.string.bootstrap_failed_reason,
@@ -558,9 +584,7 @@ class MainActivity : AppCompatActivity() {
                         val state = info.javaClass.getMethod("getState").invoke(info).toString()
                         when (state) {
                             "SUCCEEDED" -> {
-                                b.bootstrapBar.visibility = android.view.View.GONE
-                                b.bootstrapLabel.visibility = android.view.View.GONE
-                                b.btnInstall.visibility = android.view.View.GONE
+                                hideBootstrapUi()
                                 ensureSessionAttached()
                             }
                             "FAILED", "CANCELLED", "BLOCKED" -> {

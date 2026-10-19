@@ -22,6 +22,16 @@
         app:summary="@string/pref_keepawake_summary"
         app:defaultValue="true" />
 
+    <!-- v0.1.28: when enabled (default), bootstrap also installs the X11
+         desktop stack via apk (xvfb, xkbcomp, xkeyboard-config, openbox,
+         xterm, xwd, xhost, netpbm — ~25 MB one-time). Disable on slow
+         connections; the terminal works either way. -->
+    <SwitchPreferenceCompat
+        app:key="desktop_components"
+        app:title="@string/pref_desktop_components_title"
+        app:summary="@string/pref_desktop_components_summary"
+        app:defaultValue="true" />
+
     <EditTextPreference
         app:key="mirror"
         app:title="@string/pref_distro_title"

@@ -37,7 +37,20 @@ class BootstrapWorker(appCtx: Context, params: WorkerParameters) :
         // strand the install — doWork's own class resolution already succeeded
         // by the time we're here, but anything further down is now irrelevant.
         val r = BootstrapRunner.bootstrapNow(applicationContext)
-        if (r.isSuccess) Result.success() else Result.retry()
+        if (r.isSuccess) Result.success()
+        else if (runAttemptCount >= MAX_ATTEMPTS) {
+            // v0.1.28: permanent failures (dead mirrors, no storage) used to
+            // Result.retry() FOREVER — WorkManager kept re-arming the job with
+            // exponential backoff across launches, burning battery/network and
+            // re-showing "installing" on every app open. Cap it; the Install
+            // button still triggers a fresh unique-work pass on demand.
+            com.emux.EmuXLog.e("bootstrap failed after $runAttemptCount attempts — giving up until manual retry")
+            runCatching {
+                com.emux.core.BootstrapReporter.publishError(applicationContext,
+                    com.emux.core.BootstrapDiagnostics.describe(r.exceptionOrNull()))
+            }
+            Result.failure()
+        } else Result.retry()
     } catch (e: Throwable) {
         // v0.1.10: the UI previously showed only "NoClassDefFoundError" because
         // we printed the wrapper's simpleName. Report the FULL cause chain with
@@ -49,6 +62,8 @@ class BootstrapWorker(appCtx: Context, params: WorkerParameters) :
                 applicationContext, com.emux.core.BootstrapDiagnostics.describe(e))
         }
         com.emux.EmuXLog.e("BootstrapWorker caught (was an app-killing escape)", e)
-        Result.retry()
+        if (runAttemptCount >= MAX_ATTEMPTS) Result.failure() else Result.retry()
     }
+
+    private companion object { const val MAX_ATTEMPTS = 3 }
 }

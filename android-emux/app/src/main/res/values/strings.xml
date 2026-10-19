@@ -33,6 +33,8 @@
     <string name="pref_fps_title">Max desktop FPS</string>
     <string name="pref_keepawake_title">Keep CPU awake during active bursts</string>
     <string name="pref_keepawake_summary">Auto-expiring wake lock (30 s) — off saves more battery</string>
+    <string name="pref_desktop_components_title">Install desktop components</string>
+    <string name="pref_desktop_components_summary">During install, also fetch Xvfb + Openbox + xterm + capture tools via apk (~25 MB, one time). Disable on slow connections; the terminal works either way.</string>
     <string name="pref_distro_title">Distro mirror</string>
     <string name="bootstrap_starting">Starting Linux installation…</string>
 </resources>

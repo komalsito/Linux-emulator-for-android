@@ -79,6 +79,16 @@ class DesktopService(
     /** Monotonic id handed to the View so it invalidates only on real new data. */
     @Volatile var frameId = 0; private set
 
+    /**
+     * v0.1.28 FIX (desktop never repainted even when frames arrived):
+     * MainActivity used to call beginFrameLoop() itself with the UI-invalidate
+     * callback, and startDesktop() ALSO called beginFrameLoop() internally with
+     * an EMPTY callback — cancelling MainActivity's reader (frameReader?.cancel())
+     * and replacing it with one that never notified the view. Now there is a
+     * single reader owned by startDesktop, and the UI hook is this callback.
+     */
+    @Volatile var frameCallback: (() -> Unit)? = null
+
     /** Scratch buffer reused across frames → zero steady-state allocations. */
     private var scratchPx: IntArray? = null
 
@@ -213,7 +223,12 @@ class DesktopService(
                 // inside emux-capture failed), nothing surfaced. Now we arm the
                 // loop ourselves with a self-contained invalidation callback;
                 // MainActivity may re-arm it later with a UI-bound one.
-                beginFrameLoop { /* DesktopView polls frameId via invalidate below */ }
+                // v0.1.28: single frame reader owned by startDesktop; the UI
+                // hook arrives via frameCallback (set by MainActivity before
+                // startDesktop). The old duplicate beginFrameLoop() call from
+                // MainActivity raced with this one and the loser's callback
+                // (empty) won — frames decoded but the view never repainted.
+                beginFrameLoop { frameCallback?.invoke() }
 
                 state.value = State.CONNECTED
                 if (!ctrlOk) {

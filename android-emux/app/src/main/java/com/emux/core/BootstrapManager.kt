@@ -105,6 +105,9 @@ class BootstrapManager(private val ctx: Context) {
             "Pruning special files",
             "Finalizing rootfs config",
             "Installing helper script",      // prefix-match (per-script frames)
+            "Seeding native bridge",
+            "Installing shell components",
+            "Installing desktop components",
             "Bootstrapped",
         )
 
@@ -325,6 +328,18 @@ class BootstrapManager(private val ctx: Context) {
                 seedResolverConfig(dest)
                 prepareMountpoints(dest)
                 postInstall(dest)
+                // v0.1.28: the re-seed path must also (re-)install the native
+                // bridge + distro components — this is what upgrades an existing
+                // rootfs after an app update WITHOUT re-downloading it, and what
+                // retries a failed apk-extras pass from a previous launch
+                // (FsLayout.ensureMarkerForExistingRootfs refuses to re-stamp
+                // while shell components are missing, so we land here instead).
+                report("Seeding native bridge", -1)
+                installNativeBridge()
+                if (!installDistroExtras(dest, null) { step, pct -> report(step, pct) }) {
+                    throw java.io.IOException(
+                        "shell components (util-linux/bash) could not be installed via apk — check network/mirror and retry")
+                }
                 val restamped = runCatching { FsLayout.markBootstrappedChecked(ctx) }.getOrDefault(false)
                 if (!restamped) {
                     throw java.io.IOException("existing rootfs found, but completion marker could not be written (storage full?)")
@@ -392,6 +407,7 @@ class BootstrapManager(private val ctx: Context) {
 
             var lastErr: Throwable? = null
             var downloaded = false
+            var workingMirrorBase: String? = null   // v0.1.28: mirror that served the rootfs → seeded into etc/apk/repositories
             for (base in bases) {
                 // Robust normalization: accept "…/alpine", "…/alpine/v", "…/alpine/v3.20"
                 // or a full tarball URL from Settings → mirror, and always produce
@@ -409,6 +425,7 @@ class BootstrapManager(private val ctx: Context) {
                 try {
                     downloadTo(url, tmp) { pct -> report("Downloading rootfs", pct) }
                     downloaded = true
+                    workingMirrorBase = clean
                     break
                 } catch (e: Throwable) {
                     lastErr = e
@@ -520,6 +537,20 @@ class BootstrapManager(private val ctx: Context) {
             // pure file I/O and can never wedge on AAsset internals.
             val staged = stageHelperAssets()
             installHelperScripts(dest, staged) { step, pct -> report(step, pct) }
+            // v0.1.28: seed the bundled proot native bridge (assets/proot/<abi>)
+            // and install the distro components via apk (util-linux `script` =
+            // the PTY source for the keyboard fix; bash; and — unless disabled in
+            // Settings — the X11 desktop stack). Shell components are FATAL on
+            // failure: without script(1) there is no PTY and the terminal echoes
+            // nothing (the reported "keyboard not working"). The next launch
+            // then lands in the cheap re-stamp branch above (rootfs survives —
+            // hasCompleteRootfs is fixed — no re-download), which retries apk.
+            report("Seeding native bridge", -1)
+            installNativeBridge()
+            if (!installDistroExtras(dest, workingMirrorBase) { step, pct -> report(step, pct) }) {
+                throw java.io.IOException(
+                    "shell components (util-linux/bash) could not be installed via apk — check network/mirror and retry")
+            }
             // v0.1.16: the per-script frames above are "Installing helper
             // script: <name>" (rank 7). Emit a terminal-rank frame so the label
             // floor advances PAST the helper phase — a residual late/old-pass
@@ -896,6 +927,190 @@ class BootstrapManager(private val ctx: Context) {
                 }
             }
         } catch (_: Exception) { /* convenience mirror, non-fatal */ }
+        // v0.1.28: install the session helpers into $ROOT/usr/local/bin/ — the
+        // canonical location INSIDE the distro. In proot/chroot sessions the
+        // login shell's PATH (/etc/profile.d/emux.sh) resolves `emux-x11` /
+        // `emux-capture` from there; previously they only existed at the rootfs
+        // ROOT (`/emux-x11` inside the chroot — NOT on PATH → "not found" →
+        // black desktop even in a working root session).
+        try {
+            val ulb = File(dest, "usr/local/bin").apply { mkdirs() }
+            listOf("emux-x11", "emux-capture").forEach { name ->
+                val bytes = stagedFinal[name] ?: return@forEach
+                runCatching {
+                    if (replaceRegularFileWith(File(ulb, name)) { dst ->
+                            dst.outputStream().use { it.write(bytes) } }) {
+                        File(ulb, name).setExecutable(true, false)
+                        File(ulb, name).setReadable(true, false)
+                    }
+                }
+            }
+        } catch (_: Exception) { /* non-fatal: desktop only */ }
+    }
+
+    // ---- v0.1.28: native bridge (bundled proot) + apk distro components ----
+
+    /**
+     * Extract assets/proot/<abi>/{proot,libtalloc.so.2,libandroid-shmem.so}
+     * into files/native-bridge/. These are Termux-built bionic binaries
+     * (DT_RUNPATH → LD_LIBRARY_PATH wins; INTERP=/system/bin/linker64) so they
+     * exec directly from app-private storage — legal because the app targets
+     * SDK 28 (see build.gradle.kts). proot then gives every session a real
+     * chroot-equivalent WITHOUT root: absolute distro paths resolve, PT_INTERP
+     * is rewritten, xkbcomp works for Xvfb. Licenses: assets/proot/LICENSES.txt.
+     */
+    private fun installNativeBridge() {
+        val abi = FsLayout.nativeBridgeAssetAbi()
+        val out = FsLayout.nativeBridgeDir(ctx)
+        for (name in listOf("proot", "libtalloc.so.2", "libandroid-shmem.so")) {
+            runCatching {
+                val bytes = ctx.assets.open("proot/$abi/$name").use { readBounded(it, 8L * 1024 * 1024) }
+                val f = File(out, name)
+                replaceRegularFileWith(f) { it.outputStream().use { o -> o.write(bytes) } }
+                f.setExecutable(true, false)
+                f.setReadable(true, false)
+            }.onFailure { com.emux.EmuXLog.e("native bridge asset $name ($abi) failed", it) }
+        }
+    }
+
+    /**
+     * Install the distro components with the rootfs' own apk, executed from the
+     * HOST through the musl loader (verified end-to-end against Alpine 3.20.3:
+     * `ld-musl-<arch>.so.1 --library-path lib:usr/lib sbin/apk --root <rootfs>
+     * add …` works outside any chroot as an ordinary app process).
+     *
+     * Shell components (util-linux → script(1) = the PTY, bash) are required:
+     * returns false if they cannot be installed even after mirror rotation.
+     * Desktop components (Xvfb/xkbcomp/openbox/xterm/xwd/xhost/netpbm) are
+     * best-effort unless disabled in Settings.
+     */
+    private fun installDistroExtras(
+        dest: File,
+        mirrorBase: String?,
+        report: (String, Int) -> Unit,
+    ): Boolean {
+        seedDevNodes(dest)
+        seedApkRepositories(dest, mirrorBase)
+        val loader = runCatching {
+            File(dest, "lib").listFiles()?.firstOrNull {
+                it.name.startsWith("ld-musl-") && it.name.endsWith(".so.1") && it.isFile
+            }
+        }.getOrNull()
+        val apk = File(dest, "sbin/apk")
+        if (loader == null || !apk.isFile) {
+            com.emux.EmuXLog.e("distro extras: loader/apk missing (loader=$loader apk=${apk.isFile})")
+            return false
+        }
+        val shellOk = runApk(dest, loader, listOf("util-linux", "bash"),
+            "Installing shell components", report)
+        if (!shellOk) {
+            // One more shot with rotated mirrors before giving up.
+            seedApkRepositories(dest, null, rotate = true)
+            if (!runApk(dest, loader, listOf("util-linux", "bash"),
+                    "Installing shell components", report)) return false
+        }
+        val desktopWanted = runCatching {
+            androidx.preference.PreferenceManager.getDefaultSharedPreferences(ctx)
+                .getBoolean("desktop_components", true)
+        }.getOrDefault(true)
+        if (desktopWanted) {
+            val deskOk = runApk(dest, loader,
+                listOf("xvfb", "xkbcomp", "xkeyboard-config", "openbox", "xterm", "xwd", "xhost", "netpbm"),
+                "Installing desktop components", report)
+            if (!deskOk) {
+                com.emux.EmuXLog.e("desktop components failed (non-fatal) — desktop tab will report missing Xvfb")
+            }
+        }
+        return true
+    }
+
+    /** Run one `apk add` through the musl loader; streams progress heartbeats. */
+    private fun runApk(
+        dest: File,
+        loader: File,
+        pkgs: List<String>,
+        phase: String,
+        report: (String, Int) -> Unit,
+    ): Boolean {
+        val argv = listOf(
+            loader.absolutePath, "--library-path",
+            "${File(dest, "lib").absolutePath}:${File(dest, "usr/lib").absolutePath}",
+            File(dest, "sbin/apk").absolutePath,
+            "--root", dest.absolutePath,
+            "--arch", archName(),
+            "add", "--no-cache",
+        ) + pkgs
+        return runCatching {
+            val pb = ProcessBuilder(argv)
+            pb.environment().clear()
+            pb.environment()["TMPDIR"] = File(dest, "tmp").absolutePath
+            pb.environment()["HOME"] = File(dest, "root").absolutePath
+            pb.environment()["PATH"] = "/system/bin:/system/xbin"
+            pb.environment()["LANG"] = "C"
+            pb.redirectErrorStream(true)
+            val p = pb.start()
+            val watchdog = Thread {
+                try { Thread.sleep(15 * 60_000L); if (p.isAlive) p.destroy() } catch (_: Exception) {}
+            }.apply { isDaemon = true; start() }
+            try {
+                var lines = 0
+                BufferedReader(InputStreamReader(p.inputStream)).forEachLine { line ->
+                    // apk emits ~2-60 lines; forward a heartbeat for each so the
+                    // UI label stays alive, but never more than the phase itself.
+                    if (++lines % 2 == 0) report(phase, -1)
+                    com.emux.EmuXLog.i("apk: $line")
+                }
+                p.waitFor() == 0
+            } finally { watchdog.interrupt() }
+        }.getOrElse { e ->
+            com.emux.EmuXLog.e("apk ${pkgs.joinToString(",")} failed", e)
+            false
+        }
+    }
+
+    /**
+     * Point the rootfs' /dev entries at the ANDROID host's device nodes via
+     * absolute symlinks (valid because host-side apk exec sees the real /dev;
+     * under proot the whole host /dev is bind-mounted anyway). apk/openssl need
+     * at minimum /dev/urandom.
+     */
+    private fun seedDevNodes(dest: File) {
+        val dev = File(dest, "dev").apply { mkdirs() }
+        for (n in listOf("null", "zero", "full", "random", "urandom", "tty")) {
+            runCatching {
+                val f = File(dev, n)
+                val p = f.toPath()
+                val attrs = runCatching {
+                    java.nio.file.Files.readAttributes(
+                        p, java.nio.file.attribute.BasicFileAttributes::class.java,
+                        java.nio.file.LinkOption.NOFOLLOW_LINKS)
+                }.getOrNull()
+                if (attrs == null) android.system.Os.symlink("/dev/$n", f.absolutePath)
+            }
+        }
+    }
+
+    /** Write etc/apk/repositories for <branch>/main + <branch>/community. */
+    private fun seedApkRepositories(dest: File, mirrorBase: String?, rotate: Boolean = false) {
+        val branch = branchUrl(mirrorBase)
+            ?: (if (rotate) MIRRORS.drop(1).firstOrNull() ?: MIRRORS[0] else MIRRORS[0]).let {
+                it.trimEnd('/') + majorVersion()
+            }
+        val rc = File(dest, "etc/apk/repositories")
+        runCatching { rc.parentFile?.mkdirs() }
+        replaceRegularFileWith(rc) {
+            it.writeText("$branch/main\n$branch/community\n")
+        }
+        com.emux.EmuXLog.i("apk repositories -> $branch")
+    }
+
+    /** ".../alpine/v", ".../alpine/v3.20", full tarball URL → ".../alpine/v3.20". */
+    private fun branchUrl(base: String?): String? {
+        base ?: return null
+        val clean = base.trim().trimEnd('/')
+        Regex("^(.*?/v\\d+\\.\\d+)").find(clean)?.let { return it.groupValues[1] }
+        if (clean.endsWith("/v")) return clean + majorVersion()
+        return null
     }
 
     /** Max size accepted for a helper-script asset (real ones are <1 KiB). */
@@ -1238,7 +1453,10 @@ class BootstrapManager(private val ctx: Context) {
                 "# v0.1.21: keep inherited PATH; prepend distro + helper dirs\n" +
                 "export PATH=\"/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:\$PATH\"\n" +
                 "[ -n \"\$EMUX_BIN\" ] && export PATH=\"\$EMUX_BIN:/system/bin:/system/xbin:\$PATH\"\n" +
-                "export PS1='\\[\\e[38;5;39m\\]emux:\\w\\[\\e[0m\\] \\$ '\n" +
+                                "# v0.1.28: host-side SHELL=/system/bin/sh (util-linux script(1) needs a host shell);\n" +
+                "# inside the distro, advertise the real shell to child programs.\n" +
+                "if [ -x /bin/bash ]; then export SHELL=/bin/bash; else export SHELL=/bin/sh; fi\n" +
+"export PS1='\\[\\e[38;5;39m\\]emux:\\w\\[\\e[0m\\] \\$ '\n" +
                 "alias ll='ls -alF'\n" +
                 "# apk wrapper that works without root inside proot/chroot-lite\n" +
                 "alias apk='apk --no-interactive'\n"

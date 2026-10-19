@@ -14,7 +14,7 @@ import java.io.File
  *   cache/tmp        -> $TMPDIR (cleared by OS on demand = friendly to storage)
  */
 object FsLayout {
-    const val ENV_VERSION = 11  // v0.1.27: persistence fixes (marker survives OEM auto-backup restore) + keyboard IME fixes; forces one re-seed of helper scripts
+    const val ENV_VERSION = 12  // v0.1.28: fixed hasCompleteRootfs (was always false → re-download loop), proot native-bridge seeding, apk-installed shell/desktop components; re-seed is now CHEAP (marker re-stamp, no re-download)
 
     fun root(ctx: Context): File = rootOrFallback(ctx)
     fun usr(ctx: Context): File = File(root(ctx), "usr")
@@ -86,22 +86,45 @@ object FsLayout {
      * appear by accident: if it is there, the install IS done. We re-stamp the
      * marker instead of re-downloading ~3 MB + extracting thousands of files.
      */
+    /**
+     * v0.1.28 PERSISTENCE FIX (THE re-download-loop bug, verified against the
+     * real alpine-minirootfs-3.20.3 tarball):
+     *
+     * The v0.1.27 version of this probe could NEVER return true on a complete
+     * rootfs, which made every "re-stamp instead of re-download" path dead
+     * code and turned every ENV_VERSION bump (i.e. every app update) into a
+     * full wipe + re-download — the reported "installs every time" symptom.
+     * Two factual errors, both verified by listing the actual tarball:
+     *
+     *  1. `bin/sh` is a symlink to the ABSOLUTE path /bin/busybox. On the
+     *     Android host that target does not exist (/bin → /system/bin, no
+     *     busybox), so File.exists() — which FOLLOWS symlinks — was always
+     *     false even on a perfectly extracted tree. Probe the real file
+     *     instead: bin/busybox is a regular ~900 KB file in every minirootfs.
+     *     lstat-style (never follow the distro's absolute symlinks).
+     *  2. The musl loader lives under lib/ (ld-musl-ARCH.so.1), not bin/.
+     *     The old binDirHasMuslLoader(File(r, "bin")) scanned the wrong
+     *     directory — always false.
+     */
     fun hasCompleteRootfs(ctx: Context): Boolean = try {
         val r = linuxRoot(ctx)
-        File(r, "bin/sh").exists() &&
+        val bin = File(r, "bin")
+        (isRegularNoFollow(File(bin, "busybox")) || isRegularNoFollow(File(bin, "sh"))) &&
             File(r, "etc/alpine-release").isFile &&
-            // v0.1.27 CORRECTION: the stock minirootfs tarball ships an EMPTY
-            // etc/apk/ directory (only `apk fix`/`apk add` ever create files
-            // inside it). Requiring a file there made this check false-negative
-            // on every fresh install — which would have re-downloaded anyway.
-            // The real completeness probe is the dynamic linker: a truncated or
-            // partially-extracted tree never has a usable ld-musl-*.so.1.
-            binDirHasMuslLoader(File(r, "bin")) &&
+            libDirHasMuslLoader(File(r, "lib")) &&
             File(r, "etc").isDirectory
     } catch (_: Throwable) { false }
 
-    private fun binDirHasMuslLoader(bin: File): Boolean = try {
-        (bin.list()?.any { it.startsWith("ld-musl-") && it.endsWith(".so.1") }) == true
+    /** lstat-style check: true for a regular file OR a symlink (dangling or not) — never follows. */
+    private fun isRegularNoFollow(f: File): Boolean = try {
+        val a = java.nio.file.Files.readAttributes(
+            f.toPath(), java.nio.file.attribute.BasicFileAttributes::class.java,
+            java.nio.file.LinkOption.NOFOLLOW_LINKS)
+        a.isRegularFile || a.isSymbolicLink
+    } catch (_: Throwable) { false }
+
+    private fun libDirHasMuslLoader(lib: File): Boolean = try {
+        (lib.list()?.any { it.startsWith("ld-musl-") && it.endsWith(".so.1") }) == true
     } catch (_: Throwable) { false }
 
     /**
@@ -111,8 +134,45 @@ object FsLayout {
      */
     fun binDir(ctx: Context): File = File(root(ctx), "bin").apply { mkdirs() }
 
+    /**
+     * v0.1.28: directory holding the bundled bionic "native bridge" binaries —
+     * Termux-built proot + libtalloc.so.2 + libandroid-shmem.so for the device
+     * ABI (extracted from APK assets by bootstrap; see assets/proot/LICENSES.txt).
+     * These use DT_RUNPATH (verified per-ABI), so pointing LD_LIBRARY_PATH at
+     * this directory lets them load their libraries from app-private storage —
+     * no Termux installation required. proot gives unrooted sessions a real
+     * chroot-equivalent (absolute distro paths, PT_INTERP rewriting, working
+     * xkbcomp for Xvfb), which is what makes the distro AND the X11 desktop
+     * usable without root.
+     */
+    fun nativeBridgeDir(ctx: Context): File = File(root(ctx), "native-bridge").apply { mkdirs() }
+    fun prootBin(ctx: Context): File = File(nativeBridgeDir(ctx), "proot")
+
+    /** The ABI subdirectory of assets/proot/ matching this device. */
+    fun nativeBridgeAssetAbi(): String = when {
+        android.os.Build.SUPPORTED_ABIS.any { it == "arm64-v8a" } -> "arm64-v8a"
+        android.os.Build.SUPPORTED_ABIS.any { it == "armeabi-v7a" } -> "armeabi-v7a"
+        android.os.Build.SUPPORTED_ABIS.any { it == "x86_64" } -> "x86_64"
+        android.os.Build.SUPPORTED_ABIS.any { it == "x86" } -> "x86"
+        else -> "arm64-v8a"
+    }
+
+    /**
+     * v0.1.28: shell components = the apk-installed PTY source (util-linux
+     * script(1)) + bash. Without them the terminal has no PTY (raw pipes → no
+     * echo → "keyboard dead"), so a rootfs missing them must NOT be stamped as
+     * complete: the launch path then schedules a bootstrap pass which lands in
+     * BootstrapManager's cheap re-seed branch (no re-download — the rootfs is
+     * complete) and retries the apk install.
+     */
+    fun hasShellComponents(ctx: Context): Boolean = try {
+        val r = linuxRoot(ctx)
+        File(r, "usr/bin/script").isFile || File(r, "bin/script").isFile
+    } catch (_: Throwable) { false }
+
     fun ensureMarkerForExistingRootfs(ctx: Context): Boolean {
         if (!hasCompleteRootfs(ctx)) return false
+        if (!hasShellComponents(ctx)) return false
         markBootstrapped(ctx)
         return isBootstrapped(ctx)
     }
@@ -174,7 +234,15 @@ object FsLayout {
             "${usr(ctx)}/bin:${usr(ctx)}/sbin:/system/bin:/system/xbin",
         "LANG" to "en_US.UTF-8",
         "TERM" to "xterm-256color",
-        "SHELL" to "/bin/bash",
+        // v0.1.28: SHELL is used HOST-side by util-linux script(1) to run its
+        // -c payload — it MUST be a shell that exists on the Android host.
+        // /bin/sh only exists on Android 10+ (symlink to /system/bin); on
+        // Android 7–9 it is absent and script(1) died instantly. The distro
+        // login shell re-exports SHELL=/bin/bash via etc/profile.d/emux.sh
+        // once inside proot/chroot.
+        "SHELL" to "/system/bin/sh",
+        // v0.1.28: bundled proot + its bionic libs (see nativeBridgeDir).
+        "EMUX_NATIVE_BRIDGE" to nativeBridgeDir(ctx).absolutePath,
         // X11: westwayland/xserver will listen here; display number fixed at :0
         "DISPLAY" to ":0",
         // tell programs we're an emoji-capable mobile terminal like Termux does

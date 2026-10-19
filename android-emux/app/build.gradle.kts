@@ -13,9 +13,22 @@ android {
     defaultConfig {
         applicationId = "com.emux"
         minSdk = 24
-        targetSdk = 34
-        versionCode = 27
-        versionName = "0.1.27"
+        // v0.1.28 ARCHITECTURE FIX (the root cause behind "keyboard dead" and
+        // "distro never runs"): Android 10+ denies execve()/mmap(PROT_EXEC) of
+        // ANY file in app-private storage for apps targeting SDK 29+ (W^X —
+        // SELinux untrusted_app domain; see developer.android.com/about/versions/
+        // 10/behavior-changes-10 and termux-app issue #1072 — the exact reason
+        // Termux ships targetSdk 28). With targetSdk 34 the whole Alpine rootfs
+        // was inert ballast: every loader/busybox/apk/Xvfb exec died EACCES.
+        // Targeting 28 restores exec of app-data files (untrusted_app_27
+        // domain) on Android 7–15, making the musl-loader chain, apk, proot and
+        // the X11 desktop actually runnable unrooted. Trade-off: not
+        // distributable via Play Store — this app ships as a sideloaded APK
+        // (adb install / GitHub Releases), same distribution model as Termux
+        // on F-Droid.
+        targetSdk = 28
+        versionCode = 28
+        versionName = "0.1.28"
 
         ndk {
             abiFilters += listOf("arm64-v8a", "armeabi-v7a", "x86_64")

@@ -53,7 +53,16 @@ class TerminalSession(
             "/system/bin/busybox",         // custom ROMs: full applet set, proper ctty
             "/system/xbin/busybox",        // classic custom-ROM location
             "/sbin/busybox",
-            "/system/bin/script",          // toybox (AOSP 6+) — relay works, ctty doesn't
+            // v0.1.28 CORRECTION: AOSP toybox has NO script applet (verified
+            // against the AOSP tree — toys/other and toys/pending contain no
+            // script.c), so /system/bin/script only exists on a few OEM ROMs.
+            // Five release cycles tuned quoting for this phantom binary while
+            // stock devices fell through to raw pipes (no echo = "keyboard
+            // dead"). The PRIMARY wrapper is now the rootfs's own util-linux
+            // script(1), exec'd through the musl loader (TtyWrap.
+            // setDistroCandidates) — installed by bootstrap via apk and
+            // verified end-to-end (real pts + TIOCSCTTY job control).
+            "/system/bin/script",          // OEM ROMs that ship it; harmless to probe
         )
     }
 
@@ -109,8 +118,15 @@ class TerminalSession(
         job = scope.launch {
             try {
                 val env = FsLayout.sessionEnv(ctx).toMutableMap()
-                // Launch through our shell-init script which sets up /proc-less
-                // mounts (tmpfs via `unshare` when root, else pure proot-free path).
+                // v0.1.28: resolve the rootfs-backed PTY wrapper (util-linux
+                // script(1) installed by bootstrap, exec'd through the musl
+                // loader) BEFORE probing — on stock Android there is no
+                // busybox and AOSP toybox has NO script applet at all
+                // (verified against the AOSP tree), so the distro wrapper is
+                // the ONLY PTY source on unrooted devices.
+                TtyWrap.setDistroCandidates(ctx)
+                // Launch through our shell-init script which sets up the
+                // proot/loader session (see assets/bin/emux-init.sh).
                 // v0.1.17 BUGFIX (blank terminal, nothing typed back): the child
                 // was launched through Android's /system/bin/sh -c "...". On API
                 // 29+ that shell runs in the untrusted_app SELinux domain and is
@@ -171,14 +187,12 @@ class TerminalSession(
     private fun buildProcess(cmd: String): ProcessBuilder {
         val rootfsFile = FsLayout.linuxRoot(ctx)
         val rootfs = rootfsFile.absolutePath
-        // Alpine minirootfs ships ash only (no bash) — use /bin/sh so the session
-        // doesn't die instantly with "bash: not found" on a fresh bootstrap.
-        // v0.1.23 BUGFIX: every downstream layer (TtyWrap single-quoting,
-        // `export EMUX_ARGV1=''` here) breaks on apostrophes inside the
-        // command; normalize them to U+02BC MODIFIER APOSTROPHE, which
-        // shells treat as an ordinary character, so the quoting chain can
-        // never fall through to the noexec-doomed direct path.
-        val shellCmd = cmd.replace("bash -l", "/bin/sh -l").replace("'", "ʼ")
+        // v0.1.28: the bootstrap installs real bash into the rootfs (apk
+        // extras), so "bash -l" is honored as-is now — the old forced rewrite
+        // to /bin/sh was a workaround for minirootfs shipping ash only.
+        // Apostrophes are still normalized to U+02BC so the quoting chain
+        // (TtyWrap single-quoting, `export EMUX_ARGV1='…'`) can never break.
+        val shellCmd = cmd.replace("'", "ʼ")
         val init = File(rootfsFile, "emux-init.sh")
         // v0.1.23 BUGFIX: the old gate was `init.isFile` ONLY — pointing at the
         // copy extracted INTO the rootfs by tar. On a partially-extracted /
@@ -235,19 +249,17 @@ class TerminalSession(
 
         return if (privilegedOk) {
             // True chroot under root: fastest possible (zero syscall translation).
-            // v0.1.19 BUGFIX M: honor the REAL requested command (shellCmd keeps
-            // "emux-x11 openbox" etc.) instead of hardcoding a login shell, and
-            // use one single-quoted payload with no nested double quotes so the
-            // sh → su -c quoting chain survives intact on every Android shell.
-            // v0.1.20 BUGFIX: the old payload embedded ESCAPED DOUBLE QUOTES
-            // inside the single-quoted `su -c '…'` string — toybox sh passes
-            // them through VERBATIM, so su received `-c "cd && exec …"` with
-            // literal quote characters and died with a syntax error. Desktop
-            // sessions (`emux-x11 openbox`) therefore never started Xvfb. The
-            // command is passed UNQUOTED now; word-splitting inside the distro
-            // shell is harmless for our simple commands.
+            // v0.1.28 QUOTING FIX: the old form `su -c 'chroot $rootfs /bin/sh -l -c $shellCmd'`
+            // passed the command UNQUOTED, so `emux-x11 openbox` became
+            // `-c emux-x11` with $0=openbox — the WM argument was silently
+            // eaten. Wrap the payload in escaped double quotes inside the
+            // single-quoted su string (shellCmd is apostrophe-free by
+            // construction, so this layer survives sh → su → sh intact).
+            // Helper scripts now live in /usr/local/bin INSIDE the rootfs
+            // (bootstrap v0.1.28), which the chroot login shell's PATH covers.
+            val suSafe = shellCmd.replace("\\", "\\\\").replace("\"", "\\\"").replace("$", "\\$").replace("`", "\\`")
             ProcessBuilder("/system/bin/sh", "-c",
-                "su -c 'chroot $rootfs /bin/sh -l -c $shellCmd'")
+                "su -c 'chroot $rootfs /bin/sh -l -c \"$suSafe\"'")
         } else if (haveLauncher) {
             // v0.1.18 BUGFIX #2: the old gate was `init.canExecute()`. Bootstrap
             // sets the exec bit via File.setExecutable(true,false), which maps to
@@ -549,8 +561,82 @@ object TtyWrap {
                     break
                 }
             }
+            // v0.1.28: PRIMARY wrapper on stock devices — the rootfs' own
+            // util-linux script(1) (installed by bootstrap via `apk add
+            // util-linux`), exec'd through the musl loader:
+            //   <rootfs>/lib/ld-musl-<arch>.so.1 --library-path <lib>:<usr/lib> <rootfs>/usr/bin/script
+            // Verified end-to-end: allocates a real pts AND sets the
+            // controlling terminal (TIOCSCTTY), so echo + job control work.
+            // Legal to exec from app-data because the app targets SDK 28
+            // (Android 10+ W^X exempts untrusted_app_27 — the Termux model).
+            if (resolved == null) {
+                val dp = distroPrefix
+                if (dp != null) {
+                    fun tryArgs(args: List<String>): Boolean = runCatching {
+                        val pb = ProcessBuilder(dp + args)
+                            .redirectErrorStream(true)
+                            .redirectInput(ProcessBuilder.Redirect.from(File("/dev/null")))
+                        pb.environment()["SHELL"] = "/system/bin/sh"
+                        val p = pb.start()
+                        val wd = Thread { try { Thread.sleep(3_000); p.destroy() } catch (_: Exception) {} }.apply { isDaemon = true }
+                        wd.start(); val code = try { p.waitFor() } catch (_: Exception) { -1 }; wd.interrupt()
+                        code == 0
+                    }.getOrDefault(false)
+                    // util-linux script runs its -c payload through $SHELL (or
+                    // /bin/sh, which does NOT exist on Android 7–9) — the real
+                    // session env sets SHELL=/system/bin/sh (FsLayout.sessionEnv).
+                    val relayOk = when {
+                        // util-linux script speaks the busybox dialect:
+                        //   script [-q] -c COMMAND [TYPESCRIPT]
+                        tryArgs(listOf("-q", "-c", "true", "/dev/null")) -> { dialect = Dialect.BBSTYLE; true }
+                        tryArgs(listOf("-q", "-f", "/dev/null", "true")) -> { dialect = Dialect.TOYBOX; true }
+                        else -> false
+                    }
+                    if (relayOk) {
+                        hasCtty = verifyCtty(dp)
+                        resolved = dp
+                        com.emux.EmuXLog.i("TtyWrap: PTY wrapper = distro script via musl loader ($dialect, ctty=$hasCtty)")
+                    } else {
+                        com.emux.EmuXLog.e("TtyWrap: distro script exists but both arg dialects failed")
+                    }
+                }
+            }
             probed = true
             return resolved
+        }
+    }
+
+    /**
+     * v0.1.28: argv prefix that runs the ROOTFS util-linux script(1) through
+     * the musl loader, or null when the rootfs/loader/script are missing.
+     * Computed once per process (recomputed if a later bootstrap pass installs
+     * the components — see [setDistroCandidates]).
+     */
+    @Volatile private var distroPrefix: List<String>? = null
+    @Volatile private var distroProbed = false
+
+    fun setDistroCandidates(ctx: Context) {
+        runCatching {
+            val rootfs = com.emux.core.FsLayout.linuxRoot(ctx)
+            val script = File(rootfs, "usr/bin/script")
+            if (!script.isFile) return@runCatching
+            val loader = File(rootfs, "lib").listFiles()?.firstOrNull {
+                it.name.startsWith("ld-musl-") && it.name.endsWith(".so.1") && it.isFile
+            } ?: return@runCatching
+            val prefix = listOf(
+                loader.absolutePath,
+                "--library-path",
+                "${File(rootfs, "lib").absolutePath}:${File(rootfs, "usr/lib").absolutePath}",
+                script.absolutePath,
+            )
+            val changed = prefix != distroPrefix
+            distroPrefix = prefix
+            if (changed) synchronized(this) {
+                // components appeared after an earlier probe (first launch:
+                // sessions start before bootstrap finishes) — re-probe.
+                if (probed && resolved == null) { probed = false }
+                distroProbed = true
+            }
         }
     }
 
@@ -577,10 +663,13 @@ object TtyWrap {
             Dialect.TOYBOX -> listOf("-q", "-f", "/dev/null", inner)
             Dialect.BBSTYLE -> listOf("-q", "-c", inner, "/dev/null")
         }
-        val p = ProcessBuilder(prefix + args)
+        val pb = ProcessBuilder(prefix + args)
             .redirectErrorStream(true)
             .redirectInput(ProcessBuilder.Redirect.from(File("/dev/null")))
-            .start()
+        // v0.1.28: util-linux script runs its -c payload via $SHELL — pin the
+        // HOST shell (Android 7–9 have no /bin/sh) like the session env does.
+        pb.environment()["SHELL"] = "/system/bin/sh"
+        val p = pb.start()
         val sb = StringBuilder()
         val reader = Thread {
             try { p.inputStream.bufferedReader().forEachLine { sb.appendLine(it) } } catch (_: Exception) {}

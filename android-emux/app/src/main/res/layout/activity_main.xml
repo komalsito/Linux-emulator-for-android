@@ -36,7 +36,10 @@
             android:paddingEnd="12dp" android:paddingStart="0dp" />
     </LinearLayout>
 
-    <!-- bootstrap banner -->
+    <!-- bootstrap banner: v0.1.28 — hidden by default. Previously VISIBLE with
+         no code path ever setting it GONE, so "Install the Linux environment?"
+         showed on EVERY launch even after a successful install — the exact
+         "it wants to install every time I open the app" symptom. -->
     <LinearLayout
         android:id="@+id/bootstrapPane"
         android:layout_width="0dp"
@@ -44,6 +47,7 @@
         android:orientation="vertical"
         android:padding="16dp"
         android:background="#1B1F24"
+        android:visibility="gone"
         app:layout_constraintTop_toBottomOf="@id/topBar"
         app:layout_constraintStart_toStartOf="parent"
         app:layout_constraintEnd_toEndOf="parent">
