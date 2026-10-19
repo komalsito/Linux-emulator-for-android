@@ -14,12 +14,30 @@ import java.io.File
  *   cache/tmp        -> $TMPDIR (cleared by OS on demand = friendly to storage)
  */
 object FsLayout {
-    const val ENV_VERSION = 10  // v0.1.26: emux-capture octal-printf binary header fix + rootfs-path tool resolution
+    const val ENV_VERSION = 11  // v0.1.27: persistence fixes (marker survives OEM auto-backup restore) + keyboard IME fixes; forces one re-seed of helper scripts
 
-    fun root(ctx: Context): File = ctx.filesDir
+    fun root(ctx: Context): File = rootOrFallback(ctx)
     fun usr(ctx: Context): File = File(root(ctx), "usr")
     fun linuxRoot(ctx: Context): File = File(root(ctx), "linuxroot")
     fun home(ctx: Context): File = File(root(ctx), "home").apply { mkdirs() }
+
+    /**
+     * v0.1.27 PERSISTENCE FIX #1: Context.getFilesDir() is @Nullable — it returns
+     * null while the device sits in direct-boot state (before the user's first
+     * unlock after a reboot). The old bare `File(ctx.filesDir, ...)` then threw a
+     * KotlinNullPointerException inside isBootstrapped()'s try/catch, which was
+     * swallowed and returned FALSE. Every code path that treats false as "not
+     * installed" (EmuXApplication.scheduleAuto, MainActivity's bootstrap UI,
+     * BootstrapManager's alreadyDone short-circuit) consequently re-ran the ENTIRE
+     * download+extract on some launch — exactly the reported "either doesn't work
+     * or re-installs every time I close and reopen the app". Mirror safeTmp()'s
+     * proven pattern: never nullable, with an internal-storage fallback.
+     */
+    private fun rootOrFallback(ctx: Context): File = try {
+        ctx.filesDir ?: File(ctx.applicationInfo.dataDir, "files")
+    } catch (_: Throwable) {
+        File("/data/data/${ctx.packageName}/files")
+    }.apply { runCatching { mkdirs() } }
     /**
      * v0.1.9 CRASH FIX: Context.getCacheDir() is @Nullable (returns null while
      * the device is direct-boot-locked before first user unlock, and some OEM
@@ -50,6 +68,54 @@ object FsLayout {
         p.exists() && p.readText().trim() == ENV_VERSION.toString() &&
             File(linuxRoot(ctx), "etc").isDirectory
     } catch (_: Throwable) { false }
+
+    /**
+     * v0.1.27 PERSISTENCE FIX #2 — rootfs present but marker lost ≠ not installed.
+     *
+     * Verified against the Android 12+ spec (developer.android.com/guide/topics/
+     * data/autobackup): with allowBackup="true" and no custom backup rules, Auto
+     * Backup includes /data/data/<pkg>/shared_prefs and the DATABASES/scankd-style
+     * key-value set, but NOT arbitrary filesDir content, on every app uninstall
+     * ("Close and reopen the app" on OEM ROMs that auto-reinstall-on-restore, or
+     * after a Play Store "re-download", restores shared_prefs while files/linuxroot
+     * was wiped → stale state; conversely, a restore onto a device where the rootfs
+     * DID survive but .env_version did not made isBootstrapped() false → full
+     * re-download on every launch — the reported "re-installs every time").
+     *
+     * A complete Alpine tree (bin/sh + etc/alpine-release + apk tools) cannot
+     * appear by accident: if it is there, the install IS done. We re-stamp the
+     * marker instead of re-downloading ~3 MB + extracting thousands of files.
+     */
+    fun hasCompleteRootfs(ctx: Context): Boolean = try {
+        val r = linuxRoot(ctx)
+        File(r, "bin/sh").exists() &&
+            File(r, "etc/alpine-release").isFile &&
+            // v0.1.27 CORRECTION: the stock minirootfs tarball ships an EMPTY
+            // etc/apk/ directory (only `apk fix`/`apk add` ever create files
+            // inside it). Requiring a file there made this check false-negative
+            // on every fresh install — which would have re-downloaded anyway.
+            // The real completeness probe is the dynamic linker: a truncated or
+            // partially-extracted tree never has a usable ld-musl-*.so.1.
+            binDirHasMuslLoader(File(r, "bin")) &&
+            File(r, "etc").isDirectory
+    } catch (_: Throwable) { false }
+
+    private fun binDirHasMuslLoader(bin: File): Boolean = try {
+        (bin.list()?.any { it.startsWith("ld-musl-") && it.endsWith(".so.1") }) == true
+    } catch (_: Throwable) { false }
+
+    /**
+     * Canonical helper-bin directory (files/bin). v0.1.27: single source of truth
+     * so every call site shares FsLayout.root()'s direct-boot fallback instead of
+     * touching the @Nullable ctx.filesDir directly.
+     */
+    fun binDir(ctx: Context): File = File(root(ctx), "bin").apply { mkdirs() }
+
+    fun ensureMarkerForExistingRootfs(ctx: Context): Boolean {
+        if (!hasCompleteRootfs(ctx)) return false
+        markBootstrapped(ctx)
+        return isBootstrapped(ctx)
+    }
 
     fun markBootstrapped(ctx: Context) {
         // v0.1.15: atomic write (tmp + rename). A killed mid-write used to leave a

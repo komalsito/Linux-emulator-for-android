@@ -305,6 +305,34 @@ class BootstrapManager(private val ctx: Context) {
                 slot.finish(Result.success(Unit))
                 return
             }
+            // v0.1.27 PERSISTENCE FIX #2: marker missing but a COMPLETE rootfs on
+            // disk (backup/restore wiped .env_version, OEM storage manager pruned
+            // it, or ENV_VERSION was bumped by an app update). Re-stamp instead of
+            // wiping + re-downloading the whole distro — this is what made the app
+            // "re-install every time I close and reopen it". We still refresh the
+            // helper scripts below so an ENV_VERSION bump re-seeds patched assets.
+            val r = runCatching { FsLayout.hasCompleteRootfs(ctx) }.getOrDefault(false)
+            if (r) {
+                com.emux.EmuXLog.i("rootfs complete but marker stale — re-stamping, no re-download")
+                // v0.1.27: per-script frames carry rank 7 ("Installing helper
+                // script…"); the monotonic phase floor would then permanently
+                // block the "Finalizing rootfs config" frame (rank 6). Order the
+                // reports so ranks advance monotonically within this branch too.
+                report("Installing helper scripts", -1)
+                val staged = stageHelperAssets()
+                installHelperScripts(dest, staged) { step, pct -> report(step, pct) }
+                report("Finalizing rootfs config", -1)
+                seedResolverConfig(dest)
+                prepareMountpoints(dest)
+                postInstall(dest)
+                val restamped = runCatching { FsLayout.markBootstrappedChecked(ctx) }.getOrDefault(false)
+                if (!restamped) {
+                    throw java.io.IOException("existing rootfs found, but completion marker could not be written (storage full?)")
+                }
+                report("Bootstrapped", 100)
+                slot.finish(Result.success(Unit))
+                return
+            }
             report("Resolving mirror", -1)
 
             // v0.1.13 STALL FIX #1 — top-down deleteRecursively() pre-wipe.

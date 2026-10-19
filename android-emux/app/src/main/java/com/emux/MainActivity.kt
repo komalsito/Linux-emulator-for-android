@@ -88,7 +88,22 @@ class MainActivity : AppCompatActivity() {
         //     the "app is visible" exemption applies when we do start services.
         postSafely(Runnable {
             if (!com.emux.core.FsLayout.isBootstrapped(this)) {
-                showBootstrapUiOnly()
+                // v0.1.27 PERSISTENCE FIX #3: the old code showed the Install UI
+                // whenever isBootstrapped() was false — even when a COMPLETE rootfs
+                // sat on disk with only the .env_version marker lost (backup
+                // restore / OEM storage manager). The user then tapped Install and
+                // watched the whole ~3 MB download+extract re-run "every time I
+                // close and reopen the app". Re-stamp first; only a genuinely
+                // missing/partial rootfs shows the banner.
+                val restamped = runCatching {
+                    com.emux.core.FsLayout.ensureMarkerForExistingRootfs(this)
+                }.getOrDefault(false)
+                if (restamped) {
+                    com.emux.EmuXLog.i("rootfs intact, marker re-stamped at startup — skipping reinstall")
+                    ensureSessionAttached()
+                } else {
+                    showBootstrapUiOnly()
+                }
             } else {
                 ensureSessionAttached()
             }
@@ -447,6 +462,12 @@ class MainActivity : AppCompatActivity() {
             kotlinx.coroutines.delay(8_000L)
             try {
                 if (com.emux.core.FsLayout.isBootstrapped(applicationContext)) return@launch
+                // v0.1.27: rootfs intact + marker lost → re-stamp, never re-download.
+                if (runCatching { com.emux.core.FsLayout.ensureMarkerForExistingRootfs(applicationContext) }
+                        .getOrDefault(false)) {
+                    com.emux.EmuXLog.i("8s safety net: marker re-stamped for intact rootfs")
+                    return@launch
+                }
                 if (com.emux.core.BootstrapRunner.isRunning()) return@launch
                 com.emux.EmuXLog.i("bootstrap not completed via W-M -> in-process retry")
                 com.emux.core.BootstrapRunner.run(applicationContext) { r ->
