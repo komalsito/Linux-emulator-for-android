@@ -41,7 +41,15 @@ class EmuXApplication : Application() {
         // bootstrap in-process instead of showing "NoClassDefFoundError".
         try {
             if (!com.emux.core.FsLayout.isBootstrapped(this)) {
-                com.emux.core.BootstrapScheduling.scheduleAuto(this)
+                // v0.1.27 PERSISTENCE FIX #3b: don't schedule a full re-download
+                // when only the completion marker was lost but the rootfs is
+                // intact — re-stamp it instead.
+                val restamped = runCatching {
+                    com.emux.core.FsLayout.ensureMarkerForExistingRootfs(this)
+                }.getOrDefault(false)
+                if (!restamped) {
+                    com.emux.core.BootstrapScheduling.scheduleAuto(this)
+                }
             }
         } catch (e: Throwable) { com.emux.EmuXLog.e("startup bootstrap scheduling failed", e) }
     }
