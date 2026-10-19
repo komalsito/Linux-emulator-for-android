@@ -182,8 +182,17 @@ else
 fi
 
 # --- little-endian byte writers ------------------------------------------------
-u16le() { printf "$(printf '\\x%02x\\x%02x' $(($1 & 255)) $((($1 >> 8) & 255)))"; }
-u32le() { printf "$(printf '\\x%02x\\x%02x\\x%02x\\x%02x' \\
+# v0.1.26 BUGFIX (desktop stuck on "waiting for X frames" forever): the old
+# helpers emitted LITERAL backslash sequences. Inside single quotes the shell
+# never interprets \x escapes, so u16le(720) printed the eight characters
+# \ x 0 2 d 0 0 0 instead of two raw bytes — the stream header was ~40 ASCII
+# chars long, the Kotlin reader blocked in readFully() waiting for an 8-byte
+# header that never came, and zero frames were ever decoded. The awk converter
+# had the same bug ("%c" with a literal "\\xNN" argument prints the text).
+# printf FORMATS must be double-quoted so printf itself sees the real escapes;
+# only then are the numeric substitutions expanded to octal (\NNN) byte values.
+u16le() { printf "$(printf '\\%03o\\%03o' $(($1 & 255)) $((($1 >> 8) & 255)))"; }
+u32le() { printf "$(printf '\\%03o\\%03o\\%03o\\%03o' \\
   $(($1 & 255)) $((($1 >> 8) & 255)) $((($1 >> 16) & 255)) $((($1 >> 24) & 255)))"; }
 
 send_bytes() {
