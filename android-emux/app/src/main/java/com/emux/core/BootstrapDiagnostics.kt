@@ -21,7 +21,14 @@ object BootstrapDiagnostics {
             if (i > 0) sb.append(" <- ")
             sb.append(t.javaClass.simpleName)
             val msg = linkageDetail(t) ?: t.message
-            if (!msg.isNullOrEmpty()) sb.append(": ").append(msg.take(220))
+            // v0.1.31 CRITICAL DIAGNOSTIC FIX: this clamp was take(220) for EVERY
+            // message — it truncated the v0.1.30 device probe MID-LINE inside the
+            // failure banner (field screenshots ended at "exec(loader)=exit=1
+            // musl libc (aarch64) V…"), hiding the proot/DNS/apk-tail sections
+            // the probe exists to show. The top-level message now passes through
+            // (bounded only so a pathological blob can't OOM the UI); chained
+            // causes stay short.
+            if (!msg.isNullOrEmpty()) sb.append(": ").append(if (i == 0) msg.take(6000) else msg.take(220))
         }
         // For linkage errors with no embedded detail, add the top frames —
         // they identify the call site that triggered resolution.

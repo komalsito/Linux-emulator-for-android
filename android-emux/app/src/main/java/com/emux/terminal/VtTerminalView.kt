@@ -570,9 +570,16 @@ class VtTerminalView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attr
             KeyEvent.KEYCODE_DPAD_LEFT -> if (applicationCursorKeys) "\u001BOD" else "\u001B[D"
             else -> null
         }
-        if (seq != null) { s.write(seq.toByteArray()); return true }
+        if (seq != null) {
+            val bytes = seq.toByteArray()
+            s.write(bytes)
+            if (seq == "\r") localEcho(bytes)   // CR echoes as newline; arrows/ESC stay silent
+            return true
+        }
         if (event.unicodeChar != 0) {
-            s.write(String(Character.toChars(event.unicodeChar)).toByteArray())
+            val bytes = String(Character.toChars(event.unicodeChar)).toByteArray()
+            s.write(bytes)
+            localEcho(bytes)
             return true
         }
         return super.onKeyDown(keyCode, event)
@@ -580,6 +587,31 @@ class VtTerminalView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attr
 
     /** Extra-keys bar entry point (ESC, CTRL, ALT, arrows sent as raw bytes). */
     fun sendBytes(b: ByteArray) { session?.write(b) }
+
+    /**
+     * v0.1.31 DEGRADED-MODE ECHO ("cannot type" last-resort): with NO PTY wrapper
+     * the shell's line discipline cannot echo keystrokes (raw pipes), so typing
+     * was invisible even though bytes reached the shell. While the session runs
+     * unwrapped we mirror printable bytes (plus CR→newline, DEL→backspace) onto
+     * the screen ourselves. Skipped entirely when a real PTY is attached — the
+     * tty driver echoes natively and double-echo would corrupt the line.
+     */
+    private fun localEcho(bytes: ByteArray) {
+        if (session?.ptyWrapped != false) return
+        val out = ByteArray(bytes.size)
+        var n = 0
+        for (b in bytes) {
+            val v = b.toInt() and 0xFF
+            val mapped = when {
+                v == 0x7F -> 0x08                 // DEL → visual backspace
+                v == '\r'.code -> '\n'.code       // CR → newline on screen
+                v >= 0x20 -> v                    // printable only
+                else -> -1                        // other control bytes: silent
+            }
+            if (mapped >= 0) out[n++] = mapped.toByte()
+        }
+        if (n > 0) feed(out.copyOf(n))
+    }
 
     override fun onCreateInputConnection(outAttrs: EditorInfo): InputConnection {
         // v0.1.20 BUGFIX: TYPE_TEXT_VARIATION_VISIBLE_PASSWORD is the standard
@@ -612,7 +644,9 @@ class VtTerminalView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attr
 
             private fun writeToPty(text: CharSequence) {
                 if (text.isEmpty()) return
-                session?.write(text.toString().toByteArray(Charsets.UTF_8))
+                val bytes = text.toString().toByteArray(Charsets.UTF_8)
+                session?.write(bytes)
+                localEcho(bytes)
             }
 
             override fun commitText(text: CharSequence?, pos: Int): Boolean {
@@ -652,7 +686,11 @@ class VtTerminalView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attr
                 // forwarded — dropping it into the local buffer (old behaviour)
                 // desynced the shell line from what we had typed.
                 val n = if (tx.isNotEmpty()) { tx.setLength(tx.length - 1); 0 } else 0
-                repeat((before.coerceAtLeast(1)) - n) { session?.write(byteArrayOf(0x7F)) }
+                repeat((before.coerceAtLeast(1)) - n) {
+                    val bs = byteArrayOf(0x7F)
+                    session?.write(bs)
+                    localEcho(bs)
+                }
                 return true
             }
 
@@ -662,12 +700,17 @@ class VtTerminalView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attr
                         // v0.1.20: NEVER discard tx here — the composing text is
                         // already streamed to the PTY; just reset tracking + CR.
                         tx.setLength(0)
-                        session?.write(byteArrayOf('\r'.code.toByte()))
+                        val cr = byteArrayOf('\r'.code.toByte())
+                        session?.write(cr)
+                        localEcho(cr)
                         return true
                     }
                     if (e.keyCode == KeyEvent.KEYCODE_DEL) {
                         if (tx.isNotEmpty()) tx.setLength(tx.length - 1)
-                        session?.write(byteArrayOf(0x7F)); return true
+                        val bs = byteArrayOf(0x7F)
+                        session?.write(bs)
+                        localEcho(bs)
+                        return true
                     }
                     onKeyDown(e.keyCode, e)
                 }

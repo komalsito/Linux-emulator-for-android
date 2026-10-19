@@ -1049,17 +1049,26 @@ class BootstrapManager(private val ctx: Context) {
             tail = "proot-apk(mirror2): ${r.tail}\n$tail"
             ok = r.ok || shellOk()
         }
-        // 2) host-side loader exec (ROMs where proot cannot run)
-        if (!ok && loader != null) {
-            seedApkRepositories(dest, null, rotate = 1)
-            val r = runApkLoader(loader, dest, shellPkgs, "Installing shell components", report)
-            tail = "loader-apk: ${r.tail}\n$tail"
+        // 1c) v0.1.31: proot with IP-LITERAL repositories — ZERO DNS dependency
+        //     inside the guest. Carrier networks that block/poison UDP/53 to
+        //     foreign resolvers made attempts 1/1b fail even with a perfectly
+        //     seeded resolv.conf; Java resolves every mirror through Android's
+        //     own resolver here and apk walks the repository lines by itself.
+        if (!ok && proot.isFile && rewriteRepositoriesToIps(dest, mirrorBase)) {
+            val r = runApkProot(proot, dest, shellPkgs, "Installing shell components", report)
+            tail = "proot-apk(ip-repos): ${r.tail}\n$tail"
             ok = r.ok || shellOk()
         }
-        // 3) host-side loader + IP-literal repos (musl has no DNS on Android)
-        if (!ok && loader != null && rewriteRepositoriesToIps(dest)) {
+        // 2) v0.1.31: host-side loader exec with the SAME multi-mirror IP-literal
+        //    repository set (ROMs where proot/ptrace is blocked). The old
+        //    intermediate "loader + hostname repos" attempt was REMOVED: the
+        //    Android host has no /etc/resolv.conf at all, so musl DNS can never
+        //    work there (v0.1.29 proved it) — going straight to IP literals
+        //    saves minutes of doomed retries. The old single-mirror IP attempt
+        //    (rotate=1 → leaseweb only) is superseded by the multi-mirror set.
+        if (!ok && loader != null && rewriteRepositoriesToIps(dest, mirrorBase)) {
             val r = runApkLoader(loader, dest, shellPkgs, "Installing shell components", report)
-            tail = "ip-repo-apk: ${r.tail}\n$tail"
+            tail = "loader-apk(ip-repos): ${r.tail}\n$tail"
             ok = r.ok || shellOk()
         }
         if (!ok) {
@@ -1124,7 +1133,11 @@ class BootstrapManager(private val ctx: Context) {
                 }
             }.getOrNull()
             sb.append(if (loader == null) "loader=missing\n"
-                      else "exec(loader)=${probeExec(listOf(loader.absolutePath))}\n")
+                      else "exec(loader)=${probeExec(listOf(
+                          loader.absolutePath, "--library-path",
+                          "${File(dest, "lib").absolutePath}:${File(dest, "usr/lib").absolutePath}",
+                          File(dest, "bin/busybox").absolutePath, "echo", "LOADER_EXEC_OK",
+                      ), expect = "LOADER_EXEC_OK")}\n")
             val proot = FsLayout.prootBin(ctx)
             val nb = mapOf("LD_LIBRARY_PATH" to FsLayout.nativeBridgeDir(ctx).absolutePath)
             sb.append(if (!proot.isFile) "proot=missing\n"
@@ -1139,13 +1152,50 @@ class BootstrapManager(private val ctx: Context) {
             }.getOrElse { "FAIL ${it.javaClass.simpleName}" }}\n")
             sb.append("resolv.conf=${runCatching {
                 File(dest, "etc/resolv.conf").readText().trim().replace("\n", " | ")
-            }.getOrDefault("?")}")
+            }.getOrDefault("?")}\n")
+            // v0.1.31: network-layer probes. The v0.1.30 banner proved exec works
+            // but could not show WHETHER the seeded nameservers or the mirror
+            // host are reachable at all (UDP/53 blackholing vs TCP firewalls vs
+            // DNS-less guest). TCP connect probes separate those cases in one
+            // screenshot, each capped at 2 s.
+            val ns = runCatching {
+                File(dest, "etc/resolv.conf").readText().lineSequence()
+                    .firstOrNull { it.startsWith("nameserver") }?.substringAfter(' ')?.trim()
+            }.getOrNull()
+            sb.append("dns-tcp=${if (ns.isNullOrBlank()) "no-resolv-conf" else "$ns:53 ${tcpProbe(ns, 53)}"}\n")
+            val repoHost = runCatching {
+                java.net.URL(
+                    File(dest, "etc/apk/repositories").readText()
+                        .lineSequence().firstOrNull { it.isNotBlank() } ?: ""
+                ).host
+            }.getOrNull()
+            if (!repoHost.isNullOrBlank()) {
+                sb.append("repo-tcp=$repoHost:443 ${tcpProbe(repoHost, 443)}\n")
+            }
         }
         return sb.toString()
     }
 
-    /** Start [argv] and classify the outcome: started(exit=N) vs DENIED(msg). */
-    private fun probeExec(argv: List<String>, env: Map<String, String> = emptyMap()): String = runCatching {
+    /** TCP connect probe (2 s cap): reachable vs firewalled vs DNS-less. */
+    private fun tcpProbe(host: String, port: Int): String = runCatching {
+        java.net.Socket().use { s ->
+            s.connect(java.net.InetSocketAddress(host, port), 2_000)
+            "ok"
+        }
+    }.getOrElse { e -> "FAIL(${e.javaClass.simpleName})" }
+
+    /**
+     * Start [argv] and classify the outcome: started(exit=N) vs DENIED(msg).
+     * v0.1.31: optional [expect] marker — exit 0 alone is not proof the exec
+     * chain worked (a loader invoked with no arguments prints its usage banner
+     * and exits 1, which made the old probe line look like a failure while
+     * proving nothing). With [expect], "ok" requires the marker in stdout.
+     */
+    private fun probeExec(
+        argv: List<String>,
+        env: Map<String, String> = emptyMap(),
+        expect: String? = null,
+    ): String = runCatching {
         val pb = ProcessBuilder(argv)
         pb.environment().putAll(env)
         pb.redirectErrorStream(true)
@@ -1156,7 +1206,8 @@ class BootstrapManager(private val ctx: Context) {
         val out = runCatching { p.inputStream.bufferedReader().readText().take(140) }.getOrDefault("")
         val code = try { p.waitFor() } catch (_: Exception) { -1 }
         wd.interrupt()
-        if (code == 0) "ok" else "exit=$code ${out.replace('\n', ' ').trim()}"
+        val clean = out.replace('\n', ' ').trim()
+        if (code == 0 && (expect == null || clean.contains(expect))) "ok" else "exit=$code $clean"
     }.getOrElse { e -> "DENIED(${e.message?.take(90)})" }
 
     /** apk inside the bundled proot — guest DNS/certs/triggers are all native. */
@@ -1234,21 +1285,36 @@ class BootstrapManager(private val ctx: Context) {
     }
 
     /**
-     * Last-ditch DNS fallback for host-side apk: resolve the repository
-     * hostnames with Java (Android's resolver) and rewrite
+     * Last-ditch DNS fallback for apk (both inside proot and host-side): resolve
+     * the repository hostnames with Java (Android's resolver) and rewrite
      * etc/apk/repositories with IP literals over http:// (https to a bare IP
      * fails certificate hostname validation). Alpine mirrors serve plain http
      * and apk follows https redirects where issued.
+     *
+     * v0.1.31 CRITICAL FIX: the old version rewrote ONLY the lines already in
+     * the file — i.e. a SINGLE mirror (whichever the rotation had last seeded,
+     * typically leaseweb/NL). From mainland-China networks that one foreign
+     * host is routinely unreachable, and with one repository line apk has no
+     * fallback → the last-resort attempt died exactly like the others (the
+     * v0.1.30 field banner). We now emit IP-literal lines for EVERY known
+     * mirror (preferred/working mirror first — it already proved reachable by
+     * serving the rootfs tarball — then the built-in list, deduped), so apk's
+     * own per-repository fallback walks the whole set on this network-hostile
+     * path too.
      */
-    private fun rewriteRepositoriesToIps(dest: File): Boolean {
+    private fun rewriteRepositoriesToIps(dest: File, preferredBase: String? = null): Boolean {
         val rc = File(dest, "etc/apk/repositories")
         return runCatching {
-            val out = rc.readLines().filter { it.isNotBlank() }.mapNotNull { line ->
-                val u = runCatching { java.net.URL(line) }.getOrNull() ?: return@mapNotNull null
-                if (u.host.matches(Regex("[0-9.]+"))) return@mapNotNull line
+            val bases = LinkedHashSet<String>()
+            branchUrl(preferredBase)?.let { bases += it }
+            MIRRORS.forEach { m -> branchUrl(m)?.let { bases += it } }
+            val out = LinkedHashSet<String>()
+            for (b in bases) {
+                val u = runCatching { java.net.URL(b) }.getOrNull() ?: continue
                 val ip = runCatching { java.net.InetAddress.getByName(u.host).hostAddress }.getOrNull()
-                    ?: return@mapNotNull null
-                "http://$ip${u.path}"
+                    ?: continue
+                out += "http://$ip${u.path}/main"
+                out += "http://$ip${u.path}/community"
             }
             if (out.isEmpty()) return false
             replaceRegularFileWith(rc) { it.writeText(out.joinToString("\n") + "\n") }
@@ -1408,6 +1474,25 @@ class BootstrapManager(private val ctx: Context) {
         // We mkdir parents first and delete-and-recreate special/dangling
         // targets before writing.
         try {
+            // v0.1.31 CRITICAL FIX (root cause of the v0.1.30 field failure
+            // "shell components could not be installed via apk" on Android 12):
+            // net.dns1/net.dns2 were REMOVED in Android 8 (API 26) — on every
+            // modern device the property lookup below returns EMPTY, so the
+            // guest resolv.conf always fell back to 8.8.8.8/1.1.1.1, which
+            // carrier networks (mainland-China especially, but also several
+            // EU/mobile NATs) routinely block or poison on UDP/53. apk inside
+            // proot then could not resolve ANY mirror and both proot attempts
+            // died with DNS errors. Ask the ACTIVE Android network for its real
+            // DNS servers instead (LinkProperties, API 21+) — those are provably
+            // reachable from this device — and keep public resolvers only as
+            // extra fallbacks (musl honours MAXNS=3 nameservers).
+            val liveDns = runCatching {
+                val cm = ctx.getSystemService(android.content.Context.CONNECTIVITY_SERVICE)
+                    as? android.net.ConnectivityManager
+                val net = cm?.activeNetwork
+                net?.let { cm?.getLinkProperties(it) }?.dnsServers
+                    ?.mapNotNull { it.hostAddress }?.filter { it.isNotBlank() }?.distinct()
+            }.getOrNull().orEmpty()
             val propDns = try {
                 val cls = Class.forName("android.os.SystemProperties")
                 val get = cls.getMethod("get", String::class.java)
@@ -1416,7 +1501,9 @@ class BootstrapManager(private val ctx: Context) {
                     get.invoke(null, "net.dns2") as? String,
                 ).filter { it.isNotBlank() }.distinct()
             } catch (_: Exception) { emptyList() }
-            val servers = propDns.ifEmpty { listOf("8.8.8.8", "1.1.1.1") }
+            val servers = (liveDns + propDns +
+                listOf("8.8.8.8", "1.1.1.1", "223.5.5.5", "114.114.114.114"))
+                .distinct().take(3)
             val rc = File(dest, "etc/resolv.conf")
             runCatching { rc.parentFile?.mkdirs() }
             replaceRegularFileWith(rc) {

@@ -40,6 +40,12 @@ class MainActivity : AppCompatActivity() {
 
     private var termView: VtTerminalView? = null
 
+    /**
+     * v0.1.31: sessions already upgraded from raw pipes to a real PTY in-place
+     * (guards against repeat restarts if registry emissions race the flag).
+     */
+    private val ptyUpgradedSessions = mutableSetOf<Int>()
+
     private val notifPermission =
         registerForActivityResult(ActivityResultContracts.RequestPermission()) { /* fine if denied */ }
 
@@ -285,6 +291,26 @@ class MainActivity : AppCompatActivity() {
                             TerminalService.startSession(this@MainActivity, "bash -l")
                             return@collect
                         }
+                    // v0.1.31 BUGFIX (the persistent "terminal does not let me
+                    // type" after a successful Install): sessions created while
+                    // bootstrap was still running have NO PTY wrapper (script(1)
+                    // not installed yet) and run on raw pipes — no echo, no
+                    // prompt flush. Nothing ever upgraded them, so the keyboard
+                    // stayed dead until an app force-stop even though the apk
+                    // extras arrived minutes later. TtyWrap.setDistroCandidates()
+                    // re-arms the probe when the components appear; if a PTY
+                    // engine exists NOW and this session lacks it, restart the
+                    // child in-place (same session object + scrollback).
+                    if (!s.ptyWrapped) {
+                        // Re-arm the wrapper probe first: sessions born before
+                        // bootstrap cached a "no wrapper" verdict; setDistro-
+                        // Candidates resets it now that script(1) may exist.
+                        com.emux.terminal.TtyWrap.setDistroCandidates(this@MainActivity)
+                        if (com.emux.terminal.TtyWrap.available() && ptyUpgradedSessions.add(s.id)) {
+                            view.feed("\n[emux] PTY engine available now — restarting this shell with a real PTY…\n".toByteArray())
+                            s.restart()
+                        }
+                    }
                     if (view.session !== s) {
                         view.session = s
                         pumpOutput(view, s)

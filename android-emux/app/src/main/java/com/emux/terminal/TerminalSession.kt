@@ -114,7 +114,39 @@ class TerminalSession(
     /** v0.1.19: first stdout byte seen → UI can prove the pipe is alive. */
     val outputSeen = MutableStateFlow(false)
 
+    /**
+     * v0.1.31: true when THIS session's child actually runs under a PTY wrapper
+     * (script/busybox/distro-script). Sessions born before bootstrap finished
+     * have no wrapper (raw pipes → no echo → "cannot type"); MainActivity
+     * restarts them in-place once [TtyWrap] resolves a real engine.
+     */
+    @Volatile var ptyWrapped: Boolean = false
+        private set
+
+    /**
+     * v0.1.31: generation guard so a superseded child process can never publish
+     * DEAD (which would trigger the service's respawn watcher and double-spawn
+     * shells) after [restart] replaced it.
+     */
+    @Volatile private var generation = 0
+
+    /**
+     * v0.1.31 BUGFIX ("terminal still cannot type AFTER Install succeeded"):
+     * replace the child process in-place — same TerminalSession object, same
+     * scrollback channel, same attached view — so a session that started on
+     * raw pipes is seamlessly upgraded the moment the PTY engine (util-linux
+     * script(1) installed by apk) appears.
+     */
+    fun restart() {
+        generation++
+        runCatching { process?.destroy() }
+        runCatching { job?.cancel() }
+        state.value = State.STARTING
+        start()
+    }
+
     fun start() {
+        val gen = generation
         job = scope.launch {
             try {
                 val env = FsLayout.sessionEnv(ctx).toMutableMap()
@@ -152,7 +184,7 @@ class TerminalSession(
                 // allocates a PTY for the child and copies both directions over
                 // our pipes. If no script(1) exists on the ROM we fall back to an
                 // unbuffered stdio preload, and finally to the raw pipe.
-                TtyWrap.apply(pb)
+                ptyWrapped = TtyWrap.apply(pb)
 
                 process = pb.start().also { p ->
                     state.value = State.RUNNING
@@ -170,6 +202,10 @@ class TerminalSession(
                     touchWake()
                     scrollback.send(buf.copyOf(n))
                 }
+                // v0.1.31: a restart() superseded this child while we were blocked
+                // in read() — exit silently so we never publish DEAD (which would
+                // trip the service respawn watcher and double-spawn shells).
+                if (gen != generation) return@launch
                 val code = process!!.waitFor()
                 exitCode = code
                 exitedCleanly = code == 0
@@ -177,6 +213,7 @@ class TerminalSession(
                 releaseWake()
                 // notify listeners via flow collectors (UI shows "[process exited $code]")
             } catch (_: Exception) {
+                if (gen != generation) return@launch
                 state.value = State.DEAD
                 releaseWake()
             }
@@ -193,6 +230,18 @@ class TerminalSession(
         // Apostrophes are still normalized to U+02BC so the quoting chain
         // (TtyWrap single-quoting, `export EMUX_ARGV1='…'`) can never break.
         val shellCmd = cmd.replace("'", "ʼ")
+        // v0.1.31 DEGRADED MODE ("cannot type" insurance): when NO PTY wrapper
+        // exists anywhere on this ROM (bootstrap apk extras still missing, or
+        // exec of app-data denied), a non-interactive `bash -l` over raw pipes
+        // neither echoes keystrokes nor flushes prompts — the shell looks dead.
+        // Force INTERACTIVE shells instead: prompts go to stderr (unbuffered,
+        // merged into our stream) and stdout is flushed around each command, so
+        // combined with VtTerminalView's local echo (ptyWrapped==false) typing
+        // becomes visible and commands actually run. Belt & braces behind
+        // MainActivity's in-place restart once the PTY engine appears.
+        val effectiveCmd = if (!TtyWrap.available() && shellCmd == "bash -l") {
+            if (File(rootfsFile, "bin/bash").isFile) "bash -i -l" else "sh -i -l"
+        } else shellCmd
         val init = File(rootfsFile, "emux-init.sh")
         // v0.1.23 BUGFIX: the old gate was `init.isFile` ONLY — pointing at the
         // copy extracted INTO the rootfs by tar. On a partially-extracted /
@@ -257,7 +306,7 @@ class TerminalSession(
             // construction, so this layer survives sh → su → sh intact).
             // Helper scripts now live in /usr/local/bin INSIDE the rootfs
             // (bootstrap v0.1.28), which the chroot login shell's PATH covers.
-            val suSafe = shellCmd.replace("\\", "\\\\").replace("\"", "\\\"").replace("$", "\\$").replace("`", "\\`")
+            val suSafe = effectiveCmd.replace("\\", "\\\\").replace("\"", "\\\"").replace("$", "\\$").replace("`", "\\`")
             ProcessBuilder("/system/bin/sh", "-c",
                 "su -c 'chroot $rootfs /bin/sh -l -c \"$suSafe\"'")
         } else if (haveLauncher) {
@@ -343,14 +392,14 @@ class TerminalSession(
                 // launcher inherits.
                 ProcessBuilder(
                     "/system/bin/sh", "-c",
-                    "export EMUX_ARGV1='$shellCmd'\n$safeBody",
+                    "export EMUX_ARGV1='$effectiveCmd'\n$safeBody",
                 )
             } else if (haveLauncher) {
                 // Fallback (body unreadable or contains apostrophes): direct
                 // invocation — works on ROMs without the noexec mount, fails
                 // loudly on ones that have it (visible via the notice below).
                 val launcher = if (binMirror.isFile && runCatching { binMirror.length() > 40 }.getOrDefault(false)) binMirror else init
-                ProcessBuilder("/system/bin/sh", launcher.absolutePath, shellCmd)
+                ProcessBuilder("/system/bin/sh", launcher.absolutePath, effectiveCmd)
             } else {
                 ProcessBuilder("/system/bin/sh", "-c",
                     "echo '[emux] rootfs launcher missing — tap Install to finish bootstrap'; exec /system/bin/sh -l")
@@ -688,11 +737,16 @@ object TtyWrap {
     /** Public liveness check for callers/UI diagnostics. */
     fun available(): Boolean = probe() != null
 
-    /** Rewrite pb's command so the child runs under a PTY. No-op if unavailable. */
-    fun apply(pb: ProcessBuilder) {
-        val prefix = probe() ?: return
+    /**
+     * Rewrite pb's command so the child runs under a PTY. No-op if unavailable.
+     * v0.1.31: returns whether the wrapping actually happened so the session can
+     * record [TerminalSession.ptyWrapped] (drives the degraded local-echo mode
+     * and the post-bootstrap in-place restart).
+     */
+    fun apply(pb: ProcessBuilder): Boolean {
+        val prefix = probe() ?: return false
         val base = pb.command()
-        if (base.isEmpty()) return
+        if (base.isEmpty()) return false
         // v0.1.20 BUGFIX: build argv per the PROBED dialect instead of the old
         // one-size-fits-all `-qfc` form that neither toybox nor busybox accepted
         // at runtime. Each argv entry is single-quoted for the wrapper's inner
@@ -716,5 +770,6 @@ object TtyWrap {
                 Dialect.BBSTYLE -> prefix + listOf("-q", "-c", inner, "/dev/null")
             },
         )
+        return true
     }
 }
