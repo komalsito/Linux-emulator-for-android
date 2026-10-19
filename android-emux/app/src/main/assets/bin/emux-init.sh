@@ -55,11 +55,11 @@ if [ -x "$PROOT" ]; then
   export HOME LD_LIBRARY_PATH
   if [ "$IS_LOGIN" = 1 ]; then
     if [ -f "$ROOT/bin/bash" ]; then
-      exec "$PROOT" -0 -k -r "$ROOT" -b /dev -b /proc -b /sys -w /root /bin/bash -l
+      exec "$PROOT" -0 -k -r "$ROOT" -b /dev -b /proc -b /sys -b "$TMPDIR" -w /root /bin/bash -l
     fi
-    exec "$PROOT" -0 -k -r "$ROOT" -b /dev -b /proc -b /sys -w /root /bin/sh -l
+    exec "$PROOT" -0 -k -r "$ROOT" -b /dev -b /proc -b /sys -b "$TMPDIR" -w /root /bin/sh -l
   fi
-  exec "$PROOT" -0 -k -r "$ROOT" -b /dev -b /proc -b /sys -w /root /bin/sh -l -c "$CMD"
+  exec "$PROOT" -0 -k -r "$ROOT" -b /dev -b /proc -b /sys -b "$TMPDIR" -w /root /bin/sh -l -c "$CMD"
 fi
 
 # --- Path 2: musl loader exec (no proot available) ---------------------------

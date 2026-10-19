@@ -1143,9 +1143,15 @@ class BootstrapManager(private val ctx: Context) {
             sb.append(if (!proot.isFile) "proot=missing\n"
                       else "exec(proot)=${probeExec(listOf(proot.absolutePath, "--version"), nb)}\n")
             if (proot.isFile) {
+                // v0.1.34: the micro-run must mirror runApkProot's environment
+                // (writable TMPDIR + same-path bind) or it reproduces the old
+                // false "ptrace blocked" verdict caused by proot's compiled-in
+                // Termux temp dir being uncreatable here.
+                val ht = prootTmp(ctx)
                 sb.append("proot-ptrace=${probeExec(
-                    listOf(proot.absolutePath, "-0", "-r", dest.absolutePath, "-b", "/dev", "/bin/true"),
-                    nb)}\n")
+                    listOf(proot.absolutePath, "-0", "-r", dest.absolutePath,
+                        "-b", "/dev", "-b", ht.absolutePath, "/bin/true"),
+                    nb + ("TMPDIR" to ht.absolutePath))}\n")
             }
             sb.append("dns(java)=${runCatching {
                 java.net.InetAddress.getByName("mirrors.tuna.tsinghua.edu.cn").hostAddress
@@ -1203,7 +1209,7 @@ class BootstrapManager(private val ctx: Context) {
         val p = pb.start()
         val wd = Thread { try { Thread.sleep(8_000); p.destroy() } catch (_: Exception) {} }.apply { isDaemon = true }
         wd.start()
-        val out = runCatching { p.inputStream.bufferedReader().readText().take(140) }.getOrDefault("")
+        val out = runCatching { p.inputStream.bufferedReader().readText().take(400) }.getOrDefault("")
         val code = try { p.waitFor() } catch (_: Exception) { -1 }
         wd.interrupt()
         val clean = out.replace('\n', ' ').trim()
@@ -1214,20 +1220,39 @@ class BootstrapManager(private val ctx: Context) {
     private fun runApkProot(
         proot: File, dest: File, pkgs: List<String>, phase: String, report: (String, Int) -> Unit,
     ): ApkRun {
+        // v0.1.34 CRITICAL FIX (field probe, Android 12 MRDI-W09): proot is a
+        // Termux build whose COMPILED-IN temp dir is /data/data/com.termux/
+        // files/usr/tmp — nonexistent and uncreatable on any non-Termux device.
+        // With no writable TMPDIR proot's execve machinery dies with
+        // "execve(/sbin/apk): Permission denied" (plus the f2fs-probe warning).
+        // The old env TMPDIR=/tmp was equally broken: / is read-only for app
+        // processes on Android. Give proot a real host-writable temp dir and
+        // bind it at the SAME path inside the guest so guest apk's $TMPDIR use
+        // resolves too.
+        val hostTmp = prootTmp(ctx)
         val argv = listOf(
             proot.absolutePath, "-0", "-r", dest.absolutePath,
-            "-b", "/dev", "-b", "/proc", "-b", "/sys", "-w", "/",
+            "-b", "/dev", "-b", "/proc", "-b", "/sys", "-b", hostTmp.absolutePath,
+            "-w", "/",
             "/sbin/apk", "add", "--arch", archName(), "--no-cache",
         ) + pkgs
         val env = mapOf(
             "LD_LIBRARY_PATH" to FsLayout.nativeBridgeDir(ctx).absolutePath,
-            "TMPDIR" to "/tmp",
+            "TMPDIR" to hostTmp.absolutePath,
             "HOME" to "/root",
             "PATH" to "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
             "LANG" to "C",
         )
         return runApkProcess(argv, env, pkgs, phase, report)
     }
+
+    /**
+     * v0.1.34: host-writable scratch dir for the bundled proot (see runApkProot).
+     * cacheDir-based, always writable by us, and proot's temp files are pure
+     * scratch, so OS cleanup is harmless.
+     */
+    internal fun prootTmp(ctx: android.content.Context): File =
+        File(FsLayout.safeTmp(ctx), "proot").apply { mkdirs() }
 
     /** apk host-side via the musl loader (fallback; Android has no /etc/resolv.conf). */
     private fun runApkLoader(
