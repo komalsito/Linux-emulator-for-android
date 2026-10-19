@@ -79,3 +79,8 @@ w: file:///workspace/android-emux/app/src/main/java/com/emux/x11/X11Client.kt:14
 
 BUILD SUCCESSFUL in 3m 20s
 38 actionable tasks: 7 executed, 31 up-to-date
+
+=== v0.1.26 build (gradle --no-daemon assembleDebug) ===
+BUILD SUCCESSFUL in 1m14s, 0 errors. versionCode 26 / versionName 0.1.26.
+ENV_VERSION 9->10 forces re-bootstrap so patched emux-capture (octal-printf binary header + rootfs-path tool resolution) is reinstalled on device.
+APK md5: 1ed18ff876ffdd17f1bdca35fe803145 (6,502,683 bytes). Verified inside APK: manifest 0.1.26, assets/bin/emux-capture contains u16le octal fix, dex has verifyCtty+showSoftInput.

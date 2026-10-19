@@ -14,7 +14,7 @@ import java.io.File
  *   cache/tmp        -> $TMPDIR (cleared by OS on demand = friendly to storage)
  */
 object FsLayout {
-    const val ENV_VERSION = 9   // v0.1.25: broken verifyCtty quoting killed ALL PTY wrappers + focus never restored on tab switch + desktop diagnostics
+    const val ENV_VERSION = 10  // v0.1.26: emux-capture octal-printf binary header fix + rootfs-path tool resolution
 
     fun root(ctx: Context): File = ctx.filesDir
     fun usr(ctx: Context): File = File(root(ctx), "usr")
