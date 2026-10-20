@@ -619,6 +619,10 @@ class VtTerminalView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attr
         return super.onKeyDown(keyCode, event)
     }
 
+    /** v0.1.40: renderer state for field diagnostics (fed into the stream dbg line). */
+    fun dbgState(): String =
+        "cur=($curX,$curY) grid=${rows}x${cols} pty=${session?.ptyWrapped}"
+
     /** Extra-keys bar entry point (ESC, CTRL, ALT, arrows sent as raw bytes). */
     fun sendBytes(b: ByteArray) { session?.write(b) }
 

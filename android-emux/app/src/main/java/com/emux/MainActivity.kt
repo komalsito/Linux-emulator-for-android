@@ -451,6 +451,24 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun pumpOutput(view: VtTerminalView, s: com.emux.terminal.TerminalSession) {
+        // v0.1.40 FIELD DIAGNOSTIC: one-shot dump of the child's raw stream head
+        // (escaped) + renderer cursor/grid state, so a single screenshot shows
+        // exactly what the session sent and where the cursor ended up when the
+        // screen looks wrong.
+        lifecycleScope.launch {
+            try {
+                var waited = 0
+                while (currentCoroutineContext().isActive && !s.outputSeen.value && waited < 30_000) {
+                    kotlinx.coroutines.delay(250); waited += 250
+                }
+                if (s.outputSeen.value) {
+                    kotlinx.coroutines.delay(1500)
+                    val head = synchronized(s.streamHead) { s.streamHead.toString() }
+                    view.feed(("\r\n[emux] dbg stream: " + head.take(300) +
+                        "\r\n[emux] dbg view: " + view.dbgState() + "\r\n").toByteArray())
+                }
+            } catch (_: Exception) { }
+        }
         // NOTE: previously this collected `scrollback` — a Channel that *closes* when
         // the session dies. On a dead/closed channel `for (chunk in ch)` just falls
         // through immediately, so nothing was ever fed to the terminal and the screen
@@ -633,6 +651,14 @@ class MainActivity : AppCompatActivity() {
                     } else if (step.isNotEmpty()) {
                         b.bootstrapLabel.text = step
                         b.bootstrapLabel.visibility = android.view.View.VISIBLE
+                        // v0.1.40 BUGFIX: worker-driven successes only arrive as
+                        // progress frames here; the bootstrap pane then stayed
+                        // visible forever ("Bootstrapped" + full bar over a
+                        // working terminal). Hide it and attach the session.
+                        if (step == "Bootstrapped" || pct == 100) {
+                            hideBootstrapUi()
+                            ensureSessionAttached()
+                        }
                         b.bootstrapBar.isIndeterminate = pct < 0
                         if (pct >= 0) b.bootstrapBar.progress = pct
                     }

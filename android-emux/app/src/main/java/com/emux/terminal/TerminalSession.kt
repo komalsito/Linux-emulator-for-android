@@ -114,6 +114,9 @@ class TerminalSession(
     /** v0.1.19: first stdout byte seen → UI can prove the pipe is alive. */
     val outputSeen = MutableStateFlow(false)
 
+    /** v0.1.40: escaped head of the raw child stream (diagnostics). */
+    val streamHead = StringBuilder()
+
     /**
      * v0.1.31: true when THIS session's child actually runs under a PTY wrapper
      * (script/busybox/distro-script). Sessions born before bootstrap finished
@@ -200,6 +203,17 @@ class TerminalSession(
                 while (true) {
                     val n = ins.read(buf)
                     if (n <= 0) break
+                    // v0.1.40: keep an escaped head of the raw stream so a field
+                    // screenshot can show WHAT the child actually sent when the
+                    // screen misbehaves (see MainActivity stream dbg feed).
+                    synchronized(streamHead) {
+                        if (streamHead.length < 400) {
+                            for (i in 0 until n.coerceAtMost(400 - streamHead.length)) {
+                                val v = buf[i].toInt() and 0xFF
+                                streamHead.append(if (v in 0x20..0x7E) v.toChar() else "<%02x>".format(v))
+                            }
+                        }
+                    }
                     outputSeen.value = true   // v0.1.19: liveness proof for the UI
                     lastActivityTs = System.currentTimeMillis()
                     touchWake()
