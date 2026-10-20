@@ -16,7 +16,11 @@ if [ -n "$NB" ] && [ -x "$NB/proot" ]; then
   LD_LIBRARY_PATH="$NB" "$NB/proot" --version >/dev/null 2>&1 && echo PROOT_OK || echo PROBE_PROOT_FAIL
   # ptrace probe: the smallest real proot run (fails with EPERM on ROMs that
   # block app ptrace, e.g. some HarmonyOS/OEM hardening)
-  LD_LIBRARY_PATH="$NB" "$NB/proot" -0 -r "$ROOT" -b /dev /bin/true >/dev/null 2>&1 \
+  # v0.1.44: the micro-run must carry the same env as real proot runs
+  # (loader + writable tmp), else it reports a false PROOT_PTRACE_DENIED.
+  mkdir -p "$ROOT/tmp" 2>/dev/null
+  LD_LIBRARY_PATH="$NB" PROOT_TMP_DIR="$ROOT/tmp" PROOT_LOADER="$NB/loader" \
+    "$NB/proot" -0 -r "$ROOT" -b /dev /bin/true >/dev/null 2>&1 \
     && echo PROOT_PTRACE_OK || echo PROOT_PTRACE_DENIED
 else
   echo PROBE_PROOT_MISSING

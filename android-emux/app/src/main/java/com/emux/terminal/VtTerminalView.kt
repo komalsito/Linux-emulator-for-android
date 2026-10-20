@@ -645,17 +645,18 @@ class VtTerminalView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attr
      */
     private fun localEcho(bytes: ByteArray) {
         if (session?.ptyWrapped != false) return
-        val out = ByteArray(bytes.size)
+        val out = ByteArray(bytes.size * 3)
         var n = 0
         for (b in bytes) {
             val v = b.toInt() and 0xFF
-            val mapped = when {
-                v == 0x7F -> 0x08                 // DEL → visual backspace
-                v == '\r'.code -> '\n'.code       // CR → newline on screen
-                v >= 0x20 -> v                    // printable only
-                else -> -1                        // other control bytes: silent
+            when {
+                // v0.1.44: visual erase (back-space, space, back-space) — a bare
+                // cursor-left left the deleted glyph on screen ("cannot delete
+                // the text I typed" in degraded mode).
+                v == 0x7F -> { out[n++] = 0x08; out[n++] = 0x20; out[n++] = 0x08 }
+                v == '\r'.code -> out[n++] = '\n'.code.toByte()
+                v >= 0x20 -> out[n++] = v.toByte()
             }
-            if (mapped >= 0) out[n++] = mapped.toByte()
         }
         if (n > 0) feed(out.copyOf(n))
     }

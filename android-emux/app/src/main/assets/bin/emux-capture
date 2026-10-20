@@ -33,7 +33,9 @@ ROOT="${EMUX_ROOTFS:-${EMUX_ROOT:-}}"
 if [ -n "$ROOT" ] && [ -d "$ROOT/lib" ]; then
   NB="${EMUX_NATIVE_BRIDGE:-}"
   if [ -x "$NB/proot" ]; then
-    LD_LIBRARY_PATH="$NB" HOME=/root exec "$NB/proot" -0 -r "$ROOT" \
+    mkdir -p "$ROOT/tmp" 2>/dev/null
+    LD_LIBRARY_PATH="$NB" HOME=/root PROOT_TMP_DIR="$ROOT/tmp" \
+    PROOT_LOADER="$NB/loader" exec "$NB/proot" -0 -r "$ROOT" \
       -b /dev -b /proc -b /sys -w /root \
       /bin/sh -l -c "unset EMUX_ROOTFS EMUX_ROOT EMUX_NATIVE_BRIDGE; exec /usr/local/bin/emux-capture $HOST:$PORT"
   fi

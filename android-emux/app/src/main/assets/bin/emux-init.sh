@@ -85,16 +85,16 @@ if [ -x "$PROOT" ]; then
       # command of a non-interactive shell gets stdin=/dev/null (POSIX), so the
       # watcher cannot discover the pts by itself on every platform.
       if [ -f "$ROOT/bin/bash" ]; then
-        exec "$PROOT" -0 -k -r "$ROOT" -b /dev -b /proc -b /sys -w /root /usr/bin/script -qfc "/usr/local/bin/emux-winsize $(tty) >/dev/null 2>&1 & exec /bin/bash -l" /dev/null
+        exec "$PROOT" -0 -r "$ROOT" -b /dev -b /proc -b /sys -w /root /usr/bin/script -qfc "/usr/local/bin/emux-winsize $(tty) >/dev/null 2>&1 & exec /bin/bash -l" /dev/null
       fi
-      exec "$PROOT" -0 -k -r "$ROOT" -b /dev -b /proc -b /sys -w /root /usr/bin/script -qfc "/usr/local/bin/emux-winsize $(tty) >/dev/null 2>&1 & exec /bin/sh -l" /dev/null
+      exec "$PROOT" -0 -r "$ROOT" -b /dev -b /proc -b /sys -w /root /usr/bin/script -qfc "/usr/local/bin/emux-winsize $(tty) >/dev/null 2>&1 & exec /bin/sh -l" /dev/null
     fi
     if [ -f "$ROOT/bin/bash" ]; then
-      exec "$PROOT" -0 -k -r "$ROOT" -b /dev -b /proc -b /sys -w /root /bin/bash -l
+      exec "$PROOT" -0 -r "$ROOT" -b /dev -b /proc -b /sys -w /root /bin/bash -l
     fi
-    exec "$PROOT" -0 -k -r "$ROOT" -b /dev -b /proc -b /sys -w /root /bin/sh -l
+    exec "$PROOT" -0 -r "$ROOT" -b /dev -b /proc -b /sys -w /root /bin/sh -l
   fi
-  exec "$PROOT" -0 -k -r "$ROOT" -b /dev -b /proc -b /sys -w /root /bin/sh -l -c "$CMD"
+  exec "$PROOT" -0 -r "$ROOT" -b /dev -b /proc -b /sys -w /root /bin/sh -l -c "$CMD"
 fi
 
 # --- Path 2: musl loader exec (no proot available) ---------------------------
