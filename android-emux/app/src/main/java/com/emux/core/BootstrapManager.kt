@@ -962,7 +962,14 @@ class BootstrapManager(private val ctx: Context) {
     private fun installNativeBridge() {
         val abi = FsLayout.nativeBridgeAssetAbi()
         val out = FsLayout.nativeBridgeDir(ctx)
-        for (name in listOf("proot", "libtalloc.so.2", "libandroid-shmem.so")) {
+        // v0.1.36 CRITICAL ADDITION: the Termux proot build execs guest binaries
+        // through a companion LOADER binary whose path is compiled in as
+        // /data/data/com.termux/files/usr/libexec/proot/loader — unreachable on
+        // any non-Termux device, which made every guest execve die with
+        // "Permission denied / the loader was not found". proot honors
+        // PROOT_LOADER/PROOT_LOADER_32 overrides, so we ship the matching loader
+        // binaries (same package, same version) and point proot at them.
+        for (name in listOf("proot", "libtalloc.so.2", "libandroid-shmem.so", "loader", "loader32")) {
             runCatching {
                 val bytes = ctx.assets.open("proot/$abi/$name").use { readBounded(it, 8L * 1024 * 1024) }
                 val f = File(out, name)
@@ -1139,7 +1146,15 @@ class BootstrapManager(private val ctx: Context) {
                           File(dest, "bin/busybox").absolutePath, "echo", "LOADER_EXEC_OK",
                       ), expect = "LOADER_EXEC_OK")}\n")
             val proot = FsLayout.prootBin(ctx)
-            val nb = mapOf("LD_LIBRARY_PATH" to FsLayout.nativeBridgeDir(ctx).absolutePath)
+            // v0.1.36: probes must mirror runApkProot's env (PROOT_TMP_DIR +
+            // PROOT_LOADER) or they report false failures.
+            val nbDir = FsLayout.nativeBridgeDir(ctx)
+            val nb = mutableMapOf(
+                "LD_LIBRARY_PATH" to nbDir.absolutePath,
+                "PROOT_LOADER" to File(nbDir, "loader").absolutePath,
+            )
+            val l32p = File(nbDir, "loader32")
+            if (l32p.isFile) nb["PROOT_LOADER_32"] = l32p.absolutePath
             sb.append(if (!proot.isFile) "proot=missing\n"
                       else "exec(proot)=${probeExec(listOf(proot.absolutePath, "--version"), nb)}\n")
             if (proot.isFile) {
@@ -1233,19 +1248,25 @@ class BootstrapManager(private val ctx: Context) {
         // path … No such file or directory") because Android cache paths do
         // not exist inside the guest — so no extra bind at all now.
         val hostTmp = prootTmp(ctx)
+        val nb = FsLayout.nativeBridgeDir(ctx)
         val argv = listOf(
             proot.absolutePath, "-0", "-r", dest.absolutePath,
             "-b", "/dev", "-b", "/proc", "-b", "/sys", "-w", "/",
             "/sbin/apk", "add", "--arch", archName(), "--no-cache",
         ) + pkgs
-        val env = mapOf(
-            "LD_LIBRARY_PATH" to FsLayout.nativeBridgeDir(ctx).absolutePath,
+        val env = mutableMapOf(
+            "LD_LIBRARY_PATH" to nb.absolutePath,
             "PROOT_TMP_DIR" to hostTmp.absolutePath,
             "TMPDIR" to "/tmp",
             "HOME" to "/root",
             "PATH" to "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
             "LANG" to "C",
+            // v0.1.36: point proot at the shipped companion loader (see
+            // installNativeBridge) — without it every guest execve fails.
+            "PROOT_LOADER" to File(nb, "loader").absolutePath,
         )
+        val l32 = File(nb, "loader32")
+        if (l32.isFile) env["PROOT_LOADER_32"] = l32.absolutePath
         return runApkProcess(argv, env, pkgs, phase, report)
     }
 

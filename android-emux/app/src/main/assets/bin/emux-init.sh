@@ -59,7 +59,15 @@ if [ -x "$PROOT" ]; then
   PROOT_TMP_DIR="$TMPDIR"
   mkdir -p "$PROOT_TMP_DIR" 2>/dev/null
   TMPDIR=/tmp
-  export HOME LD_LIBRARY_PATH PROOT_TMP_DIR TMPDIR
+  # v0.1.36: the Termux proot build execs guests via a companion loader whose
+  # compiled-in path (/data/data/com.termux/...) cannot exist here; proot
+  # honors PROOT_LOADER/_32 overrides pointing at our shipped copies.
+  PROOT_LOADER="$NB/loader"
+  if [ -f "$NB/loader32" ]; then
+    PROOT_LOADER_32="$NB/loader32"
+    export PROOT_LOADER_32
+  fi
+  export HOME LD_LIBRARY_PATH PROOT_TMP_DIR TMPDIR PROOT_LOADER
   if [ "$IS_LOGIN" = 1 ]; then
     if [ -f "$ROOT/bin/bash" ]; then
       exec "$PROOT" -0 -k -r "$ROOT" -b /dev -b /proc -b /sys -w /root /bin/bash -l

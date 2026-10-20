@@ -10,3 +10,7 @@ files/native-bridge/ (they use DT_RUNPATH, so LD_LIBRARY_PATH redirects
 their library search — verified per-ABI). Full license texts are available
 from the source URLs above; binaries are redistributed unmodified as
  permitted by each license.
+
+  proot loader/loader32 5.1.107.98 (same package, libexec/proot/loader[32])
+    GPL-2.0-or-later — companion stub proot uses to exec guest binaries;
+    redirected at runtime via PROOT_LOADER / PROOT_LOADER_32 (v0.1.36).
