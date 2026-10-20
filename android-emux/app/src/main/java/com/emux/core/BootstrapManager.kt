@@ -1087,6 +1087,26 @@ class BootstrapManager(private val ctx: Context) {
                 "--- device probe ---\n$probe--- apk output ---\n${tail.take(600)}"
         }
 
+        // v0.1.46: user-facing convenience packages, best effort (never fatal).
+        // sudo (Alpine community) for the familiar privilege workflow — inside
+        // proot we are already root (fake-root), and the shipped sudoers covers
+        // root; apt (Alpine community, APT 2.x built for musl) because users
+        // coming from Debian-style distros expect it. NOTE: on Alpine, `apk`
+        // remains THE system package manager; `apt` manages its own lists and
+        // cannot replace apk for system components.
+        if (ok) {
+            val extras = listOf("sudo", "apt")
+            report("Installing user extras (sudo, apt)", -1)
+            val r = when {
+                proot.isFile -> runApkProot(proot, dest, extras, "Installing user extras", report)
+                loader != null -> runApkLoader(loader, dest, extras, "Installing user extras", report)
+                else -> null
+            }
+            if (r == null || !r.ok) {
+                com.emux.EmuXLog.e("user extras sudo/apt failed (non-fatal): ${r?.tail}")
+            }
+        }
+
         val desktopWanted = runCatching {
             androidx.preference.PreferenceManager.getDefaultSharedPreferences(ctx)
                 .getBoolean("desktop_components", true)

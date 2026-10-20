@@ -28,6 +28,17 @@ the rootfs automatically (banner + Install button; runs once — the completion
 marker `.env_version` plus a fixed rootfs-completeness probe make re-launches
 instant, and app updates re-seed helpers/components WITHOUT re-downloading).
 
+## Package management inside the environment
+
+The distro is **Alpine**: `apk` is the system package manager
+(`apk add <pkg>`). Since v0.1.46 the bootstrap also installs **sudo** and
+**apt** (Alpine community packages) for familiarity: inside proot you are
+fake-root, `sudo` works out of the box, and `apt` is available as a
+Debian-style frontend — but note it manages its own lists and cannot replace
+`apk` for system components. See `android-emux/docs/ACTION_PLAN.md` for the
+full handoff/action-plan document (architecture invariants, device
+landmines, sandbox build recipe, open issues).
+
 ## Build from source
 
 ```bash
