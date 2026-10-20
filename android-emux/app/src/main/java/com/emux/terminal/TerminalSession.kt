@@ -138,6 +138,16 @@ class TerminalSession(
     @Volatile private var guestPty = false
 
     /**
+     * v0.1.47 MULTI-DISTRO: absolute path of the rootfs this session's CURRENT
+     * child was launched against. MainActivity compares it with the active
+     * distro after a successful install/switch and restarts stale sessions
+     * in-place (same object + scrollback) so the new distro takes effect
+     * without a force-stop.
+     */
+    @Volatile var launchedRootfs: String? = null
+        private set
+
+    /**
      * v0.1.31: generation guard so a superseded child process can never publish
      * DEAD (which would trigger the service's respawn watcher and double-spawn
      * shells) after [restart] replaced it.
@@ -270,6 +280,7 @@ class TerminalSession(
     private fun buildProcess(cmd: String): ProcessBuilder {
         val rootfsFile = FsLayout.linuxRoot(ctx)
         val rootfs = rootfsFile.absolutePath
+        launchedRootfs = rootfs   // v0.1.47: restart-on-switch tracking
         // v0.1.28: the bootstrap installs real bash into the rootfs (apk
         // extras), so "bash -l" is honored as-is now — the old forced rewrite
         // to /bin/sh was a workaround for minirootfs shipping ash only.

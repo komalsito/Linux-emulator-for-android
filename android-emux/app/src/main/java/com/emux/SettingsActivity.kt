@@ -98,6 +98,7 @@ class SettingsActivity : AppCompatActivity() {
                     }
                     val sp = androidx.preference.PreferenceManager
                         .getDefaultSharedPreferences(this@SettingsActivity)
+                    row("Linux distribution", sp.getString("distro", "alpine") ?: "alpine")
                     row("Window manager", sp.getString("wm", "openbox") ?: "openbox")
                     row("Root acceleration", if (sp.getBoolean("root_accel", true)) "ON" else "OFF")
                     row("Keep-awake burst", if (sp.getBoolean("keepawake_burst", true)) "ON" else "OFF")
@@ -125,6 +126,19 @@ class SettingsActivity : AppCompatActivity() {
             val ctx = requireContext()
             val screen = androidx.preference.PreferenceManager(ctx)
                 .createPreferenceScreen(ctx)
+            // v0.1.47: distro selector (mirrors res/xml/preferences.xml)
+            screen.addPreference(androidx.preference.ListPreference(ctx).apply {
+                key = "distro"; title = "Linux distribution"
+                summary = "Distro to install/run; they coexist on disk and the selected one is active"
+                entries = arrayOf(
+                    "Alpine 3.20 — tiny & fast (~4 MB, apk)",
+                    "Debian 12 bookworm — full-fledged (~40 MB, apt)",
+                    "Ubuntu 24.04 LTS — most software (~61 MB, apt)",
+                    "Arch Linux ARM — rolling release (~138 MB, pacman)",
+                    "Fedora 40 — bleeding-edge (~30 MB, dnf)")
+                entryValues = arrayOf("alpine", "debian", "ubuntu", "arch", "fedora")
+                setDefaultValue("alpine")
+            })
             screen.addPreference(androidx.preference.ListPreference(ctx).apply {
                 key = "wm"; title = "Window manager"
                 entries = arrayOf("Openbox", "IceWM", "Fluxbox", "Awesome")
@@ -143,13 +157,13 @@ class SettingsActivity : AppCompatActivity() {
                 setDefaultValue(true)
             })
             screen.addPreference(androidx.preference.EditTextPreference(ctx).apply {
-                key = "mirror"; title = "Alpine mirror base URL"
+                key = "mirror"; title = "Mirror / custom rootfs URL"
                 setDefaultValue(com.emux.core.BootstrapManager.MIRROR)
                 // dialogTitle must be set explicitly: EditTextPreference's default
                 // title resolution walks the preference *parent* chain, and a
                 // programmatically created root PreferenceScreen has no context
                 // theme attached — leaving it null used to crash the dialog open.
-                dialogTitle = "Alpine mirror base URL"
+                dialogTitle = "Mirror / custom rootfs URL"
                 text = preferenceManager.sharedPreferences
                     ?.getString("mirror", com.emux.core.BootstrapManager.MIRROR) ?: com.emux.core.BootstrapManager.MIRROR
             })

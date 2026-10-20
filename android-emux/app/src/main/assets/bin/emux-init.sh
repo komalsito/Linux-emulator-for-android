@@ -16,6 +16,14 @@
 ROOT="${EMUX_ROOTFS:-${EMUX_ROOT:-$HOME/../linuxroot}}"
 [ -d "$ROOT/etc" ] || ROOT="$HOME/linuxroot"
 [ -d "$ROOT/etc" ] || ROOT="$(dirname "$HOME")/linuxroot"
+# v0.1.47 multi-distro: the SELECTED distro may not be installed yet (pending
+# switch). Fall back to ANY installed distro (files/distros/*) so the terminal
+# keeps working meanwhile; the main screen prompts the install separately.
+if [ ! -d "$ROOT/etc" ]; then
+  for CAND in "$(dirname "$ROOT")"/*; do
+    [ -d "$CAND/etc" ] && { ROOT="$CAND"; break; }
+  done
+fi
 export TMPDIR="${TMPDIR:-$ROOT/tmp}"
 mkdir -p "$ROOT/tmp" 2>/dev/null
 CMD="${EMUX_ARGV1:-$*}"
@@ -97,27 +105,37 @@ if [ -x "$PROOT" ]; then
   exec "$PROOT" -0 -r "$ROOT" -b /dev -b /proc -b /sys -w /root /bin/sh -l -c "$CMD"
 fi
 
-# --- Path 2: musl loader exec (no proot available) ---------------------------
+# --- Path 2: distro loader exec (no proot available) --------------------------
 # v0.1.28 FIXES: (a) the old gate tested [ -x "$ROOT/bin/sh" ] - but bin/sh is
 # a symlink to /bin/busybox (ABSOLUTE), dangling on the Android host, so the
 # whole distro branch was dead code on every device; gate on the real busybox
 # file instead. (b) the loader search only covered aarch64 - now it globs every
 # arch. (c) bash is preferred when the bootstrap extras installed it.
+# v0.1.47 MULTI-DISTRO: also glob the glibc loaders (Debian/Ubuntu images) and
+# their multiarch lib dirs, and gate on ANY usable shell (busybox OR bash OR
+# dash) instead of busybox alone. NOTE: many ROMs kill raw foreign-loader
+# execs via seccomp (SIGSYS) exactly like the musl case - proot (Path 1) stays
+# the real engine; this path is best-effort terminal-only.
 LOADER=""
-for L in "$ROOT"/lib/ld-musl-*.so.1; do
+for L in "$ROOT"/lib/ld-musl-*.so.1 \
+         "$ROOT"/lib/ld-linux-*.so.* \
+         "$ROOT"/lib/*-linux-gnu*/ld-linux-*.so.* \
+         "$ROOT"/lib/*-linux-gnu*/ld-*.so.*; do
   [ -f "$L" ] && { LOADER="$L"; break; }
 done
-if [ -n "$LOADER" ] && [ -f "$ROOT/bin/busybox" ]; then
+DSHELL=""
+[ -f "$ROOT/bin/bash" ] && DSHELL="$ROOT/bin/bash"
+[ -n "$DSHELL" ] || { [ -f "$ROOT/usr/bin/bash" ] && DSHELL="$ROOT/usr/bin/bash"; }
+[ -n "$DSHELL" ] || { [ -f "$ROOT/bin/busybox" ] && DSHELL="$ROOT/bin/busybox"; }
+[ -n "$DSHELL" ] || { [ -f "$ROOT/bin/dash" ] && DSHELL="$ROOT/bin/dash"; }
+case "$DSHELL" in *busybox) BUSYBOX_MODE=1 ;; *) BUSYBOX_MODE=0 ;; esac
+if [ -n "$LOADER" ] && [ -n "$DSHELL" ]; then
   LP="$ROOT/lib:$ROOT/usr/lib"
+  for MD in "$ROOT"/lib/*-linux-gnu* "$ROOT"/usr/lib/*-linux-gnu*; do
+    [ -d "$MD" ] && LP="$LP:$MD"
+  done
   PATH="$ROOT/usr/local/bin:$ROOT/usr/bin:$ROOT/bin:$ROOT/usr/local/sbin:$ROOT/usr/sbin:$ROOT/sbin:/system/bin:/system/xbin:$PATH"
   export PATH
-  if [ -f "$ROOT/bin/bash" ]; then
-    DSHELL="$ROOT/bin/bash"
-    BUSYBOX_MODE=0
-  else
-    DSHELL="$ROOT/bin/busybox"
-    BUSYBOX_MODE=1
-  fi
   if [ "$IS_LOGIN" = 1 ]; then
     if [ "$BUSYBOX_MODE" = 1 ]; then
       exec "$LOADER" --library-path "$LP" "$DSHELL" sh -l

@@ -43,8 +43,20 @@ else
     [ -x "$c" ] && { XVFB="$c"; break; }
   done
   if [ -z "$XVFB" ]; then
-    echo "emux-x11: Xvfb missing - installing via apk (one time, needs network)" >&2
-    apk add --no-cache xvfb xkbcomp xkeyboard-config >&2
+    # v0.1.47 multi-distro: install through whichever package manager the
+    # active distro ships (apk on Alpine, apt on Debian/Ubuntu).
+    echo "emux-x11: Xvfb missing - installing via the distro package manager (one time, needs network)" >&2
+    if command -v apt-get >/dev/null 2>&1; then
+      apt-get update >&2
+      DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+        xvfb xkbcomp x11-xserver-utils openbox xterm >&2
+    elif command -v pacman >/dev/null 2>&1; then
+      pacman -Sy --noconfirm --needed xorg-server-xvfb xorg-xkbcomp xkeyboard-config openbox xterm >&2
+    elif command -v dnf >/dev/null 2>&1; then
+      dnf -y --skip-broken install xorg-x11-server-Xvfb xkbcomp xorg-x11-server-utils openbox xterm >&2
+    else
+      apk add --no-cache xvfb xkbcomp xkeyboard-config >&2
+    fi
     [ -x /usr/bin/Xvfb ] && XVFB=/usr/bin/Xvfb
   fi
   if [ -z "$XVFB" ]; then
@@ -92,7 +104,7 @@ run_wm "$WM" || run_wm openbox || run_wm twm || run_wm icewm || {
   if [ -x /usr/bin/xterm ]; then
     /usr/bin/xterm -e /bin/sh -l >/tmp/wm.log 2>&1 &
   else
-    echo "emux-x11: no window manager found ($WM/openbox/twm/icewm) and no xterm - root window will be blank. Install one with: apk add openbox" >&2
+    echo "emux-x11: no window manager found ($WM/openbox/twm/icewm) and no xterm - root window will be blank. Install one with the distro package manager (apk add openbox / apt-get install openbox / pacman -S openbox / dnf install openbox)" >&2
   fi
 }
 # v0.1.43: never exit silently — the Android side paints this on the desktop

@@ -47,7 +47,14 @@ class EmuXApplication : Application() {
                 val restamped = runCatching {
                     com.emux.core.FsLayout.ensureMarkerForExistingRootfs(this)
                 }.getOrDefault(false)
-                if (!restamped) {
+                // v0.1.47 MULTI-DISTRO: never auto-download a SWITCH. When any
+                // distro is already installed but the selected one is not, the
+                // user changed the Settings choice — MainActivity shows the
+                // explicit Install pane instead of a silent 40-60 MB pull at
+                // app start. Only a truly empty environment auto-bootstraps.
+                if (!restamped && !runCatching {
+                        com.emux.core.FsLayout.anyDistroInstalled(this)
+                    }.getOrDefault(false)) {
                     com.emux.core.BootstrapScheduling.scheduleAuto(this)
                 }
             }

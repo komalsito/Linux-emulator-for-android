@@ -9,17 +9,75 @@ import java.io.File
  *
  * /data/data/com.emux/
  *   files/usr        -> bootstrap binary root (read-only-ish, patched shebangs)
- *   files/linuxroot  -> full Linux distribution tree (chroot/proot target)
+ *   files/distros/<id> -> installed Linux distribution trees (chroot/proot
+ *                         targets; v0.1.47 multi-distro: alpine/debian/ubuntu
+ *                         can COEXIST; the ACTIVE one is the Settings choice)
+ *   files/linuxroot  -> LEGACY single-distro tree (v0.1.46 and older); migrated
+ *                         to files/distros/alpine on first access
  *   files/home       -> $HOME for sessions
  *   cache/tmp        -> $TMPDIR (cleared by OS on demand = friendly to storage)
  */
 object FsLayout {
-    const val ENV_VERSION = 20  // v0.1.39: winsize watcher + Xvfb shm fallback re-seed  // v0.1.37: guest-PTY emux-init re-seed  // v0.1.36: emux-init PROOT_LOADER re-seed  // v0.1.34: emux-init.sh proot TMPDIR bind re-seed  // v0.1.28: fixed hasCompleteRootfs (was always false → re-download loop), proot native-bridge seeding, apk-installed shell/desktop components; re-seed is now CHEAP (marker re-stamp, no re-download)
+    const val ENV_VERSION = 21  // v0.1.47: multi-distro layout (files/distros/<id>, marker carries distro id) — bump re-seeds helpers; existing rootfs is MIGRATED, never re-downloaded  // v0.1.39: winsize watcher + Xvfb shm fallback re-seed  // v0.1.37: guest-PTY emux-init re-seed  // v0.1.36: emux-init PROOT_LOADER re-seed  // v0.1.34: emux-init.sh proot TMPDIR bind re-seed  // v0.1.28: fixed hasCompleteRootfs (was always false → re-download loop), proot native-bridge seeding, apk-installed shell/desktop components; re-seed is now CHEAP (marker re-stamp, no re-download)
 
     fun root(ctx: Context): File = rootOrFallback(ctx)
     fun usr(ctx: Context): File = File(root(ctx), "usr")
-    fun linuxRoot(ctx: Context): File = File(root(ctx), "linuxroot")
+
+    /**
+     * v0.1.47 MULTI-DISTRO: installed distros live in files/distros/<id>/.
+     * The legacy single tree files/linuxroot is moved to files/distros/alpine
+     * ONCE (cheap same-filesystem rename; guarded, idempotent, process-wide)
+     * so a v0.1.46 install is preserved across the upgrade WITHOUT any
+     * re-download. If the rename ever fails (in-use fd weirdness on an OEM
+     * ROM), linuxRoot() below falls back to the legacy path while the active
+     * distro is alpine — the tree is never orphaned.
+     */
+    fun distrosDir(ctx: Context): File = File(root(ctx), "distros").apply { runCatching { mkdirs() } }
+
+    /** The distro id the user selected in Settings (default: alpine). */
+    fun activeDistroId(ctx: Context): String =
+        runCatching { DistroCatalog.requested(ctx).id }.getOrDefault(DistroCatalog.DEFAULT_ID)
+
+    @Volatile private var legacyMigrated = false
+    private fun migrateLegacyRootfs(ctx: Context) {
+        if (legacyMigrated) return
+        synchronized(this) {
+            if (legacyMigrated) return
+            runCatching {
+                val legacy = File(root(ctx), "linuxroot")
+                val alpine = File(distrosDir(ctx), "alpine")
+                if (legacy.isDirectory && !alpine.exists()) {
+                    alpine.parentFile?.mkdirs()
+                    val ok = legacy.renameTo(alpine)
+                    com.emux.EmuXLog.i(
+                        if (ok) "migrated legacy linuxroot -> distros/alpine"
+                        else "legacy linuxroot rename FAILED (falling back in-place)")
+                }
+            }
+            legacyMigrated = true
+        }
+    }
+
+    /**
+     * The ACTIVE distro's rootfs (proot/chroot target). Every session,
+     * desktop and bootstrap call site resolves through here, so switching the
+     * Settings distro switches the whole environment. The returned directory
+     * may not exist yet (fresh install of a newly selected distro) —
+     * BootstrapManager creates it; emux-init.sh falls back to ANY installed
+     * distro so the terminal never dies on a pending switch.
+     */
+    fun linuxRoot(ctx: Context): File {
+        migrateLegacyRootfs(ctx)
+        val d = File(distrosDir(ctx), activeDistroId(ctx))
+        if (!d.isDirectory && activeDistroId(ctx) == "alpine") {
+            val legacy = File(root(ctx), "linuxroot")
+            if (legacy.isDirectory) return legacy   // rename failed earlier — keep working
+        }
+        return d
+    }
+
     fun home(ctx: Context): File = File(root(ctx), "home").apply { mkdirs() }
+
 
     /**
      * v0.1.27 PERSISTENCE FIX #1: Context.getFilesDir() is @Nullable — it returns
@@ -63,11 +121,63 @@ object FsLayout {
      * try/catch on the main looper → uncaught → "EmuX keeps stopping" on every
      * launch of the affected install. Now it can never throw.
      */
+    /**
+     * v0.1.47 MULTI-DISTRO marker format: "<ENV_VERSION>:<distroId>" (e.g.
+     * "21:alpine"). A bare "<ENV_VERSION>" (v0.1.46 and older) counts as
+     * alpine — the only distro those builds could install — but since
+     * ENV_VERSION bumped, such markers are stale anyway and land in the cheap
+     * re-stamp path (no re-download; see BootstrapManager).
+     */
+    fun installedDistroId(ctx: Context): String? = try {
+        val t = prefixFile(ctx).readText().trim()
+        when {
+            t.contains(':') -> {
+                val parts = t.split(':', limit = 2)
+                if (parts[0] == ENV_VERSION.toString() && parts[1].isNotBlank()) parts[1] else null
+            }
+            t == ENV_VERSION.toString() -> DistroCatalog.DEFAULT_ID
+            else -> null
+        }
+    } catch (_: Throwable) { null }
+
+    /**
+     * v0.1.47: "bootstrapped" now means the ACTIVE distro (Settings choice) is
+     * installed AND stamped. A pending distro switch (user picked Ubuntu while
+     * Alpine is installed) correctly reads as NOT bootstrapped, which shows the
+     * Install pane — but EmuXApplication only auto-schedules on a truly empty
+     * environment, so a switch is never downloaded without an explicit tap.
+     */
     fun isBootstrapped(ctx: Context): Boolean = try {
-        val p = prefixFile(ctx)
-        p.exists() && p.readText().trim() == ENV_VERSION.toString() &&
+        installedDistroId(ctx) == activeDistroId(ctx) &&
             File(linuxRoot(ctx), "etc").isDirectory
     } catch (_: Throwable) { false }
+
+    /** Ids of distros whose trees are complete on disk (marker-independent). */
+    fun installedDistroIds(ctx: Context): List<String> = try {
+        val dirs = distrosDir(ctx).listFiles()?.toList().orEmpty()
+        val ids = dirs.filter { it.isDirectory }
+            .mapNotNull { d ->
+                // The DIRECTORY NAME decides the spec (Debian and Ubuntu trees
+                // pass each other's shape probe — bash+dpkg+debian_version —
+                // so sniffing alone would mislabel ubuntu/ as debian).
+                val named = DistroCatalog.ALL.firstOrNull { it.id == d.name }
+                if (named != null) {
+                    if (hasCompleteRootfsAt(d, named)) named.id else null
+                } else {
+                    DistroCatalog.ALL.firstOrNull { s -> hasCompleteRootfsAt(d, s) }?.id
+                }
+            }
+            .toMutableList()
+        val legacy = File(root(ctx), "linuxroot")
+        if (legacy.isDirectory && !ids.contains("alpine") &&
+            hasCompleteRootfsAt(legacy, DistroCatalog.ALPINE)) {
+            ids += "alpine"
+        }
+        ids
+    } catch (_: Throwable) { emptyList() }
+
+    /** True when ANY distro tree is complete (used to gate auto-scheduling). */
+    fun anyDistroInstalled(ctx: Context): Boolean = installedDistroIds(ctx).isNotEmpty()
 
     /**
      * v0.1.27 PERSISTENCE FIX #2 — rootfs present but marker lost ≠ not installed.
@@ -106,14 +216,49 @@ object FsLayout {
      *     The old binDirHasMuslLoader(File(r, "bin")) scanned the wrong
      *     directory — always false.
      */
-    fun hasCompleteRootfs(ctx: Context): Boolean = try {
-        val r = linuxRoot(ctx)
-        val bin = File(r, "bin")
-        (isRegularNoFollow(File(bin, "busybox")) || isRegularNoFollow(File(bin, "sh"))) &&
-            File(r, "etc/alpine-release").isFile &&
-            libDirHasMuslLoader(File(r, "lib")) &&
-            File(r, "etc").isDirectory
-    } catch (_: Throwable) { false }
+    fun hasCompleteRootfs(ctx: Context): Boolean =
+        hasCompleteRootfsAt(linuxRoot(ctx), DistroCatalog.byId(activeDistroId(ctx)))
+
+    /**
+     * v0.1.47: completeness probe for ANY distro tree (used both for the
+     * active rootfs and for scanning the files/distros/ tree to find co-installed
+     * distros). Alpine keeps the v0.1.28 probe (busybox/sh + alpine-release +
+     * musl loader — all lstat-based, never follows absolute guest symlinks).
+     * Debian/Ubuntu probe: a shell (bash/dash), dpkg tooling and the
+     * debian_version stamp (Ubuntu rootfs images ship it too); all checks are
+     * symlink-tolerant (merged-/usr images symlink bin -> usr/bin, and
+     * File.isFile FOLLOWS those internal links, which is exactly right here —
+     * unlike the Alpine absolute-symlink case the targets stay inside the tree).
+     */
+    fun hasCompleteRootfsAt(r: File, spec: DistroSpec): Boolean {
+        return try {
+        if (!File(r, "etc").isDirectory) return false
+        when (spec.pkg) {
+            PkgManager.APK -> {
+                val bin = File(r, "bin")
+                (isRegularNoFollow(File(bin, "busybox")) || isRegularNoFollow(File(bin, "sh"))) &&
+                    File(r, "etc/alpine-release").isFile &&
+                    libDirHasMuslLoader(File(r, "lib"))
+            }
+            PkgManager.APT -> {
+                (File(r, "bin/bash").isFile || File(r, "usr/bin/bash").isFile ||
+                    File(r, "bin/dash").isFile || File(r, "usr/bin/dash").isFile) &&
+                    (File(r, "usr/bin/dpkg").isFile || File(r, "bin/dpkg").isFile) &&
+                    File(r, "etc/debian_version").isFile
+            }
+            PkgManager.PACMAN -> {
+                (File(r, "bin/bash").isFile || File(r, "usr/bin/bash").isFile) &&
+                    File(r, "usr/bin/pacman").isFile &&
+                    File(r, "etc/pacman.conf").isFile
+            }
+            PkgManager.DNF -> {
+                (File(r, "bin/bash").isFile || File(r, "usr/bin/bash").isFile) &&
+                    File(r, "usr/bin/dnf").isFile &&
+                    File(r, "etc/fedora-release").isFile
+            }
+        }
+        } catch (_: Throwable) { false }
+    }
 
     /** lstat-style check: true for a regular file OR a symlink (dangling or not) — never follows. */
     private fun isRegularNoFollow(f: File): Boolean = try {
@@ -173,18 +318,27 @@ object FsLayout {
     fun ensureMarkerForExistingRootfs(ctx: Context): Boolean {
         if (!hasCompleteRootfs(ctx)) return false
         if (!hasShellComponents(ctx)) return false
-        markBootstrapped(ctx)
+        // v0.1.47: stamp the ACTIVE distro — the marker may still name a
+        // different one (that is exactly the switch-back case this re-stamps).
+        markBootstrapped(ctx, activeDistroId(ctx))
         return isBootstrapped(ctx)
     }
 
-    fun markBootstrapped(ctx: Context) {
+    /**
+     * v0.1.47: [distroId] is stamped into the marker ("<ENV>:<id>") so a
+     * pending Settings switch never reads as "installed". Null keeps the
+     * currently recorded id (legacy call sites); a bare-number legacy marker
+     * is upgraded to "…:alpine".
+     */
+    fun markBootstrapped(ctx: Context, distroId: String? = null) {
         // v0.1.15: atomic write (tmp + rename). A killed mid-write used to leave a
         // truncated/empty .env_version → isBootstrapped() false → full re-download
         // on every launch even though the rootfs was perfectly fine.
         runCatching {
+            val id = distroId ?: installedDistroId(ctx) ?: DistroCatalog.DEFAULT_ID
             val p = prefixFile(ctx)
             val tmp = File(p.parentFile, ".env_version.tmp")
-            tmp.writeText(ENV_VERSION.toString())
+            tmp.writeText("$ENV_VERSION:$id")
             if (!tmp.renameTo(p)) {
                 p.delete(); tmp.renameTo(p)
             }
@@ -197,11 +351,10 @@ object FsLayout {
      * completion state cannot be persisted (otherwise the next launch silently
      * starts the whole download again and users see "installation never finishes").
      */
-    fun markBootstrappedChecked(ctx: Context): Boolean {
-        markBootstrapped(ctx)
+    fun markBootstrappedChecked(ctx: Context, distroId: String? = null): Boolean {
+        markBootstrapped(ctx, distroId)
         return try {
-            prefixFile(ctx).exists() &&
-                prefixFile(ctx).readText().trim() == ENV_VERSION.toString() &&
+            installedDistroId(ctx) == (distroId ?: installedDistroId(ctx)) &&
                 File(linuxRoot(ctx), "etc").isDirectory
         } catch (_: Throwable) { false }
     }

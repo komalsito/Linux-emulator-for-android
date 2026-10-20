@@ -27,11 +27,30 @@ android {
         // (adb install / GitHub Releases), same distribution model as Termux
         // on F-Droid.
         targetSdk = 28
-        versionCode = 46
-        versionName = "0.1.46"
+        versionCode = 47
+        versionName = "0.1.47"
 
         ndk {
             abiFilters += listOf("arm64-v8a", "armeabi-v7a", "x86_64")
+        }
+    }
+
+    signingConfigs {
+        // v0.1.47: COMMITTED debug keystore (ACTION_PLAN §6 pitfall: "if the
+        // sandbox resets, the signature changes → devices need ONE adb
+        // uninstall"). Every rebuild used to mint a fresh ephemeral
+        // ~/.android/debug.keystore, so each release forced a reinstall on the
+        // field device (wiping the rootfs). This is a DEBUG key, committed on
+        // purpose — it grants nothing (sideloaded debug builds); keeping it in
+        // the repo makes the APK signature stable across build environments.
+        create("emuxDebug") {
+            val ks = rootProject.file("debug-keystore/emux-debug.jks")
+            if (ks.isFile) {
+                storeFile = ks
+                storePassword = "emuxdebug"
+                keyAlias = "emux"
+                keyPassword = "emuxdebug"
+            }
         }
     }
 
@@ -43,6 +62,10 @@ android {
         }
         debug {
             isMinifyEnabled = false
+            // Fall back to the auto-generated debug key when the committed
+            // keystore is absent (fresh clone without debug-keystore/).
+            val ks = rootProject.file("debug-keystore/emux-debug.jks")
+            if (ks.isFile) signingConfig = signingConfigs.getByName("emuxDebug")
         }
     }
 
@@ -82,6 +105,11 @@ dependencies {
     implementation("androidx.work:work-runtime-ktx:2.9.1")   // battery-aware deferred bootstrap work
     implementation("com.google.android.material:material:1.12.0")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")
+    // v0.1.47 multi-distro: pure-Java XZ/LZMA2 decoder (0BSD) — the Debian and
+    // Ubuntu catalog images are .tar.xz, and host xz(1)/tar -J availability on
+    // Android 7-15 ROMs is inconsistent. Host tooling is still tried first;
+    // this is the guaranteed fallback inside extractTarXz().
+    implementation("org.tukaani:xz:1.10")
 
     // ---- Terminal engine: EmuX in-house VT100/ANSI parser + damage-only renderer
     // (see com.emux.terminal.VtTerminalView). Same PTY strategy as Termux

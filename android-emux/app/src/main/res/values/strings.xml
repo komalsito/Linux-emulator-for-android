@@ -7,7 +7,10 @@
     <string name="tab_settings">Settings</string>
 
     <string name="bootstrap_prompt">Install the Linux environment (Alpine minirootfs, ~3 MB)? Runs once; scheduled when charging or idle.</string>
+    <string name="bootstrap_prompt_fresh">Install %1$s (%2$s)? Runs once — the built-in X11 desktop installs with it.</string>
+    <string name="bootstrap_prompt_switch">Install %1$s (%2$s)? Your other installed distro(s) stay on disk: %3$s. The active distro powers both the Terminal and Desktop tabs.</string>
     <string name="bootstrap_install">Install now</string>
+    <string name="bootstrap_switch_install">Install &amp; switch</string>
     <string name="bootstrap_failed">Bootstrap failed — tap Install now to retry.</string>
     <string name="bootstrap_failed_reason">Bootstrap failed: %1$s\nTap Install to retry.</string>
 
@@ -34,7 +37,9 @@
     <string name="pref_keepawake_title">Keep CPU awake during active bursts</string>
     <string name="pref_keepawake_summary">Auto-expiring wake lock (30 s) — off saves more battery</string>
     <string name="pref_desktop_components_title">Install desktop components</string>
-    <string name="pref_desktop_components_summary">During install, also fetch Xvfb + Openbox + xterm + capture tools via apk (~25 MB, one time). Disable on slow connections; the terminal works either way.</string>
-    <string name="pref_distro_title">Distro mirror</string>
+    <string name="pref_desktop_components_summary">During install, also fetch Xvfb + Openbox + xterm + capture tools via the distro package manager (~25 MB one time on Alpine, ~60 MB on Debian/Ubuntu). Disable on slow connections; the terminal works either way.</string>
+    <string name="pref_distro_select_title">Linux distribution</string>
+    <string name="pref_distro_select_summary">Distro to install/run (Alpine, Debian or Ubuntu). They coexist on disk; the selected one is active. Changing this shows an Install prompt — nothing downloads without your tap.</string>
+    <string name="pref_distro_title">Mirror / custom rootfs URL</string>
     <string name="bootstrap_starting">Starting Linux installation…</string>
 </resources>

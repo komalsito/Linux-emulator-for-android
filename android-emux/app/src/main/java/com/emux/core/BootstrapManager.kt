@@ -287,8 +287,15 @@ class BootstrapManager(private val ctx: Context) {
             // the thread's UncaughtExceptionHandler → whole app killed the moment
             // Install was tapped. Every path touching cache files now uses a
             // non-null fallback.
+            // v0.1.47 MULTI-DISTRO: every step below works against the SELECTED
+            // distro (Settings → Linux distribution). FsLayout.linuxRoot()
+            // already points at files/distros/<id> (active) and migrates the
+            // legacy files/linuxroot tree on first access.
+            val spec = DistroCatalog.requested(ctx)
             val dest = FsLayout.linuxRoot(ctx)
-            val tmpFile = File(FsLayout.safeTmp(ctx), "rootfs.tar.gz")
+            val tmpFile = File(FsLayout.safeTmp(ctx), "rootfs-${spec.id}.archive")
+            // v0.1.47: sweep the pre-multi-distro fixed-name leftover, if any.
+            runCatching { File(FsLayout.safeTmp(ctx), "rootfs.tar.gz").delete() }
             // v0.1.15 AUDIT FIX — stale tarball reuse. downloadTo() opens the output
             // stream with FileOutputStream (append semantics, no truncation). If a
             // previous attempt was killed mid-download, the partial rootfs.tar.gz
@@ -331,7 +338,7 @@ class BootstrapManager(private val ctx: Context) {
                 report("Finalizing rootfs config", -1)
                 seedResolverConfig(dest)
                 prepareMountpoints(dest)
-                postInstall(dest)
+                postInstall(dest, spec)
                 // v0.1.28: the re-seed path must also (re-)install the native
                 // bridge + distro components — this is what upgrades an existing
                 // rootfs after an app update WITHOUT re-downloading it, and what
@@ -340,15 +347,29 @@ class BootstrapManager(private val ctx: Context) {
                 // while shell components are missing, so we land here instead).
                 report("Seeding native bridge", -1)
                 installNativeBridge()
-                val extrasErr = installDistroExtras(dest, null) { step, pct -> report(step, pct) }
+                val extrasErr = installDistroExtras(dest, spec, null) { step, pct -> report(step, pct) }
                 if (extrasErr != null) throw java.io.IOException(extrasErr)
-                val restamped = runCatching { FsLayout.markBootstrappedChecked(ctx) }.getOrDefault(false)
+                val restamped = runCatching { FsLayout.markBootstrappedChecked(ctx, spec.id) }.getOrDefault(false)
                 if (!restamped) {
                     throw java.io.IOException("existing rootfs found, but completion marker could not be written (storage full?)")
                 }
                 report("Bootstrapped", 100)
                 slot.finish(Result.success(Unit))
                 return
+            }
+            // v0.1.47 SWITCH GUARD: reaching here means the ACTIVE distro is
+            // genuinely absent (the cheap re-stamp branch above already handled
+            // marker-loss on an intact tree). If ANOTHER distro is installed,
+            // this pass would be a fresh download of a newly SELECTED distro —
+            // only allowed when the user tapped Install for exactly this distro
+            // (MainActivity stamps DistroCatalog.markSwitchConfirmed). Stale
+            // auto-scheduled worker jobs therefore can never swap environments
+            // silently; they fail with this actionable message instead.
+            if (runCatching { FsLayout.anyDistroInstalled(ctx) }.getOrDefault(false) &&
+                !DistroCatalog.switchConfirmed(ctx)) {
+                throw RuntimeException(
+                    "${spec.label} is not installed yet — tap Install to download it " +
+                        "(your other installed distros stay untouched)")
             }
             report("Resolving mirror", -1)
 
@@ -390,12 +411,15 @@ class BootstrapManager(private val ctx: Context) {
 
             check(dest.mkdirs() || dest.isDirectory) { "Cannot create ${dest.absolutePath}" }
 
-            // Build candidate URLs: user's custom mirror (Settings → "mirror") first,
-            // then the built-in fallback list. Correct layout is
-            // <base>/<major>/releases/<arch>/<distro>-<full-version>-<arch>.tar.gz
-            // (a bare "3.20" 404s — Alpine publishes point releases like 3.20.3).
-            val ver = ALPINE_VERSION
-            val pathSuffix = "${majorVersion(ver)}/releases/${archName()}/$DEFAULT_DISTRO-$ver-${archName()}.tar.gz"
+            // v0.1.47 MULTI-DISTRO candidate list, in priority order:
+            //  - Settings → "mirror" holding a FULL tarball URL (.tar.gz/.tar.xz)
+            //    always wins — works for ANY distro (self-hosted images);
+            //  - Alpine: mirror BASE normalization exactly as before (custom
+            //    base → built-in MIRRORS; "…/alpine", "…/alpine/v",
+            //    "…/alpine/v3.20" all resolve to <base>/<major>/releases/<arch>/
+            //    <distro>-<full-version>-<arch>.tar.gz — a bare "3.20" 404s);
+            //  - Debian/Ubuntu: SHA256-pinned proot-distro release images first,
+            //    Canonical cloud-images fallback second (Ubuntu only).
             // v0.1.9: prefs read is also guarded — a corrupted shared_prefs XML
             // throws on getSharedPreferences and previously escaped here in the
             // worker's child scope (uncaught → process death).
@@ -404,30 +428,80 @@ class BootstrapManager(private val ctx: Context) {
                     .getDefaultSharedPreferences(ctx)
                     .getString("mirror", null)?.trim()?.takeIf { it.isNotBlank() }
             }.getOrNull()
-            val bases = listOfNotNull(custom) + MIRRORS
+            val customIsTarball = custom != null &&
+                (custom.endsWith(".tar.gz") || custom.endsWith(".tar.xz"))
+
+            class Cand(val url: URL, val sha: String?, val mirrorBase: String?)
+            val cands = mutableListOf<Cand>()
+            if (customIsTarball) {
+                custom?.let { cu ->
+                    runCatching { cands += Cand(URL(cu), null, null) }
+                        .onFailure { com.emux.EmuXLog.e("custom mirror URL unparsable", it) }
+                }
+            }
+            if (spec.id == "alpine") {
+                val ver = ALPINE_VERSION
+                val pathSuffix = "${majorVersion(ver)}/releases/${archName()}/$DEFAULT_DISTRO-$ver-${archName()}.tar.gz"
+                val bases = listOfNotNull(custom?.takeIf { !customIsTarball }) + MIRRORS
+                for (base in bases) {
+                    val clean = base.trim().trimEnd('/')
+                    val url: URL = when {
+                        clean.endsWith(".tar.gz") -> URL(clean)           // full file URL — verbatim
+                        clean.endsWith("/v") -> URL("$clean$pathSuffix")  // "…/alpine/v" + "3.20/releases/…"
+                        Regex("/v[0-9]").containsMatchIn(clean) ->
+                            URL("$clean/releases/${archName()}/$DEFAULT_DISTRO-$ver-${archName()}.tar.gz")
+                        else -> URL("$clean/${majorVersion(ver)}/releases/${archName()}/$DEFAULT_DISTRO-$ver-${archName()}.tar.gz")
+                    }
+                    cands += Cand(url, null, clean)
+                }
+            } else {
+                val images = spec.candidates(archName())
+                if (images.isEmpty() && !customIsTarball) {
+                    throw RuntimeException(
+                        "${spec.label} has no rootfs image for ${archName()} devices — pick another distro in Settings")
+                }
+                for (img in images) runCatching { cands += Cand(URL(img.url), img.sha256, null) }
+                    .onFailure { com.emux.EmuXLog.e("catalog URL unparsable: ${img.url}", it) }
+            }
             val tmp = tmpFile
 
             var lastErr: Throwable? = null
             var downloaded = false
+            var archiveIsXz = false
             var workingMirrorBase: String? = null   // v0.1.28: mirror that served the rootfs → seeded into etc/apk/repositories
-            for (base in bases) {
-                // Robust normalization: accept "…/alpine", "…/alpine/v", "…/alpine/v3.20"
-                // or a full tarball URL from Settings → mirror, and always produce
-                // <alpineBase>/<major>/releases/<arch>/<file>.
-                val clean = base.trim().trimEnd('/')
-                val url: URL = when {
-                    clean.endsWith(".tar.gz") -> URL(clean)               // full file URL — use verbatim
-                    clean.endsWith("/v") -> URL("$clean$pathSuffix")      // "…/alpine/v" + "3.20/releases/…"
-                    // "…/alpine/v3.20" is a version directory: the tarball still lives
-                    // under releases/<arch>/, so append that segment (was missing → 404).
-                    Regex("/v[0-9]").containsMatchIn(clean) -> URL("$clean/releases/${archName()}/$DEFAULT_DISTRO-$ver-${archName()}.tar.gz")
-                    else -> URL("$clean/${majorVersion(ver)}/releases/${archName()}/$DEFAULT_DISTRO-$ver-${archName()}.tar.gz")
-                }
-                report("Downloading rootfs (${url.host})", -1)
+            for (c in cands) {
+                report("Downloading rootfs (${c.url.host})", -1)
                 try {
-                    downloadTo(url, tmp) { pct -> report("Downloading rootfs", pct) }
+                    downloadTo(c.url, tmp) { pct -> report("Downloading rootfs", pct) }
+                    // Sanity-check what we downloaded PER CANDIDATE (an HTML error
+                    // page must fall through to the next mirror, not surface later
+                    // as a confusing "tar failed"). gzip magic = 1f 8b;
+                    // xz magic = fd 37 7a 58 5a 00.
+                    val xz = c.url.path.endsWith(".xz")
+                    val head = ByteArray(6)
+                    FileInputStream(tmp).use { it.read(head) }
+                    val magicOk = if (xz)
+                        head[0] == 0xfd.toByte() && head[1] == 0x37.toByte() && head[2] == 0x7a.toByte() &&
+                            head[3] == 0x58.toByte() && head[4] == 0x5a.toByte() && head[5] == 0x00.toByte()
+                    else head[0] == 0x1f.toByte() && head[1] == 0x8b.toByte()
+                    if (!magicOk) {
+                        throw RuntimeException(
+                            "Mirror returned non-${if (xz) "xz" else "gzip"} data (${tmp.length()} bytes) — check network/mirror URL")
+                    }
+                    // v0.1.47: SHA256 verification for pinned catalog images
+                    // (proot-distro publishes sums; corruption/tamper → next
+                    // candidate instead of a broken rootfs).
+                    if (c.sha != null) {
+                        report("Verifying checksum", -1)
+                        val actual = sha256Of(tmp)
+                        if (!actual.equals(c.sha, ignoreCase = true)) {
+                            throw RuntimeException(
+                                "SHA256 mismatch — download corrupt (expected ${c.sha.take(16)}…, got ${actual.take(16)}…)")
+                        }
+                    }
                     downloaded = true
-                    workingMirrorBase = clean
+                    archiveIsXz = xz
+                    workingMirrorBase = c.mirrorBase
                     break
                 } catch (e: Throwable) {
                     lastErr = e
@@ -443,17 +517,7 @@ class BootstrapManager(private val ctx: Context) {
                     .firstOrNull()
                 val detail = conn?.let { "HTTP ${it.responseCode}" }
                     ?: lastErr?.toString() ?: "no attempt made"
-                throw RuntimeException("All mirrors failed ($detail). Check Wi-Fi/mobile data and retry.", lastErr)
-            }
-
-            // Sanity-check what we downloaded: an HTML error page would otherwise
-            // surface as a confusing "tar failed" message.
-            val head = ByteArray(2)
-            FileInputStream(tmp).use { it.read(head) }
-            // gzip magic bytes are 0x1f 0x8b — the old check compared against 0x08,
-            // which rejected every valid tarball ("Mirror returned non-gzip data").
-            if (head[0] != 0x1f.toByte() || head[1] != 0x8b.toByte()) {
-                throw RuntimeException("Mirror returned non-gzip data (${tmp.length()} bytes) — check network/mirror URL")
+                throw RuntimeException("All mirrors failed for ${spec.label} ($detail). Check Wi-Fi/mobile data and retry.", lastErr)
             }
 
             report("Extracting rootfs", -1)
@@ -482,7 +546,7 @@ class BootstrapManager(private val ctx: Context) {
                 com.emux.EmuXLog.e("dest not empty after pre-wipe — running second cleanup pass")
                 runCatching { deleteBottomUp(dest, maxMillis = 20_000L) }
             }
-            extractTarGz(tmp, dest)
+            extractArchive(tmp, dest, archiveIsXz)
             tmp.delete()
 
             // v0.1.13: the old single "Linking /data/data paths" frame covered
@@ -519,7 +583,7 @@ class BootstrapManager(private val ctx: Context) {
             withHardTimeout(5_000L) { pruneSpecialFiles(File(dest, "dev"), maxMillis = 4_500L) }
             prepareMountpoints(dest)
             report("Finalizing rootfs config", -1)
-            postInstall(dest)
+            postInstall(dest, spec)
             // v0.1.15: the generic label is emitted once, then installHelperScripts
             // reports a per-script frame ("Installing helper script: <name>") so
             // the UI advances through every copy instead of freezing on one label.
@@ -549,7 +613,7 @@ class BootstrapManager(private val ctx: Context) {
             // hasCompleteRootfs is fixed — no re-download), which retries apk.
             report("Seeding native bridge", -1)
             installNativeBridge()
-            val extrasErr = installDistroExtras(dest, workingMirrorBase) { step, pct -> report(step, pct) }
+            val extrasErr = installDistroExtras(dest, spec, workingMirrorBase) { step, pct -> report(step, pct) }
             if (extrasErr != null) throw java.io.IOException(extrasErr)
             // v0.1.16: the per-script frames above are "Installing helper
             // script: <name>" (rank 7). Emit a terminal-rank frame so the label
@@ -570,8 +634,8 @@ class BootstrapManager(private val ctx: Context) {
                 "Bootstrap completed but rootfs looks incomplete (${dest.absolutePath})"
             }
             val marked = runCatching {
-                var ok = FsLayout.markBootstrappedChecked(ctx)
-                if (!ok) { try { Thread.sleep(150) } catch (_: InterruptedException) {}; ok = FsLayout.markBootstrappedChecked(ctx) }
+                var ok = FsLayout.markBootstrappedChecked(ctx, spec.id)
+                if (!ok) { try { Thread.sleep(150) } catch (_: InterruptedException) {}; ok = FsLayout.markBootstrappedChecked(ctx, spec.id) }
                 ok
             }.getOrDefault(false)
             if (!marked) {
@@ -697,15 +761,69 @@ class BootstrapManager(private val ctx: Context) {
             lastErr = "exit $code: ${out.take(200)}"
         }
         // Strategy 3: no external binaries — stream through Java.
-        runCatching { extractJava(tgz, dest) }
+        runCatching {
+            java.util.zip.GZIPInputStream(java.io.BufferedInputStream(FileInputStream(tgz), 64 * 1024))
+                .use { extractTarStream(it, dest) }
+        }
             .onFailure { throw RuntimeException("Extraction failed on this device. tar: $lastErr; java: ${it.message}") }
         if (!File(dest, "etc").exists()) throw RuntimeException("Extraction produced an incomplete rootfs (tar: $lastErr)")
     }
 
-    /** Minimal streaming tar reader (ustar + gnu long names good enough for Alpine). */
-    private fun extractJava(tgz: File, dest: File) {
-        java.util.zip.GZIPInputStream(java.io.BufferedInputStream(FileInputStream(tgz), 64 * 1024))
-            .buffered(64 * 1024).use { gz ->
+    /**
+     * v0.1.47: .tar.xz extraction (the Debian/Ubuntu catalog images). Host
+     * tooling first — Android 10+ toybox ships xz(1), other ROMs often have a
+     * GNU tar with -J — then the pure-Java LZMA2 decoder (org.tukaani:xz,
+     * 0BSD-licensed) so extraction NEVER depends on what the device carries.
+     * Same watchdog + strategy-fallthrough shape as extractTarGz; the longer
+     * budget accounts for xz being slower to decompress than gzip on big images.
+     */
+    private fun extractTarXz(txz: File, dest: File) {
+        val cmds = listOf(
+            arrayOf("/system/bin/sh", "-c", "xz -dc '${txz.absolutePath}' | tar -x -C '${dest.absolutePath}'"),
+            arrayOf("/system/bin/sh", "-c", "unxz -c '${txz.absolutePath}' | tar -x -C '${dest.absolutePath}'"),
+            arrayOf("tar", "-xJf", txz.absolutePath, "-C", dest.absolutePath),
+        )
+        var lastErr = ""
+        for (argv in cmds) {
+            val r = runCatching {
+                val p = ProcessBuilder(*argv).redirectErrorStream(true).start()
+                val watchdog = Thread {
+                    try { Thread.sleep(600_000); if (p.isAlive) p.destroy() } catch (_: Exception) {}
+                }.apply { isDaemon = true; start() }
+                try {
+                    val out = StringBuilder()
+                    BufferedReader(InputStreamReader(p.inputStream)).forEachLine { out.append(it).append('\n') }
+                    val code = p.waitFor()
+                    code to out.toString()
+                } finally { watchdog.interrupt() }
+            }
+            if (r.isFailure) { lastErr = "spawn failed: ${r.exceptionOrNull()?.message}"; continue }
+            val (code, out) = r.getOrThrow()
+            if (code == 0 && File(dest, "etc").exists()) return
+            lastErr = "exit $code: ${out.take(200)}"
+        }
+        // Pure-Java last resort (XZ for Java).
+        runCatching {
+            org.tukaani.xz.XZInputStream(java.io.BufferedInputStream(FileInputStream(txz), 64 * 1024))
+                .use { extractTarStream(it, dest) }
+        }.onFailure { throw RuntimeException("xz extraction failed on this device. tar: $lastErr; java: ${it.message}") }
+        if (!File(dest, "etc").exists()) throw RuntimeException("Extraction produced an incomplete rootfs (tar: $lastErr)")
+    }
+
+    /** Compression-aware dispatch (xz for the Debian/Ubuntu images, gz for Alpine). */
+    private fun extractArchive(arc: File, dest: File, xz: Boolean) =
+        if (xz) extractTarXz(arc, dest) else extractTarGz(arc, dest)
+
+    /**
+     * Minimal streaming tar reader (ustar + gnu long names). v0.1.47: takes an
+     * ALREADY-DECOMPRESSED stream (gzip or xz) and materializes type-'1'
+     * HARDLINKS by copying the earlier-extracted target — Debian/Ubuntu images
+     * (unlike the Alpine minirootfs) DO contain hardlink entries, and the old
+     * size=0 fallthrough produced empty files for them.
+     */
+    private fun extractTarStream(gzIn: java.io.InputStream, dest: File) {
+        run {
+            val gz = gzIn
             val hdr = ByteArray(512)
             var pendingLongName: String? = null
             while (true) {
@@ -739,11 +857,22 @@ class BootstrapManager(private val ctx: Context) {
                         runCatching { android.system.Os.symlink(link, target.path) }
                         skip(gz, size)
                     }
-                    type == '0' || type == '\u0000' || type == '1' -> {
+                    type == '1' -> {
+                        // hardlink → copy the previously extracted target file
+                        val link = String(hdr, 157, 100).trim('\u0000')
+                        target.parentFile?.mkdirs()
+                        runCatching {
+                            val srcF = File(dest, link.removePrefix("./"))
+                            if (srcF.isFile) java.nio.file.Files.copy(
+                                srcF.toPath(), target.toPath(),
+                                java.nio.file.StandardCopyOption.REPLACE_EXISTING)
+                        }
+                        skip(gz, size)
+                    }
+                    type == '0' || type == '\u0000' -> {
                         target.parentFile?.mkdirs()
                         target.outputStream().use { os -> var left = size; val buf = ByteArray(64 * 1024)
                             while (left > 0) { val n = gz.read(buf, 0, minOf(buf.size.toLong(), left).toInt()); if (n < 0) break; os.write(buf, 0, n); left -= n } }
-                        if (type == '1') { /* hardlink: copy content from earlier entry not tracked; rare in minirootfs */ }
                         val mode = String(hdr, 100, 8).trim('\u0000', ' ').toIntOrNull(8) ?: 0
                         target.setExecutable(mode and 0x40 != 0, false)
                         skip(gz, (512 - (size % 512)) % 512)
@@ -1019,10 +1148,127 @@ class BootstrapManager(private val ctx: Context) {
      */
     private fun installDistroExtras(
         dest: File,
+        spec: DistroSpec,
         mirrorBase: String?,
         report: (String, Int) -> Unit,
     ): String? {
         seedDevNodes(dest)
+        return when (spec.pkg) {
+            PkgManager.APK -> installApkExtras(dest, mirrorBase, report)
+            PkgManager.APT -> installAptExtras(dest, spec, report)
+            PkgManager.PACMAN, PkgManager.DNF -> installGenericPmExtras(dest, spec, report)
+        }
+    }
+
+    /**
+     * v0.1.47: Arch (pacman) / Fedora (dnf) component install inside the
+     * bundled proot — same model as [installAptExtras] minus the apt-specific
+     * sources surgery (the proot-distro images ship preconfigured pacman/dnf
+     * repos, incl. ALARM mirrors for Arch ARM). The shell-component probe is
+     * disk-based: both images preinstall bash + util-linux, so the terminal
+     * works even fully OFFLINE; the package manager only runs for genuinely
+     * missing pieces (desktop stack, user extras).
+     *
+     * @return null on success, else a human-readable failure summary.
+     */
+    private fun installGenericPmExtras(
+        dest: File,
+        spec: DistroSpec,
+        report: (String, Int) -> Unit,
+    ): String? {
+        val proot = FsLayout.prootBin(ctx)
+        if (!proot.isFile) {
+            return "no execution engine (proot missing at ${proot.absolutePath}) — cannot run ${spec.pkg.name.lowercase()}"
+        }
+        fun shellOk() =
+            (File(dest, "usr/bin/script").isFile || File(dest, "bin/script").isFile) &&
+                (File(dest, "usr/bin/bash").isFile || File(dest, "bin/bash").isFile)
+
+        var tail = ""
+        report("Installing shell components", -1)
+        var ok = shellOk()
+        if (!ok) {
+            val r = runPmProot(proot, dest, spec, spec.shellPkgs, "Installing shell components", report)
+            tail = "proot-${spec.pkg.name.lowercase()}: ${r.tail}"
+            ok = r.ok || shellOk()
+        }
+        if (!ok) {
+            val probe = runCatching { deviceProbe(dest) }.getOrDefault("probe unavailable")
+            return "shell components (bash/util-linux) could not be installed via ${spec.pkg.name.lowercase()}.\n" +
+                "--- device probe ---\n$probe--- output ---\n${tail.take(600)}"
+        }
+
+        // User-facing convenience packages, best effort (never fatal).
+        runCatching {
+            report("Installing user extras", -1)
+            val r = runPmProot(proot, dest, spec, spec.extraPkgs, "Installing user extras", report)
+            if (!r.ok) com.emux.EmuXLog.e("user extras failed (non-fatal): ${r.tail}")
+        }
+
+        val desktopWanted = runCatching {
+            androidx.preference.PreferenceManager.getDefaultSharedPreferences(ctx)
+                .getBoolean("desktop_components", true)
+        }.getOrDefault(true)
+        if (desktopWanted) {
+            report("Installing desktop components", -1)
+            var dok = File(dest, "usr/bin/Xvfb").isFile
+            if (!dok) {
+                val r = runPmProot(proot, dest, spec, spec.desktopPkgs, "Installing desktop components", report)
+                dok = r.ok || File(dest, "usr/bin/Xvfb").isFile
+                if (!dok) com.emux.EmuXLog.e("desktop components failed (non-fatal): ${r.tail}")
+            }
+        }
+        return null
+    }
+
+    /**
+     * One pacman/dnf run inside the bundled proot (env mirrors [runApkProot];
+     * PROOT_TMP_DIR + PROOT_LOADER are the make-or-break variables for the
+     * Termux proot build). Payloads:
+     *  - pacman: `-Sy --noconfirm --needed` (DB refresh + idempotent install)
+     *  - dnf: `-y install` with a `--skip-broken` first pass so one renamed
+     *    desktop-side package can never fail the whole group (Fedora renames
+     *    X11 packages between releases; the on-disk Xvfb probe is the judge).
+     */
+    private fun runPmProot(
+        proot: File, dest: File, spec: DistroSpec, pkgs: List<String>,
+        phase: String, report: (String, Int) -> Unit,
+    ): ApkRun {
+        val hostTmp = prootTmp(ctx)
+        val nb = FsLayout.nativeBridgeDir(ctx)
+        val pk = pkgs.joinToString(" ")
+        val payload = when (spec.pkg) {
+            PkgManager.PACMAN ->
+                "pacman -Sy --noconfirm --needed $pk"
+            PkgManager.DNF ->
+                "dnf -y --skip-broken install $pk || dnf -y install $pk"
+            else -> return ApkRun(false, "runPmProot called for ${spec.pkg}")
+        }
+        val argv = listOf(
+            proot.absolutePath, "-0", "-r", dest.absolutePath,
+            "-b", "/dev", "-b", "/proc", "-b", "/sys", "-w", "/",
+            "/bin/sh", "-c", payload,
+        )
+        val env = mutableMapOf(
+            "LD_LIBRARY_PATH" to nb.absolutePath,
+            "PROOT_TMP_DIR" to hostTmp.absolutePath,
+            "TMPDIR" to "/tmp",
+            "HOME" to "/root",
+            "PATH" to "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+            "LANG" to "C",
+            "PROOT_LOADER" to File(nb, "loader").absolutePath,
+        )
+        val l32 = File(nb, "loader32")
+        if (l32.isFile) env["PROOT_LOADER_32"] = l32.absolutePath
+        return runApkProcess(argv, env, pkgs, phase, report)
+    }
+
+    /** Alpine component install via the rootfs' own apk (v0.1.29+ logic). */
+    private fun installApkExtras(
+        dest: File,
+        mirrorBase: String?,
+        report: (String, Int) -> Unit,
+    ): String? {
         seedApkRepositories(dest, mirrorBase)
         val proot = FsLayout.prootBin(ctx)
         val loader = runCatching {
@@ -1134,7 +1380,285 @@ class BootstrapManager(private val ctx: Context) {
         return null
     }
 
-    /** Outcome of one apk run: exit status + last output lines for diagnostics. */
+    // ---- v0.1.47: Debian/Ubuntu component install via apt inside proot ----
+
+    /**
+     * Install the distro components with the rootfs' own apt-get, executed
+     * INSIDE the bundled proot — the exact model Termux's proot-distro uses
+     * for Debian/Ubuntu on unrooted Android: guest /etc/resolv.conf is our
+     * seeded one, /dev+/proc are bound, dpkg triggers execute natively and TLS
+     * uses the rootfs' own CA keyrings.
+     *
+     * Success is judged by the ACTUAL BINARIES on disk (apt/dpkg can exit
+     * nonzero on benign trigger noise under fake-root). The proot-distro images
+     * ship bash + util-linux preinstalled, so the shell-component probe passes
+     * OFFLINE for them and apt only runs for genuinely missing pieces. Mirror
+     * rotation (TUNA/AliYun/USTC — the defaults are slow or blocked on some
+     * networks, field-verified) and IP-literal sources mirror the apk fallback
+     * ladder; the tail output is returned so failures surface verbatim.
+     *
+     * @return null on success, else a human-readable failure summary.
+     */
+    private fun installAptExtras(
+        dest: File,
+        spec: DistroSpec,
+        report: (String, Int) -> Unit,
+    ): String? {
+        writeAptPolicy(dest)
+        val proot = FsLayout.prootBin(ctx)
+        if (!proot.isFile) {
+            return "no execution engine (proot missing at ${proot.absolutePath}) — cannot run apt. Tap Install to retry."
+        }
+        fun shellOk() =
+            (File(dest, "usr/bin/script").isFile || File(dest, "bin/script").isFile) &&
+                (File(dest, "usr/bin/bash").isFile || File(dest, "bin/bash").isFile)
+
+        var tail = ""
+        report("Installing shell components", -1)
+        var ok = shellOk()
+        if (!ok) {
+            // attempt 0: the image's own sources; 1..2: rotated CN-friendly mirrors.
+            for (rotate in 0..2) {
+                if (rotate > 0) seedAptSources(dest, spec, rotate)
+                val r = runAptProot(proot, dest, spec.shellPkgs, "Installing shell components", report)
+                tail = "proot-apt(rotate=$rotate): ${r.tail}\n$tail"
+                if (r.ok || shellOk()) { ok = true; break }
+            }
+            // last resort: IP-literal sources (zero DNS dependency inside the guest).
+            if (!ok && rewriteAptSourcesToIps(dest, spec)) {
+                val r = runAptProot(proot, dest, spec.shellPkgs, "Installing shell components", report)
+                tail = "proot-apt(ip-repos): ${r.tail}\n$tail"
+                ok = r.ok || shellOk()
+            }
+        }
+        if (!ok) {
+            val probe = runCatching { deviceProbe(dest) }.getOrDefault("probe unavailable")
+            return "shell components (bash/util-linux) could not be installed via apt.\n" +
+                "--- device probe ---\n$probe--- apt output ---\n${tail.take(600)}"
+        }
+
+        // User-facing convenience packages, best effort (never fatal).
+        runCatching {
+            report("Installing user extras", -1)
+            val r = runAptProot(proot, dest, spec.extraPkgs, "Installing user extras", report)
+            if (!r.ok) com.emux.EmuXLog.e("user extras failed (non-fatal): ${r.tail}")
+        }
+
+        val desktopWanted = runCatching {
+            androidx.preference.PreferenceManager.getDefaultSharedPreferences(ctx)
+                .getBoolean("desktop_components", true)
+        }.getOrDefault(true)
+        if (desktopWanted) {
+            report("Installing desktop components", -1)
+            var dtail = ""
+            var dok = File(dest, "usr/bin/Xvfb").isFile
+            if (!dok) {
+                val r = runAptProot(proot, dest, spec.desktopPkgs, "Installing desktop components", report)
+                dtail = "proot-apt: ${r.tail}"
+                dok = r.ok || File(dest, "usr/bin/Xvfb").isFile
+            }
+            if (!dok) {
+                // one retry with a rotated mirror before giving up (desktop is non-fatal)
+                seedAptSources(dest, spec, 1)
+                val r = runAptProot(proot, dest, spec.desktopPkgs, "Installing desktop components", report)
+                dtail = "proot-apt(mirror2): ${r.tail}\n$dtail"
+                dok = File(dest, "usr/bin/Xvfb").isFile
+            }
+            if (!dok) {
+                com.emux.EmuXLog.e("desktop components failed (non-fatal): $dtail")
+            }
+        }
+        return null
+    }
+
+    /**
+     * One apt-get run inside the bundled proot: `update` then `install`. The
+     * update re-runs every time (seconds) so rotated/repaired sources always
+     * take effect and stale lists from a killed attempt never linger. Env
+     * mirrors runApkProot — PROOT_TMP_DIR and PROOT_LOADER are the two make-or-
+     * break variables for the Termux proot build on non-Termux devices.
+     */
+    private fun runAptProot(
+        proot: File, dest: File, pkgs: List<String>, phase: String, report: (String, Int) -> Unit,
+    ): ApkRun {
+        val hostTmp = prootTmp(ctx)
+        val nb = FsLayout.nativeBridgeDir(ctx)
+        val payload = "export DEBIAN_FRONTEND=noninteractive; " +
+            "apt-get update -o APT::Sandbox::User=root; " +
+            "apt-get install -y --no-install-recommends -o APT::Sandbox::User=root " +
+            pkgs.joinToString(" ")
+        val argv = listOf(
+            proot.absolutePath, "-0", "-r", dest.absolutePath,
+            "-b", "/dev", "-b", "/proc", "-b", "/sys", "-w", "/",
+            "/bin/sh", "-c", payload,
+        )
+        val env = mutableMapOf(
+            "LD_LIBRARY_PATH" to nb.absolutePath,
+            "PROOT_TMP_DIR" to hostTmp.absolutePath,
+            "TMPDIR" to "/tmp",
+            "HOME" to "/root",
+            "PATH" to "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+            "LANG" to "C",
+            "PROOT_LOADER" to File(nb, "loader").absolutePath,
+        )
+        val l32 = File(nb, "loader32")
+        if (l32.isFile) env["PROOT_LOADER_32"] = l32.absolutePath
+        return runApkProcess(argv, env, pkgs, phase, report)
+    }
+
+    /**
+     * Guest-side apt/dpkg hygiene for proot:
+     *  - policy-rc.d → exit 101 so dpkg never tries to START services (there is
+     *    no init system under proot; without this some postinst scripts hang
+     *    or fail noisily);
+     *  - 99emux config: run the download sandbox as (fake) root — the _apt
+     *    user drop cannot work under proot — plus sane retry counts.
+     */
+    private fun writeAptPolicy(dest: File) {
+        runCatching {
+            val pr = File(dest, "usr/sbin/policy-rc.d")
+            replaceRegularFileWith(pr) { it.writeText("#!/bin/sh\nexit 101\n") }
+            pr.setExecutable(true, false)
+        }
+        runCatching {
+            File(dest, "etc/apt/apt.conf.d").mkdirs()
+            replaceRegularFileWith(File(dest, "etc/apt/apt.conf.d/99emux")) {
+                it.writeText("APT::Sandbox::User \"root\";\nAcquire::Retries \"2\";\n")
+            }
+        }
+    }
+
+    /**
+     * Overwrite the apt sources with the given mirror rotation (0 = distro
+     * default). Writes deb822 form (native on bookworm/noble) into the
+     * canonical .sources file and disables the legacy one-line sources.list so
+     * the two can never fight. Signed-By points at the keyring the images ship.
+     */
+    private fun seedAptSources(dest: File, spec: DistroSpec, rotate: Int) {
+        runCatching {
+            val dir = File(dest, "etc/apt/sources.list.d").apply { mkdirs() }
+            when (spec.id) {
+                "debian" -> {
+                    val codename = DistroCatalog.osReleaseField(dest, "VERSION_CODENAME") ?: "bookworm"
+                    val base = DistroCatalog.DEBIAN_MIRRORS[rotate.coerceIn(0, DistroCatalog.DEBIAN_MIRRORS.size - 1)]
+                    val sec = DistroCatalog.DEBIAN_SECURITY_MIRRORS[rotate.coerceIn(0, DistroCatalog.DEBIAN_SECURITY_MIRRORS.size - 1)]
+                    val text = "Types: deb\n" +
+                        "URIs: $base\n" +
+                        "Suites: $codename $codename-updates\n" +
+                        "Components: main contrib non-free non-free-firmware\n" +
+                        "Signed-By: /usr/share/keyrings/debian-archive-keyring.gpg\n" +
+                        "\n" +
+                        "Types: deb\n" +
+                        "URIs: $sec\n" +
+                        "Suites: $codename-security\n" +
+                        "Components: main contrib non-free non-free-firmware\n" +
+                        "Signed-By: /usr/share/keyrings/debian-archive-keyring.gpg\n"
+                    replaceRegularFileWith(File(dir, "debian.sources")) { it.writeText(text) }
+                }
+                "ubuntu" -> {
+                    val codename = DistroCatalog.osReleaseField(dest, "VERSION_CODENAME") ?: "noble"
+                    val ports = archName() == "aarch64" || archName() == "armv7"
+                    val mirrors = if (ports) DistroCatalog.UBUNTU_PORTS_MIRRORS else DistroCatalog.UBUNTU_MIRRORS
+                    val base = mirrors[rotate.coerceIn(0, mirrors.size - 1)]
+                    val text = "Types: deb\n" +
+                        "URIs: $base\n" +
+                        "Suites: $codename $codename-updates $codename-backports $codename-security\n" +
+                        "Components: main universe restricted multiverse\n" +
+                        "Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg\n"
+                    replaceRegularFileWith(File(dir, "ubuntu.sources")) { it.writeText(text) }
+                }
+                else -> return
+            }
+            replaceRegularFileWith(File(dest, "etc/apt/sources.list")) {
+                it.writeText("# managed by EmuX — see etc/apt/sources.list.d/\n")
+            }
+            com.emux.EmuXLog.i("apt sources seeded (rotate=$rotate) for ${spec.id}")
+        }.onFailure { com.emux.EmuXLog.e("seedAptSources failed (non-fatal)", it) }
+    }
+
+    /**
+     * Last-ditch DNS fallback for apt (mirrors rewriteRepositoriesToIps for
+     * apk): resolve EVERY known mirror host with Java (Android's resolver) and
+     * write IP-literal http:// sources — https to a bare IP fails certificate
+     * hostname validation. Trust is NOT downgraded: plain-http apt is still
+     * fully signature-verified through the Signed-By archive keyrings.
+     */
+    private fun rewriteAptSourcesToIps(dest: File, spec: DistroSpec): Boolean {
+        fun toHttpIp(u: String): String? = runCatching {
+            val url = java.net.URL(u)
+            val ip = java.net.InetAddress.getByName(url.host).hostAddress ?: return@runCatching null
+            val hostPart = if (ip.contains(':')) "[$ip]" else ip   // IPv6 literals
+            "http://$hostPart${url.path}"
+        }.getOrNull()
+        return runCatching {
+            val dir = File(dest, "etc/apt/sources.list.d").apply { mkdirs() }
+            when (spec.id) {
+                "debian" -> {
+                    val codename = DistroCatalog.osReleaseField(dest, "VERSION_CODENAME") ?: "bookworm"
+                    val mainIps = LinkedHashSet<String>()
+                    val secIps = LinkedHashSet<String>()
+                    DistroCatalog.DEBIAN_MIRRORS.forEach { m -> toHttpIp(m)?.let { mainIps += it } }
+                    DistroCatalog.DEBIAN_SECURITY_MIRRORS.forEach { m -> toHttpIp(m)?.let { secIps += it } }
+                    if (mainIps.isEmpty()) return false
+                    val text = buildString {
+                        append("Types: deb\nURIs: ").append(mainIps.joinToString(" ")).append('\n')
+                        append("Suites: $codename $codename-updates\n")
+                        append("Components: main contrib non-free non-free-firmware\n")
+                        append("Signed-By: /usr/share/keyrings/debian-archive-keyring.gpg\n")
+                        if (secIps.isNotEmpty()) {
+                            append("\nTypes: deb\nURIs: ").append(secIps.joinToString(" ")).append('\n')
+                            append("Suites: $codename-security\n")
+                            append("Components: main contrib non-free non-free-firmware\n")
+                            append("Signed-By: /usr/share/keyrings/debian-archive-keyring.gpg\n")
+                        }
+                    }
+                    replaceRegularFileWith(File(dir, "debian.sources")) { it.writeText(text) }
+                }
+                "ubuntu" -> {
+                    val codename = DistroCatalog.osReleaseField(dest, "VERSION_CODENAME") ?: "noble"
+                    val ports = archName() == "aarch64" || archName() == "armv7"
+                    val mirrors = if (ports) DistroCatalog.UBUNTU_PORTS_MIRRORS else DistroCatalog.UBUNTU_MIRRORS
+                    val ips = LinkedHashSet<String>()
+                    mirrors.forEach { m -> toHttpIp(m)?.let { ips += it } }
+                    if (ips.isEmpty()) return false
+                    val text = "Types: deb\n" +
+                        "URIs: ${ips.joinToString(" ")}\n" +
+                        "Suites: $codename $codename-updates $codename-backports $codename-security\n" +
+                        "Components: main universe restricted multiverse\n" +
+                        "Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg\n"
+                    replaceRegularFileWith(File(dir, "ubuntu.sources")) { it.writeText(text) }
+                }
+                else -> return false
+            }
+            replaceRegularFileWith(File(dest, "etc/apt/sources.list")) {
+                it.writeText("# managed by EmuX (IP-literal mode)\n")
+            }
+            com.emux.EmuXLog.i("apt sources rewritten to IP literals for ${spec.id}")
+            true
+        }.getOrDefault(false)
+    }
+
+    /** Streaming SHA-256 (hex) of a file — verifies pinned catalog images. */
+    private fun sha256Of(f: File): String {
+        val md = java.security.MessageDigest.getInstance("SHA-256")
+        FileInputStream(f).use { ins ->
+            val buf = ByteArray(64 * 1024)
+            while (true) { val n = ins.read(buf); if (n < 0) break; md.update(buf, 0, n) }
+        }
+        return md.digest().joinToString("") { b -> "%02x".format(b) }
+    }
+
+    /** First repo URL from the guest's apt config (deb822 or one-line). */
+    private fun firstAptRepoUrl(dest: File): String? = runCatching {
+        val dir = File(dest, "etc/apt/sources.list.d")
+        val deb822 = dir.listFiles()?.firstOrNull { it.name.endsWith(".sources") && it.isFile }
+        deb822?.readLines()?.firstOrNull { it.startsWith("URIs:") }
+            ?.substringAfter("URIs:")?.trim()?.split(' ')?.firstOrNull()
+            ?: File(dest, "etc/apt/sources.list").takeIf { it.isFile }?.readLines()
+                ?.firstOrNull { it.startsWith("deb ") }?.split(' ')?.getOrNull(1)
+    }.getOrNull()
+
+    /** Outcome of one apk/apt run: exit status + last output lines for diagnostics. */
     private class ApkRun(val ok: Boolean, val tail: String)
 
     /**
@@ -1205,11 +1729,13 @@ class BootstrapManager(private val ctx: Context) {
                     .firstOrNull { it.startsWith("nameserver") }?.substringAfter(' ')?.trim()
             }.getOrNull()
             sb.append("dns-tcp=${if (ns.isNullOrBlank()) "no-resolv-conf" else "$ns:53 ${tcpProbe(ns, 53)}"}\n")
+            // v0.1.47: works for apk-based AND apt-based distros.
             val repoHost = runCatching {
-                java.net.URL(
-                    File(dest, "etc/apk/repositories").readText()
-                        .lineSequence().firstOrNull { it.isNotBlank() } ?: ""
-                ).host
+                val apkRepos = File(dest, "etc/apk/repositories")
+                val first = if (apkRepos.isFile)
+                    apkRepos.readText().lineSequence().firstOrNull { it.isNotBlank() }
+                else firstAptRepoUrl(dest)
+                first?.takeIf { it.isNotBlank() }?.let { java.net.URL(it).host }
             }.getOrNull()
             if (!repoHost.isNullOrBlank()) {
                 sb.append("repo-tcp=$repoHost:443 ${tcpProbe(repoHost, 443)}\n")
@@ -1774,7 +2300,7 @@ class BootstrapManager(private val ctx: Context) {
         override fun next(): java.nio.file.Path = throw NoSuchElementException()
     }
 
-    private fun postInstall(dest: File) {
+    private fun postInstall(dest: File, spec: DistroSpec) {
         // sane defaults: non-login shells get our env, disable services that need init
         // v0.1.13 THROW FIX: both writes are guarded now. The old code did a bare
         // writeText() on etc/profile.d/emux.sh and — worse — an unguarded
@@ -1802,9 +2328,34 @@ class BootstrapManager(private val ctx: Context) {
                 "if [ -x /bin/bash ]; then export SHELL=/bin/bash; else export SHELL=/bin/sh; fi\n" +
 "export PS1='\\[\\e[38;5;39m\\]emux:\\w\\[\\e[0m\\] \\$ '\n" +
                 "alias ll='ls -alF'\n" +
-                "# apk wrapper that works without root inside proot/chroot-lite\n" +
-                "alias apk='apk --no-interactive'\n"
+                // v0.1.47: package-manager comfort alias per distro family.
+                (when (spec.pkg) {
+                    PkgManager.APK ->
+                        "# apk wrapper that works without root inside proot/chroot-lite\n" +
+                            "alias apk='apk --no-interactive'\n"
+                    PkgManager.APT ->
+                        "# apt comfort for proot (fake-root, no init system)\n" +
+                            "alias apt-install='apt-get install -y --no-install-recommends'\n"
+                    PkgManager.PACMAN ->
+                        "# pacman comfort alias\n" +
+                            "alias pac='pacman -Sy'\n"
+                    PkgManager.DNF ->
+                        "# dnf comfort alias\n" +
+                            "alias dnf-install='dnf -y install'\n"
+                })
             )
+        }
+        // v0.1.47: seed a minimal /etc/hosts when the image lacks one (the
+        // Alpine minirootfs ships WITHOUT it; sudo/sshd-style tools and some
+        // X11 auth paths stall on localhost lookups otherwise). Debian/Ubuntu
+        // images already carry one and are left untouched.
+        runCatching {
+            val hosts = File(dest, "etc/hosts")
+            if (!hosts.isFile) {
+                replaceRegularFileWith(hosts) {
+                    it.writeText("127.0.0.1 localhost\n::1 localhost\n")
+                }
+            }
         }
 
         val osr = File(dest, "etc/os-release")
@@ -1827,7 +2378,8 @@ class BootstrapManager(private val ctx: Context) {
             }
             if (!osr.isFile || osr.length() == 0L) {
                 runCatching { osr.parentFile?.mkdirs() }
-                runCatching { osr.writeText("NAME=\"Alpine Linux\"\nID=alpine\n") }
+                // v0.1.47: stub matches the ACTIVE distro (was Alpine-hardcoded).
+                runCatching { osr.writeText("NAME=\"${spec.label}\"\nID=${spec.id}\n") }
             }
             // Idempotent marker: only append when absent, so repeated bootstraps
             // / retries never pile up "EMUX=1" lines.

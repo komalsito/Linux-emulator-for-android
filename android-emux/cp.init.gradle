@@ -1,0 +1,16 @@
+// ACTION_PLAN §6 helper: resolve + print the debug compile/runtime classpaths
+// without running the memory-heavy compile/dex tasks.
+allprojects {
+    tasks.register("printCp") {
+        doLast {
+            def cfg = project.configurations.findByName("debugCompileClasspath")
+            if (cfg != null) println "CP_START:" + cfg.files.join(File.pathSeparator) + ":CP_END"
+        }
+    }
+    tasks.register("printRuntimeCp") {
+        doLast {
+            def cfg = project.configurations.findByName("debugRuntimeClasspath")
+            if (cfg != null) println "RCP_START:" + cfg.files.join(File.pathSeparator) + ":RCP_END"
+        }
+    }
+}

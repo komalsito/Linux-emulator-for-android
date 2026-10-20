@@ -77,6 +77,8 @@ animator mtrl_fab_hide_motion_spec
 animator mtrl_fab_show_motion_spec
 animator mtrl_fab_transformation_sheet_collapse_spec
 animator mtrl_fab_transformation_sheet_expand_spec
+array distro_entries
+array distro_values
 array wm_entries
 array wm_values
 attr actionBarDivider
@@ -3189,6 +3191,7 @@ id blocking
 id bootstrapBar
 id bootstrapLabel
 id bootstrapPane
+id bootstrapPrompt
 id bottom
 id bounce
 id btnInstall
@@ -3834,7 +3837,10 @@ string bootstrap_failed
 string bootstrap_failed_reason
 string bootstrap_install
 string bootstrap_prompt
+string bootstrap_prompt_fresh
+string bootstrap_prompt_switch
 string bootstrap_starting
+string bootstrap_switch_install
 string bottom_sheet_behavior
 string bottomsheet_action_collapse
 string bottomsheet_action_expand
@@ -3970,6 +3976,10 @@ string path_password_eye
 string path_password_eye_mask_strike_through
 string path_password_eye_mask_visible
 string path_password_strike_through
+string pref_desktop_components_summary
+string pref_desktop_components_title
+string pref_distro_select_summary
+string pref_distro_select_title
 string pref_distro_title
 string pref_fps_title
 string pref_keepawake_summary
@@ -5324,5 +5334,7 @@ styleable View android_theme android_focusable paddingEnd paddingStart theme
 styleable ViewBackgroundHelper android_background backgroundTint backgroundTintMode
 styleable ViewPager2 android_orientation
 styleable ViewStubCompat android_id android_layout android_inflatedId
+xml backup_rules
+xml data_extraction_rules
 xml preferences
 xml usb_device_filter

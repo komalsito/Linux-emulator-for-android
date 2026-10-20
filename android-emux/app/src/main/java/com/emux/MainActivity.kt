@@ -122,6 +122,10 @@ class MainActivity : AppCompatActivity() {
         // exactly when Install was tapped. Belt-and-suspenders with the worker fix.
         b.btnInstall.setOnClickListener {
             try {
+                // v0.1.47: an explicit tap is the user's confirmation to install
+                // the SELECTED distro — including the switch case (another
+                // distro already installed). See BootstrapManager's switch guard.
+                com.emux.core.DistroCatalog.markSwitchConfirmed(this)
                 startBootstrapNow(showUi = true)
             } catch (e: Throwable) {
                 com.emux.EmuXLog.e("install click failed", e)
@@ -211,6 +215,45 @@ class MainActivity : AppCompatActivity() {
     private fun showBootstrapUiOnly() {
         b.bootstrapPane.visibility = android.view.View.VISIBLE
         b.btnInstall.visibility = android.view.View.VISIBLE
+        // v0.1.47 MULTI-DISTRO: the pane names the SELECTED distro; when other
+        // distros are already installed it explains the switch (they stay on
+        // disk — installing one never deletes another).
+        runCatching {
+            val spec = com.emux.core.DistroCatalog.requested(this)
+            val installed = com.emux.core.FsLayout.installedDistroIds(this)
+                .map { com.emux.core.DistroCatalog.byId(it).label }
+            if (installed.isEmpty()) {
+                b.bootstrapPrompt.text =
+                    getString(R.string.bootstrap_prompt_fresh, spec.label, spec.sizeHint)
+                b.btnInstall.text = getString(R.string.bootstrap_install)
+            } else {
+                b.bootstrapPrompt.text = getString(
+                    R.string.bootstrap_prompt_switch, spec.label, spec.sizeHint,
+                    installed.joinToString(", "))
+                b.btnInstall.text = getString(R.string.bootstrap_switch_install)
+            }
+        }
+    }
+
+    /**
+     * v0.1.47: after a successful install/switch, sessions still running from
+     * a DIFFERENT rootfs are restarted in-place (same TerminalSession object +
+     * scrollback) so the new distro takes effect without a force-stop. A
+     * running desktop is stopped; the next Desktop tab visit starts it fresh
+     * against the active distro.
+     */
+    private fun restartStaleDistroSessions() {
+        runCatching {
+            val current = com.emux.core.FsLayout.linuxRoot(this).absolutePath
+            var restarted = 0
+            com.emux.terminal.TerminalService.sessions().value.forEach { s ->
+                val lr = s.launchedRootfs
+                if (lr != null && lr != current) { s.restart(); restarted++ }
+            }
+            if (restarted > 0 && desktop.state.value != com.emux.x11.DesktopService.State.IDLE) {
+                desktop.stop()
+            }
+        }
     }
 
     private fun wireTabs() {
@@ -463,13 +506,20 @@ class MainActivity : AppCompatActivity() {
                         else append("[emux]   Xvfb: missing — desktop unavailable; enable desktop components in Settings and re-Install\n")
                         if (probe.contains("LOADER_OK")) append("[emux]   musl loader + busybox: OK\n")
                         else append("[emux]   musl loader/busybox: FAILED -> " + probe.lineSequence().filter { it.isNotBlank() && !it.startsWith("EMUXPROBE") }.take(3).joinToString(" | ") + "\n")
-                        if (probe.contains("APK_OK")) append("[emux]   apk tool: OK\n")
-                        else append("[emux]   apk tool: cannot run\n")
+                        // v0.1.47: apk (Alpine) OR apt (Debian/Ubuntu) is the
+                        // distro package manager — report whichever family applies.
+                        when {
+                            probe.contains("APK_OK") -> append("[emux]   package manager (apk): OK\n")
+                            probe.contains("APT_OK") -> append("[emux]   package manager (apt): OK\n")
+                            probe.contains("PROBE_NOPM") -> append("[emux]   package manager: NOT FOUND in rootfs\n")
+                            else -> append("[emux]   package manager: cannot run\n")
+                        }
                         // v0.1.30: raw platform-layer markers (SELinux domain,
                         // host exec permission, proot ptrace) — decisive for
                         // OEM-hardened ROMs (HarmonyOS field report).
                         probe.lineSequence()
-                            .filter { it.startsWith("DOMAIN=") || it.startsWith("HOSTEXEC") || it.startsWith("PROOT_PTRACE") }
+                            .filter { it.startsWith("DOMAIN=") || it.startsWith("HOSTEXEC") ||
+                                it.startsWith("PROOT_PTRACE") || it.startsWith("ROOTFS=") }
                             .forEach { append("[emux]   ").append(it).append("\n") }
                         append("[emux] ------------------------------\n")
                     }
@@ -571,6 +621,7 @@ class MainActivity : AppCompatActivity() {
                 runCatching {
                     b.bootstrapBar.isIndeterminate = false
                     if (r.isSuccess) {
+                        restartStaleDistroSessions()
                         ensureSessionAttached()
                         hideBootstrapUi()
                     } else {
@@ -616,6 +667,7 @@ class MainActivity : AppCompatActivity() {
                     runCatching {
                         b.bootstrapBar.isIndeterminate = false
                         if (r.isSuccess) {
+                            restartStaleDistroSessions()
                             ensureSessionAttached()
                             hideBootstrapUi()
                         } else {
@@ -641,6 +693,7 @@ class MainActivity : AppCompatActivity() {
             kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) {
                 b.bootstrapBar.isIndeterminate = false
                 if (r.getOrNull()?.isSuccess == true) {
+                    restartStaleDistroSessions()
                     ensureSessionAttached()
                     hideBootstrapUi()
                 } else {
@@ -688,6 +741,7 @@ class MainActivity : AppCompatActivity() {
                         // visible forever ("Bootstrapped" + full bar over a
                         // working terminal). Hide it and attach the session.
                         if (step == "Bootstrapped" || pct == 100) {
+                            restartStaleDistroSessions()
                             hideBootstrapUi()
                             ensureSessionAttached()
                         }

@@ -12,4 +12,20 @@
         <item>startlxde</item>
         <item>i3</item>
     </string-array>
+
+    <!-- v0.1.47: installable distributions (values MUST match DistroCatalog ids) -->
+    <string-array name="distro_entries">
+        <item>Alpine 3.20 — tiny &amp; fast (~4 MB, apk)</item>
+        <item>Debian 12 bookworm — full-fledged (~40 MB, apt)</item>
+        <item>Ubuntu 24.04 LTS — most software (~61 MB, apt)</item>
+        <item>Arch Linux ARM — rolling release, AUR-style breadth (~138 MB, pacman)</item>
+        <item>Fedora 40 — bleeding-edge developer distro (~30 MB, dnf)</item>
+    </string-array>
+    <string-array name="distro_values">
+        <item>alpine</item>
+        <item>debian</item>
+        <item>ubuntu</item>
+        <item>arch</item>
+        <item>fedora</item>
+    </string-array>
 </resources>

@@ -58,8 +58,19 @@ for c in /usr/bin/xwd /usr/local/bin/xwd; do [ -x "$c" ] && { XWD="$c"; break; }
 for c in /usr/bin/pnmtoplainpnm /usr/local/bin/pnmtoplainpnm; do [ -x "$c" ] && { PNM="$c"; break; }; done
 for c in /bin/nc /usr/bin/nc; do [ -x "$c" ] || [ -L "$c" ] && { NC="$c"; break; }; done
 if [ -z "$XWD" ] || [ -z "$PNM" ]; then
-  echo "emux-capture: installing xwd+netpbm via apk (one time, needs network)" >&2
-  apk add --no-cache xwd netpbm >&2
+  # v0.1.47 multi-distro: xwd lives in x11-apps on Debian/Ubuntu (xwd pkg on
+  # Alpine); pnmtoplainpnm is netpbm on both families.
+  echo "emux-capture: installing xwd+netpbm via the distro package manager (one time, needs network)" >&2
+  if command -v apt-get >/dev/null 2>&1; then
+    apt-get update >&2
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends x11-apps netpbm >&2
+  elif command -v pacman >/dev/null 2>&1; then
+    pacman -Sy --noconfirm --needed xorg-xwd netpbm >&2
+  elif command -v dnf >/dev/null 2>&1; then
+    dnf -y --skip-broken install xorg-x11-apps netpbm >&2
+  else
+    apk add --no-cache xwd netpbm >&2
+  fi
   [ -x /usr/bin/xwd ] && XWD=/usr/bin/xwd
   [ -x /usr/bin/pnmtoplainpnm ] && PNM=/usr/bin/pnmtoplainpnm
 fi
@@ -68,8 +79,18 @@ if [ -z "$XWD" ] || [ -z "$PNM" ]; then
   exit 1
 fi
 if [ -z "$NC" ]; then
-  apk add --no-cache netcat-openbsd >&2
-  for c in /usr/bin/nc /bin/nc; do [ -x "$c" ] && { NC="$c"; break; }; done
+  # v0.1.47 multi-distro: netcat-openbsd exists under the same name on Alpine
+  # and Debian/Ubuntu; apt installs it via alternatives to /usr/bin/nc.
+  if command -v apt-get >/dev/null 2>&1; then
+    DEBIAN_FRONTEND=noninteractive apt-get install -y netcat-openbsd >&2
+  elif command -v pacman >/dev/null 2>&1; then
+    pacman -Sy --noconfirm --needed openbsd-netcat >&2
+  elif command -v dnf >/dev/null 2>&1; then
+    dnf -y install nmap-ncat >&2
+  else
+    apk add --no-cache netcat-openbsd >&2
+  fi
+  for c in /usr/bin/nc /bin/nc; do { [ -x "$c" ] || [ -L "$c" ]; } && { NC="$c"; break; }; done
 fi
 [ -n "$NC" ] || { echo "emux-capture: no TCP client (nc) available" >&2; exit 1; }
 

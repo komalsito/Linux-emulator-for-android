@@ -1,4 +1,4 @@
-# EmuX — Handoff & Action Plan (state at v0.1.46)
+# EmuX — Handoff & Action Plan (state at v0.1.47)
 
 Read this first in a new session. It condenses ~30 debug rounds against a real
 field device (Huawei-family tablet `MRDI-W09`, Android 12/API 31, SELinux
@@ -6,7 +6,8 @@ field device (Huawei-family tablet `MRDI-W09`, Android 12/API 31, SELinux
 
 ## 0. Token hygiene (do this first)
 1. GitHub → Settings → Developer settings → Personal access tokens → **revoke**
-   the old PAT (it was pasted into a chat; treat it as compromised).
+   the old PAT (a PAT was again pasted into chat during the v0.1.47 session —
+   treat ANY chat-pasted token as compromised and rotate it).
 2. Create a new PAT (scope: `repo`).
 3. Update the local remote WITHOUT embedding it in files:
    `git remote set-url origin https://github.com/komalsito/Termux2.git`
@@ -14,14 +15,71 @@ field device (Huawei-family tablet `MRDI-W09`, Android 12/API 31, SELinux
    `https://x-access-token:<PAT>@github.com/...` (never commit it).
 
 ## 1. What EmuX is
-One APK that runs an Alpine Linux userland + X11 desktop on unrooted Android:
-- `core/BootstrapManager.kt`: downloads Alpine minirootfs, extracts, seeds
-  configs, stages proot "native bridge", installs distro components via apk.
+One APK that runs a Linux userland + built-in X11 desktop on unrooted Android.
+Since v0.1.47 it is MULTI-DISTRO: Alpine (default) + Debian 12 + Ubuntu 24.04
++ Arch Linux ARM + Fedora 40, installable side-by-side (see §1.5).
+- `core/BootstrapManager.kt`: downloads the selected distro rootfs, extracts
+  (gz/xz), seeds configs, stages proot "native bridge", installs components
+  via the distro package manager (apk/apt/pacman/dnf) inside proot.
+- `core/DistroCatalog.kt`: the distro table — pinned image URLs + SHA256s
+  (proot-distro release tarballs; Ubuntu also Canonical cloud-images),
+  per-distro package lists, apt mirror tables, switch-confirmation pref.
 - `terminal/`: in-house VT100 renderer (`VtTerminalView`), session process
   management (`TerminalSession` + `TtyWrap`), foreground `TerminalService`.
 - `x11/`: `DesktopService` (frame socket reader), `DesktopView`, in-distro
   `emux-x11` (Xvfb+WM) and `emux-capture` (xwd→PPM→RGB565→TCP :7001).
 - Helper scripts in `app/src/main/assets/bin/` (re-seeded on ENV_VERSION bump).
+
+## 1.5 Multi-distro architecture (v0.1.47) — invariants
+- Layout: `files/distros/<id>/` per distro; `FsLayout.linuxRoot(ctx)` resolves
+  the ACTIVE id (Settings pref "distro") — every session/desktop/bootstrap
+  call site goes through it, so switching distros needs zero call-site edits.
+  The legacy `files/linuxroot` tree is MIGRATED (cheap rename) to
+  `distros/alpine` on first access; if the rename ever fails, linuxRoot()
+  falls back to the legacy path while alpine is active.
+- Marker: `.env_version` content is "<ENV_VERSION>:<distroId>" (e.g. "21:alpine");
+  `isBootstrapped` = marker names the ACTIVE distro + its etc/ exists. A bare
+  number (≤ v0.1.46) counts as alpine but is stale (ENV bumped 20→21) → lands
+  in the cheap re-stamp path (no re-download). ENV_VERSION=21.
+- SWITCH SEMANTICS: distros coexist; installing one never deletes another.
+  Switching active distro with the target not on disk shows an explicit
+  "Install & switch" pane. Guards (keep all three):
+   1. `EmuXApplication` auto-schedules bootstrap ONLY when NO distro is
+      installed (never auto-downloads a switch);
+   2. BootstrapManager refuses a fresh download while another distro is
+      installed unless `DistroCatalog.switchConfirmed(ctx)` (pref
+      "distro_switch_ok_for" == active id; stamped by the Install button);
+   3. MainActivity restarts sessions whose `launchedRootfs` != new active
+      rootfs after success (in-place restart, same scrollback) and stops a
+      running desktop.
+- Downloads: per-distro ordered candidates; SHA256 verified when pinned
+  (all proot-distro images are; Ubuntu cloud-image fallback is magic-bytes
+  only). `.tar.xz` extraction ladder: host `xz|unxz|tar -J` → pure-Java
+  `org.tukaani:xz` (new dependency, 0BSD). The Java tar parser now copies
+  type-'1' HARDLINKS from earlier entries (Debian/Ubuntu images contain them;
+  Alpine minirootfs barely does — the old empty-file behavior would corrupt
+  merged-/usr trees).
+- Component installs: `installDistroExtras` dispatches on `PkgManager` —
+  APK (unchanged v0.1.29-46 ladder), APT (`installAptExtras`: policy-rc.d
+  exit 101 + APT::Sandbox::User=root, on-disk success probes, TUNA/AliYun/USTC
+  deb822 rotation, IP-literal last resort), PACMAN/DNF (`installGenericPm*`:
+  image-shipped repos; pacman `-Sy --noconfirm --needed`, dnf `-y
+  --skip-broken install || -y install`). pd images preinstall bash+util-linux,
+  so `shellOk()` passes OFFLINE — apt/pacman/dnf run only for real gaps.
+- Completeness probes per family (`FsLayout.hasCompleteRootfsAt`): alpine =
+  busybox/sh + alpine-release + musl loader (lstat, never follow); apt =
+  bash/dash + dpkg + etc/debian_version; pacman = bash + usr/bin/pacman +
+  pacman.conf; dnf = bash + usr/bin/dnf + etc/fedora-release. `installedDistroIds`
+  trusts the DIRECTORY NAME first (Debian/Ubuntu trees pass each other's shape
+  probe — sniffing alone mislabels ubuntu/ as debian).
+- Guest scripts are pm-aware (`command -v apt-get/pacman/dnf` cascades in
+  emux-x11/emux-capture auto-install; emux-init.sh Path-2 globs glibc loaders
+  + multiarch lib dirs — still best-effort: proot stays the engine).
+- Catalog refresh procedure: pull TARBALL_URL/TARBALL_SHA256 from
+  proot-distro `vX.Y.Z/distro-plugins/<distro>.sh` (raw.githubusercontent),
+  HEAD-verify, update DistroCatalog. Never transcribe hashes by hand.
+- Adding a distro = one DistroSpec + a hasCompleteRootfsAt probe + (new PM
+  family only) a runPmProot payload + guest-script cascade branch + UI arrays.
 
 ## 2. Verified-working on the field device (v0.1.45 screenshots)
 - Bootstrap: rootfs download/extract, apk inside proot (util-linux, bash,
@@ -32,6 +90,14 @@ One APK that runs an Alpine Linux userland + X11 desktop on unrooted Android:
 - Self-test markers all OK: proot, PTY wrapper, bash, Xvfb, apk, PROOT_PTRACE_OK.
 
 ## 3. OPEN ISSUES (next actions)
+0. **Field-verify the new installers (v0.1.47)**: apt (Debian/Ubuntu),
+   pacman (Arch), dnf (Fedora) under proot are sandbox-designed but NOT yet
+   device-proven; the failure banners embed the apt/pacman/dnf output tails +
+   device probe. Watch: dnf metadata refresh time on slow links, pacman
+   keyring/CheckSpace noise, Ubuntu noble armhf (pd image only — Canonical
+   cloud-images dropped armhf), NO Ubuntu image for 32-bit x86 (error is
+   explicit). Debian/Ubuntu/Arch/Fedora desktop components install was never
+   field-tested either (package names verified against distro repos only).
 1. **Desktop frames**: pane shows "waiting for X frames…". Since v0.1.45 the
    pane ALSO paints the live x11/capture session log tail while waiting — get a
    desktop screenshot on v0.1.46 and read the tail (Xvfb log / apk / nc errors).
@@ -82,27 +148,53 @@ One APK that runs an Alpine Linux userland + X11 desktop on unrooted Android:
   cancelled on pause and never re-armed on resume → black screen after
   returning to the app.
 
-## 6. Sandbox build recipe (1 GB RAM box; full AGP assembleDebug OOMs)
+## 6. Sandbox build recipe (1 GB RAM box) — RE-VERIFIED END-TO-END at v0.1.47
+Full `./gradlew assembleDebug` OOMs at :app:compileDebugKotlin (Kotlin daemon +
+gradle JVM together exceed ~1 GB). The manual pipeline below built the shipped
+v0.1.47 APK from a FRESH sandbox in ~25 min total (most of it downloads):
 ```bash
-apt-get install -y openjdk-17-jdk-headless wget unzip zip
-# SDK
-cmdline-tools → sdkmanager "platforms;android-34" "build-tools;34.0.0"
-# Kotlin 1.9.24 CLI (matches project), R8 8.5.27 jar (AGP-matching dexer)
-wget github JetBrains/kotlin v1.9.24 zip; wget dl.google.com .../r8/8.5.27/r8-8.5.27.jar
-# Classpaths (configuration-only Gradle run, memory-capped):
-GRADLE_OPTS="-Xmx96m" ./gradlew -I cp.init.gradle :app:printCp :app:printRuntimeCp \
-  :app:processDebugResources :app:dataBindingGenBaseClassesDebug :app:mergeDebugJavaResource \
+# 0) tooling (sandbox starts bare: no java/wget/zip/xz)
+apt-get update && apt-get install -y openjdk-17-jdk-headless wget unzip zip xz-utils
+
+# 1) Android SDK (local.properties already points at /opt/android-sdk)
+wget https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip
+unzip → /opt/android-sdk/cmdline-tools/latest
+yes | sdkmanager --sdk_root=/opt/android-sdk --licenses
+sdkmanager --sdk_root=/opt/android-sdk "platforms;android-34" "build-tools;34.0.0" "platform-tools"
+
+# 2) compilers
+wget github.com/JetBrains/kotlin/releases/download/v1.9.24/kotlin-compiler-1.9.24.zip → /opt/bt/kotlinc
+wget dl.google.com/android/maven2/com/android/tools/r8/8.5.27/r8-8.5.27.jar → /opt/bt/r8.jar
+
+# 3) warm gradle + print classpaths + run resource tasks (memory-capped, NO compile)
+#    (cp.init.gradle in repo root registers :app:printCp / :app:printRuntimeCp)
+JAVA_HOME=… GRADLE_USER_HOME=/opt/gradle-home GRADLE_OPTS="-Xmx96m" \
+  ./gradlew -I cp.init.gradle :app:printCp :app:printRuntimeCp \
+  :app:processDebugResources :app:dataBindingGenBaseClassesDebug \
   --no-daemon --max-workers=1 -Dorg.gradle.jvmargs="-Xmx512m -XX:MaxMetaspaceSize=256m"
-# (cp.init.gradle registers tasks resolving debugCompileClasspath/debugRuntimeClasspath)
-# Extract EVERY runtime AAR's classes.jar AND libs/*.jar (emoji2 ships
-# libs/repackaged.jar — missing it = 52 missing classes).
-# Compile: kotlinc -jvm-target 17 -cp <compile cp + R.jar> <all .kt> <ActivityMainBinding.java>
-#          javac the binding against kotlinc output.
-# Dex: java -cp r8.jar com.android.tools.r8.D8 --min-api 24 --lib android.jar \
-#        --output dex/ app-kclasses.jar app-jclasses.jar <repackaged.jar> <ALL runtime jars>
-# Package: resources-debug.ap_ + classes*.dex + assets/ + merged java resources
-#          (META-INF/services!, kotlin/*.kotlin_builtins, *.version, DebugProbesKt.bin)
-#          → zipalign -f -p 4 → apksigner sign (debug keystore).
+#    extract: grep -o "CP_START:.*:CP_END" | sed → cp.txt ; same RCP_START → rcp.txt
+
+# 4) AARs are RAW on both classpaths — extract classes.jar + libs/*.jar from
+#    EVERY .aar entry (emoji2 libs/repackaged.jar lesson still applies)
+
+# 5) Kotlin: kotlinc -jvm-target 17 -cp "<cp jars + extracted AAR jars + android.jar + R.jar>"
+#    -d kclasses $(find app/src/main/java -name '*.kt') + ActivityMainBinding.java (for resolution)
+JAVA_OPTS="-Xmx620m -XX:MaxMetaspaceSize=224m"   # fits the 1 GB box
+
+# 6) javac the generated binding against kclasses (COLON-joined cp!)
+
+# 7) Dex: java -Xmx512m -cp r8.jar com.android.tools.r8.D8 --min-api 24 \
+#      --lib android.jar --output dex/ app-kclasses.jar app-jclasses.jar R.jar \
+#      <ALL runtime jars: extracted-AAR classes+libs + every plain jar of debugRuntimeClasspath>
+
+# 8) Package: unzip resources-debug.ap_ → + classes*.dex + assets/ (copy from
+#    app/src/main/assets — includes bin/ AND proot/) + merged_java_res base.jar
+#    (META-INF/services!, kotlin builtins, *.version, DebugProbesKt.bin; skip its MANIFEST)
+#    → zip -r (resources.arsc MUST be STORED: zip -0 it separately)
+#    → zipalign -f -p 4 → apksigner sign --ks debug-keystore/emux-debug.jks
+#      --ks-pass pass:emuxdebug --ks-key-alias emux
+# 9) Verify: aapt2 dump badging (versionCode/Name), apksigner verify, python
+#    zipfile asset/arsc parity vs previous APK, grep dex for new class names.
 ```
 Pitfalls checklist (each caused a real crash/bug once):
 - Missing `META-INF/services/kotlinx.coroutines.internal.MainDispatcherFactory`
@@ -110,9 +202,19 @@ Pitfalls checklist (each caused a real crash/bug once):
 - Dexing the COMPILE classpath → 622 missing runtime classes → startup
   NoClassDefFoundError (v0.1.32 lesson). Use debugRuntimeClasspath.
 - D8 rejects raw class directories here → jar them first.
-- Keystore lives outside the repo: if the sandbox resets, the signature
-  changes → devices need ONE `adb uninstall com.emux` afterwards. Keep the
-  keystore in the repo (e.g. `debug-keystore/` with a README) if this recurs.
+- KOTLIN BLOCK COMMENTS NEST: `files/distros/*` inside a KDoc opens a nested
+  comment that swallows the rest of the file ("unclosed comment" + phantom
+  "missing }" errors pointing elsewhere). Never write `/*` inside comments.
+- javac/kotlinc -cp is COLON-separated; a space-joined jar list silently
+  resolves nothing ("cannot find symbol androidx.annotation.NonNull").
+- `grep CP_START` also matches `RCP_START` — extract the two marker lines with
+  distinct patterns or the classpath is garbage (v0.1.47 lesson).
+- `cmd | head` swallows the exit status → `set -e` does NOT stop the pipeline
+  on javac failure; the empty jar then sails into D8 (check class counts!).
+- resources.arsc must end up STORED (zip -0) like AGP packages it.
+- Keystore: NOW COMMITTED (`android-emux/debug-keystore/emux-debug.jks`,
+  pass `emuxdebug`, alias `emux`) — signatures are stable across sandboxes;
+  no more uninstall churn after the one-time pre-0.1.47 migration.
 
 ## 7. Termux cross-check (approach validation)
 - targetSdk 28 / W^X exemption: identical to Termux's long-standing choice.
@@ -135,7 +237,11 @@ desktop diag · v0.1.38/39 winsize channel (+async-stdin fix, -noshmem retry) ·
 v0.1.40 pane hide + stream dbg · v0.1.41/42 attach marker, tails ·
 v0.1.43 RENDER FIX (full repaint) · v0.1.44 proot `-k` removal ·
 v0.1.45 pump re-arm on resume + upgrade hook + pane live tails ·
-v0.1.46 sudo+apt extras (best effort).
+v0.1.46 sudo+apt extras (best effort) ·
+v0.1.47 MULTI-DISTRO (Debian 12 / Ubuntu 24.04 / Arch ARM / Fedora 40 via
+pinned proot-distro images; coexisting files/distros/<id>, explicit switch
+guard, apt/pacman/dnf install ladders, tar.xz + hardlink-aware extraction,
+SHA256 verification, committed debug keystore, ENV_VERSION 21).
 
 ## 9. Field-report protocol (keep using it)
 Every failure banner embeds: android/model/targetSdk/selinux, exec(loader),

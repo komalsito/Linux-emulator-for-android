@@ -35,6 +35,9 @@ public final class ActivityMainBinding implements ViewBinding {
   public final LinearLayout bootstrapPane;
 
   @NonNull
+  public final TextView bootstrapPrompt;
+
+  @NonNull
   public final Button btnInstall;
 
   @NonNull
@@ -75,8 +78,8 @@ public final class ActivityMainBinding implements ViewBinding {
 
   private ActivityMainBinding(@NonNull ConstraintLayout rootView,
       @NonNull LinearProgressIndicator bootstrapBar, @NonNull TextView bootstrapLabel,
-      @NonNull LinearLayout bootstrapPane, @NonNull Button btnInstall,
-      @NonNull TextView desktopStatus, @NonNull DesktopView desktopView,
+      @NonNull LinearLayout bootstrapPane, @NonNull TextView bootstrapPrompt,
+      @NonNull Button btnInstall, @NonNull TextView desktopStatus, @NonNull DesktopView desktopView,
       @NonNull ExtraKeysView extraKeys, @NonNull FrameLayout paneDesktop,
       @NonNull ConstraintLayout root, @NonNull TextView statusRoot,
       @NonNull TextView statusSessions, @NonNull TextView tabSettings, @NonNull TextView tabTerm,
@@ -85,6 +88,7 @@ public final class ActivityMainBinding implements ViewBinding {
     this.bootstrapBar = bootstrapBar;
     this.bootstrapLabel = bootstrapLabel;
     this.bootstrapPane = bootstrapPane;
+    this.bootstrapPrompt = bootstrapPrompt;
     this.btnInstall = btnInstall;
     this.desktopStatus = desktopStatus;
     this.desktopView = desktopView;
@@ -142,6 +146,12 @@ public final class ActivityMainBinding implements ViewBinding {
       id = R.id.bootstrapPane;
       LinearLayout bootstrapPane = ViewBindings.findChildViewById(rootView, id);
       if (bootstrapPane == null) {
+        break missingId;
+      }
+
+      id = R.id.bootstrapPrompt;
+      TextView bootstrapPrompt = ViewBindings.findChildViewById(rootView, id);
+      if (bootstrapPrompt == null) {
         break missingId;
       }
 
@@ -220,8 +230,9 @@ public final class ActivityMainBinding implements ViewBinding {
       }
 
       return new ActivityMainBinding((ConstraintLayout) rootView, bootstrapBar, bootstrapLabel,
-          bootstrapPane, btnInstall, desktopStatus, desktopView, extraKeys, paneDesktop, root,
-          statusRoot, statusSessions, tabSettings, tabTerm, tabX11, termContainer, topBar);
+          bootstrapPane, bootstrapPrompt, btnInstall, desktopStatus, desktopView, extraKeys,
+          paneDesktop, root, statusRoot, statusSessions, tabSettings, tabTerm, tabX11,
+          termContainer, topBar);
     }
     String missingId = rootView.getResources().getResourceName(id);
     throw new NullPointerException("Missing required view with ID: ".concat(missingId));

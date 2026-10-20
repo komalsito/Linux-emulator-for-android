@@ -1,5 +1,7 @@
 R_DEF: Internal format may change without notice
 local
+array distro_entries
+array distro_values
 array wm_entries
 array wm_values
 color emux_accent
@@ -12,6 +14,7 @@ drawable ic_emux_notif
 id bootstrapBar
 id bootstrapLabel
 id bootstrapPane
+id bootstrapPrompt
 id btnInstall
 id desktopStatus
 id desktopView
@@ -33,9 +36,16 @@ string bootstrap_failed
 string bootstrap_failed_reason
 string bootstrap_install
 string bootstrap_prompt
+string bootstrap_prompt_fresh
+string bootstrap_prompt_switch
 string bootstrap_starting
+string bootstrap_switch_install
 string notif_channel_sessions
 string notif_channel_sessions_desc
+string pref_desktop_components_summary
+string pref_desktop_components_title
+string pref_distro_select_summary
+string pref_distro_select_title
 string pref_distro_title
 string pref_fps_title
 string pref_keepawake_summary
@@ -55,5 +65,7 @@ style EmuX
 style EmuX.Prefs
 style EmuX.Tab
 style EmuX.Translucent
+xml backup_rules
+xml data_extraction_rules
 xml preferences
 xml usb_device_filter

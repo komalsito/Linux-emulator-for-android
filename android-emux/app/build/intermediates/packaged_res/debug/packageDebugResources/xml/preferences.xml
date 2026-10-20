@@ -2,6 +2,16 @@
 <PreferenceScreen xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:app="http://schemas.android.com/apk/res-auto">
 
+    <!-- v0.1.47: the ACTIVE distro. Installs are explicit: picking a distro
+         that is not on disk shows an Install prompt on the main screen. -->
+    <ListPreference
+        app:key="distro"
+        app:title="@string/pref_distro_select_title"
+        app:summary="@string/pref_distro_select_summary"
+        app:entries="@array/distro_entries"
+        app:entryValues="@array/distro_values"
+        app:defaultValue="alpine" />
+
     <ListPreference
         app:key="wm"
         app:title="@string/pref_wm_title"
@@ -22,8 +32,19 @@
         app:summary="@string/pref_keepawake_summary"
         app:defaultValue="true" />
 
+    <!-- v0.1.28: when enabled (default), bootstrap also installs the X11
+         desktop stack via apk (xvfb, xkbcomp, xkeyboard-config, openbox,
+         xterm, xwd, xhost, netpbm — ~25 MB one-time). Disable on slow
+         connections; the terminal works either way. -->
+    <SwitchPreferenceCompat
+        app:key="desktop_components"
+        app:title="@string/pref_desktop_components_title"
+        app:summary="@string/pref_desktop_components_summary"
+        app:defaultValue="true" />
+
     <EditTextPreference
         app:key="mirror"
         app:title="@string/pref_distro_title"
+        app:summary="Alpine: mirror base URL. Any distro: paste a full .tar.gz/.tar.xz rootfs URL to use a self-hosted image."
         app:defaultValue="https://dlcdn.alpinelinux.org/alpine/v" />
 </PreferenceScreen>

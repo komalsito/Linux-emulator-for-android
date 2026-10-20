@@ -4,7 +4,7 @@
             "outputFile": "com.emux.app-mergeDebugResources-47:/values-sw360dp-v13/values-sw360dp-v13.xml",
             "map": [
                 {
-                    "source": "/root/.gradle/caches/transforms-4/2835578147db7046970f3e3a8af8abb1/transformed/preference-1.2.1/res/values-sw360dp-v13/values-sw360dp-v13.xml",
+                    "source": "/opt/gradle-home/caches/transforms-4/2835578147db7046970f3e3a8af8abb1/transformed/preference-1.2.1/res/values-sw360dp-v13/values-sw360dp-v13.xml",
                     "from": {
                         "startLines": "2",
                         "startColumns": "4",

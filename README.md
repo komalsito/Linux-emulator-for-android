@@ -1,10 +1,12 @@
 # EmuX — Linux + X11 emulator for Android, in one app
 
-EmuX runs a full Alpine Linux userland inside a single Android APK with:
+EmuX runs a full Linux userland inside a single Android APK — **your choice of
+Alpine (default), Debian 12, Ubuntu 24.04, Arch Linux ARM or Fedora** — with
+the X11 desktop built into the same app (no companion app like Termux:X11):
 
 - **Terminal tab** — custom VT100/xterm emulator view (`VtTerminalView`) with an extra-keys row (ESC, CTRL, ALT, arrows…), real-PTY sessions (util-linux `script(1)` from the distro, exec'd through the musl loader — verified pts + TIOCSCTTY job control), and a foreground `TerminalService` for power-efficient background execution (Termux-style).
 - **X11 Desktop tab** — in-distro `Xvfb` + Openbox under **bundled proot** (chroot-equivalent without root), with the framebuffer streamed to the Android UI via a TCP capture socket (`emux-capture`: `xwd` → PPM → RGB565 → single persistent socket; fixed-size 8-byte stream header + 12-byte frame headers).
-- **Root-aware bootstrap** — on first launch `BootstrapManager` downloads & extracts an Alpine minirootfs (~4 MB) into app-private storage, then runs the distro's own `apk` (through the musl loader, `--root` mode) to install `util-linux` (script/PTY), `bash`, and — unless disabled in Settings — the desktop stack (`xvfb`, `xkbcomp`, `openbox`, `xterm`, `xwd`, `xhost`, `netpbm`). If Magisk/root is detected, `RootManager` upgrades sessions to real chroot/Xorg mode.
+- **Multi-distro, root-aware bootstrap** — on first launch `BootstrapManager` downloads & extracts the selected distro rootfs into app-private storage (`files/distros/<id>/`), then runs the distro's OWN package manager inside the bundled proot — `apk` (Alpine), `apt` (Debian/Ubuntu), `pacman` (Arch), `dnf` (Fedora) — to install `util-linux` (script/PTY), `bash`, `sudo`, and — unless disabled in Settings — the desktop stack (Xvfb, xkbcomp, Openbox, xterm, xwd/xhost, netpbm, netcat). Distro images are the SHA256-pinned proot-distro release tarballs (Debian/Ubuntu/Arch/Fedora) plus Alpine minirootfs from the official mirrors; Ubuntu additionally falls back to Canonical cloud-images. **Installed distros coexist on disk** — switching in Settings → "Linux distribution" activates one; a not-yet-installed selection shows an explicit Install prompt (nothing downloads without your tap). If Magisk/root is detected, `RootManager` upgrades sessions to real chroot/Xorg mode.
 - **Tasker/API integration** — `EmuXExecuteService` exposes a permission-guarded intent so other apps can run commands inside the Linux environment.
 
 ## Why targetSdk 28 (important)
@@ -28,16 +30,34 @@ the rootfs automatically (banner + Install button; runs once — the completion
 marker `.env_version` plus a fixed rootfs-completeness probe make re-launches
 instant, and app updates re-seed helpers/components WITHOUT re-downloading).
 
-## Package management inside the environment
+**Upgrading from any pre-0.1.47 build requires ONE `adb uninstall com.emux`**
+(older APKs were signed with ephemeral per-machine debug keys). Since v0.1.47
+the debug keystore is committed in `android-emux/debug-keystore/`, so the
+signature is stable across builds forever and `adb install -r` works again.
 
-The distro is **Alpine**: `apk` is the system package manager
-(`apk add <pkg>`). Since v0.1.46 the bootstrap also installs **sudo** and
-**apt** (Alpine community packages) for familiarity: inside proot you are
-fake-root, `sudo` works out of the box, and `apt` is available as a
-Debian-style frontend — but note it manages its own lists and cannot replace
-`apk` for system components. See `android-emux/docs/ACTION_PLAN.md` for the
-full handoff/action-plan document (architecture invariants, device
-landmines, sandbox build recipe, open issues).
+## Distros & package management (v0.1.47)
+
+| Distro | Version | Download | Package manager | Notes |
+|---|---|---|---|---|
+| **Alpine** (default) | 3.20.3 minirootfs | ~4 MB | `apk` | fastest install; `sudo`+`apt` preinstalled for familiarity |
+| **Debian** | 12 bookworm | ~40 MB | `apt` | full-fledged glibc distro |
+| **Ubuntu** | 24.04 LTS noble | ~61 MB | `apt` | biggest software selection; falls back to Canonical cloud-images |
+| **Arch Linux ARM** | rolling | ~138 MB | `pacman` | ALARM repos preconfigured |
+| **Fedora** | 40 | ~30 MB | `dnf` | bleeding-edge developer distro |
+
+All distros install into `files/distros/<id>/` and **coexist**: pick the active
+one under Settings → *Linux distribution*. Selecting a distro that is not on
+disk shows an *Install & switch* prompt — other distros are never touched, and
+switching back is instant (no re-download). Inside proot you are fake-root:
+`sudo` works out of the box on every distro. Images are the proot-ready
+SHA256-pinned tarballs from [termux/proot-distro releases](https://github.com/termux/proot-distro/releases)
+(Debian/Ubuntu/Arch/Fedora) — pinned in `core/DistroCatalog.kt`; a full custom
+`.tar.gz`/`.tar.xz` rootfs URL can be set via Settings → *Mirror / custom
+rootfs URL* (which also remains the Alpine mirror-base override).
+
+See `android-emux/docs/ACTION_PLAN.md` for the full handoff/action-plan
+document (architecture invariants, device landmines, sandbox build recipe,
+open issues).
 
 ## Build from source
 
@@ -54,13 +74,14 @@ Requires JDK 17+ and the Android SDK (platform 34).
 ```
 android-emux/            Gradle project (Kotlin, single module)
   app/src/main/java/com/emux/
-    core/                BootstrapManager, RootManager, FsLayout
+    core/                BootstrapManager, DistroCatalog, RootManager, FsLayout
     terminal/            TerminalService, TerminalSession (TtyWrap PTY), VtTerminalView, ExtraKeysView
     x11/                 DesktopService, DesktopView, X11Client, UsbCaptureActivity
     api/                 EmuXExecuteService (external command API)
-  app/src/main/assets/bin/     emux-init.sh, emux-x11, emux-capture, emux-init-probe.sh
+  app/src/main/assets/bin/     emux-init.sh, emux-x11, emux-capture, emux-init-probe.sh, emux-winsize
   app/src/main/assets/proot/   bundled proot + libtalloc + libandroid-shmem per ABI
                                (Termux-built binaries; see proot/LICENSES.txt)
+  debug-keystore/        committed debug signing key (stable sideload upgrades)
 emux-debug.apk           Latest debug build (also attached to GitHub Releases)
 ```
 
@@ -83,10 +104,11 @@ musl-loader exec (terminal only), then plain Android sh (CMD honored).
 
 ## Status / caveats
 
-- v0.1.28 debug build — not yet release-signed or R8-minified.
+- v0.1.47 debug build — not yet release-signed or R8-minified.
 - Terminal geometry: no TIOCSWINSZ from Java (no NDK); shells default to 80x24.
-- Desktop requires the one-time apk component install (Settings → “Install
-  desktop components”, on by default) and ~90 MB of disk.
+- Desktop requires the one-time distro component install (Settings → “Install
+  desktop components”, on by default) and ~90 MB of disk on Alpine (~400 MB on
+  Ubuntu with the desktop stack).
 - On-device runtime validated on hardware only; please report issues via
   GitHub Issues with `adb logcat | grep -i emux` (the in-app
   `environment self-test` banner also pinpoints the broken layer).

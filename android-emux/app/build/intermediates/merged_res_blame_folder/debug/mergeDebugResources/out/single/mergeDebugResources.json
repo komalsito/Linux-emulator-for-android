@@ -1,5 +1,9 @@
 [
     {
+        "merged": "com.emux.app-debug-49:/xml_backup_rules.xml.flat",
+        "source": "com.emux.app-main-51:/xml/backup_rules.xml"
+    },
+    {
         "merged": "com.emux.app-debug-49:/xml_preferences.xml.flat",
         "source": "com.emux.app-main-51:/xml/preferences.xml"
     },
@@ -22,5 +26,9 @@
     {
         "merged": "com.emux.app-debug-49:/layout_activity_main.xml.flat",
         "source": "com.emux.app-main-51:/layout/activity_main.xml"
+    },
+    {
+        "merged": "com.emux.app-debug-49:/xml_data_extraction_rules.xml.flat",
+        "source": "com.emux.app-main-51:/xml/data_extraction_rules.xml"
     }
 ]

@@ -1,12 +1,12 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     package="com.emux"
-    android:versionCode="27"
-    android:versionName="0.1.27" >
+    android:versionCode="47"
+    android:versionName="0.1.47" >
 
     <uses-sdk
         android:minSdkVersion="24"
-        android:targetSdkVersion="34" />
+        android:targetSdkVersion="28" />
 
     <!-- Network: apt/pip/npm inside the Linux env, X11 over loopback TCP -->
     <uses-permission android:name="android.permission.INTERNET" />
@@ -61,8 +61,10 @@
         android:name="com.emux.EmuXApplication"
         android:allowBackup="true"
         android:appComponentFactory="androidx.core.app.CoreComponentFactory"
+        android:dataExtractionRules="@xml/data_extraction_rules"
         android:debuggable="true"
         android:extractNativeLibs="false"
+        android:fullBackupContent="@xml/backup_rules"
         android:hardwareAccelerated="true"
         android:icon="@mipmap/ic_launcher"
         android:label="@string/app_name"
