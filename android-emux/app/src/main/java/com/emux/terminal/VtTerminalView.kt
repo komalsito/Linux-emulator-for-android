@@ -193,7 +193,11 @@ class VtTerminalView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attr
         markAllDirty()
     }
 
+    @Volatile var fedBytes: Long = 0L
+        private set
+
     fun feed(bytes: ByteArray) {
+        fedBytes += bytes.size          // v0.1.45 diag counter
         for (b in bytes) parseByte(b.toInt() and 0xFF)
         markRowDirty(curY)
         invalidate()
@@ -630,7 +634,8 @@ class VtTerminalView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attr
 
     /** v0.1.40: renderer state for field diagnostics (fed into the stream dbg line). */
     fun dbgState(): String =
-        "cur=($curX,$curY) grid=${rows}x${cols} pty=${session?.ptyWrapped}"
+        "cur=($curX,$curY) grid=${rows}x${cols} pty=${session?.ptyWrapped}" +
+        " fed=$fedBytes/pumped=${session?.pumpedBytes ?: 0}"
 
     /** Extra-keys bar entry point (ESC, CTRL, ALT, arrows sent as raw bytes). */
     fun sendBytes(b: ByteArray) { session?.write(b) }

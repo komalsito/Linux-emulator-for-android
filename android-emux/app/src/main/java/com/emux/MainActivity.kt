@@ -203,6 +203,8 @@ class MainActivity : AppCompatActivity() {
      */
     private fun refocusTerminal() {
         runCatching { termView?.post { termView?.showKeyboard(true) } }
+        // v0.1.45: a session born before helpers existed upgrades in-place now.
+        runCatching { termView?.session?.upgradeToGuestPtyIfAvailable() }
     }
 
     /** Bootstrap banner without auto-starting anything (fresh install path). */
@@ -331,24 +333,34 @@ class MainActivity : AppCompatActivity() {
                     }
                     if (view.session !== s) {
                         view.session = s
-                        pumpOutput(view, s)
                         watchLiveness(view, s)
                         // v0.1.41: unconditional attach marker. If THIS never
                         // appears on a field screenshot, the pump/render path
                         // itself is broken (not the child stream).
                         view.feed(("[emux] attached #" + s.id +
                             " pty=" + s.ptyWrapped + "\r\n").toByteArray())
-                        // v0.1.25 DIAGNOSTIC: surface PTY availability in the
-                        // terminal itself so users can report exactly which
-                        // layer is broken without adb/logcat access.
-                        val tty = com.emux.terminal.TtyWrap
-                        // v0.1.37: guest-side PTY (script(1) inside proot) counts
-                        // as a real PTY even though no host wrapper probes OK.
-                        if (!tty.available() && !s.ptyWrapped) {
-                            view.feed("\n[emux] WARNING: no PTY wrapper found on this ROM - typing will NOT echo and commands may hang. Install busybox or root the device.\n".toByteArray())
-                        } else if (!tty.hasCtty && !s.ptyWrapped) {
-                            view.feed("\n[emux] NOTE: PTY relay active but WITHOUT controlling terminal (toybox script). Ctrl-Z / background jobs may misbehave; normal typing works.\n".toByteArray())
-                        }
+                    }
+                    // v0.1.45 CRITICAL: the scrollback pump used to live inside
+                    // pumpOutput's repeatOnLifecycle block, which is CANCELLED on
+                    // pause and never re-created on resume when view.session===s
+                    // — after returning to the app, session bytes never reached
+                    // the view again (only direct feeds showed): "worked the
+                    // first time, closed and came back = black". Re-arm the pump
+                    // on EVERY collect pass (cancelling the stale one).
+                    pumpJob?.cancel()
+                    pumpJob = lifecycleScope.launch {
+                        for (chunk in s.scrollback) view.feed(chunk)
+                    }
+                    // v0.1.25 DIAGNOSTIC: surface PTY availability in the
+                    // terminal itself so users can report exactly which
+                    // layer is broken without adb/logcat access.
+                    val tty = com.emux.terminal.TtyWrap
+                    // v0.1.37: guest-side PTY (script(1) inside proot) counts
+                    // as a real PTY even though no host wrapper probes OK.
+                    if (!tty.available() && !s.ptyWrapped) {
+                        view.feed("\n[emux] WARNING: no PTY wrapper found on this ROM - typing will NOT echo and commands may hang. Install busybox or root the device.\n".toByteArray())
+                    } else if (!tty.hasCtty && !s.ptyWrapped) {
+                        view.feed("\n[emux] NOTE: PTY relay active but WITHOUT controlling terminal (toybox script). Ctrl-Z / background jobs may misbehave; normal typing works.\n".toByteArray())
                     }
                 }
             }
@@ -467,6 +479,9 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    /** v0.1.45: current scrollback pump (see ensureSessionAttached). */
+    private var pumpJob: kotlinx.coroutines.Job? = null
+
     private fun pumpOutput(view: VtTerminalView, s: com.emux.terminal.TerminalSession) {
         // v0.1.40 FIELD DIAGNOSTIC: one-shot dump of the child's raw stream head
         // (escaped) + renderer cursor/grid state, so a single screenshot shows
@@ -496,9 +511,6 @@ class MainActivity : AppCompatActivity() {
         // transitions to DEAD, and print an explicit notice on death/exit.
         lifecycleScope.launch {
             repeatOnLifecycle(Lifecycle.State.STARTED) {
-                launch {
-                    for (chunk in s.scrollback) view.feed(chunk)
-                }
                 launch {
                     if (s.state.value == com.emux.terminal.TerminalSession.State.DEAD) {
                         view.feed("[emux] session #${s.id} already exited (code ${s.exitCode}) — starting a new shell…\n".toByteArray())

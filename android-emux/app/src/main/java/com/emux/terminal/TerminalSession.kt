@@ -121,6 +121,10 @@ class TerminalSession(
      *  garble is diagnosed from what came LAST, not first). */
     val streamTail = StringBuilder()
 
+    /** v0.1.45: bytes handed to the scrollback channel (vs view.fedBytes). */
+    @Volatile var pumpedBytes: Long = 0L
+        private set
+
     /**
      * v0.1.31: true when THIS session's child actually runs under a PTY wrapper
      * (script/busybox/distro-script). Sessions born before bootstrap finished
@@ -139,6 +143,21 @@ class TerminalSession(
      * shells) after [restart] replaced it.
      */
     @Volatile private var generation = 0
+
+    /**
+     * v0.1.45: sessions born while helpers were still seeding fall back to the
+     * pipe shell; once proot+script exist, upgrade in-place on demand (called
+     * when bootstrap reports success) instead of waiting for a registry emit.
+     */
+    fun upgradeToGuestPtyIfAvailable(): Boolean {
+        if (ptyWrapped) return false
+        val r = com.emux.core.FsLayout.linuxRoot(ctx)
+        val can = com.emux.core.FsLayout.prootBin(ctx).isFile &&
+            (java.io.File(r, "usr/bin/script").isFile || java.io.File(r, "bin/script").isFile)
+        if (!can) return false
+        restart()
+        return true
+    }
 
     /**
      * v0.1.31 BUGFIX ("terminal still cannot type AFTER Install succeeded"):
@@ -224,6 +243,7 @@ class TerminalSession(
                         if (streamTail.length > 600) streamTail.delete(0, streamTail.length - 600)
                     }
                     outputSeen.value = true   // v0.1.19: liveness proof for the UI
+                    pumpedBytes += n          // v0.1.45 diag counter
                     lastActivityTs = System.currentTimeMillis()
                     touchWake()
                     scrollback.send(buf.copyOf(n))

@@ -284,6 +284,12 @@ class DesktopService(
     /** v0.1.37: per-session output ring for headless desktop sessions (see startDesktop). */
     private val diag = mutableMapOf<String, StringBuilder>()
 
+    /** v0.1.45: last lines of the headless X/capture sessions, for pane painting. */
+    fun diagTail(): String = listOf("x11", "capture").mapNotNull { t ->
+        diag[t]?.toString()?.lineSequence()?.filter { it.isNotBlank() }?.toList()
+            ?.takeLast(2)?.joinToString(" | ")
+    }.joinToString(" /// ")
+
     private fun pumpDiag(tag: String, s: TerminalSession) {
         scope.launch {
             val sb = diag.getOrPut(tag) { StringBuilder() }

@@ -71,7 +71,10 @@ class DesktopView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attrs) 
             // v0.1.41: paint the failure tail ON the pane too — the status
             // TextView is easy to miss off-screen, and these lines are the only
             // field-visible proof of WHY X/capture died (Xvfb log, apk, nc…).
+            // v0.1.45: while waiting, also show the live capture/X log tail so
+            // the pane is never silent (errorText only lands on terminal events).
             val err = desktop?.errorText?.value
+                ?: desktop?.diagTail()?.takeIf { it.isNotBlank() }
             if (!err.isNullOrBlank()) {
                 val pe = Paint().apply { color = Color.argb(0xD0, 0xFF, 0x8A, 0x65); textSize = 18f }
                 var y = height / 2f + 36f
