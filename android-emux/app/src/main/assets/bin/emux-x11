@@ -93,4 +93,10 @@ run_wm "$WM" || run_wm openbox || run_wm twm || run_wm icewm || {
     echo "emux-x11: no window manager found ($WM/openbox/twm/icewm) and no xterm - root window will be blank. Install one with: apk add openbox" >&2
   fi
 }
+# v0.1.43: never exit silently — the Android side paints this on the desktop
+# pane, so a dying X server now names its own reason in the field.
 wait $XPID
+RC=$?
+echo "emux-x11: X server (pid $XPID) exited rc=$RC - log tail:" >&2
+tail -15 /tmp/xvfb.log >&2
+exit $RC

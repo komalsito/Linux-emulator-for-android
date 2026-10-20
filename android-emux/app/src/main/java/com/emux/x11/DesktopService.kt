@@ -183,7 +183,15 @@ class DesktopService(
                 scope.launch {
                     xSession?.state?.collect { st ->
                         if (st == TerminalSession.State.DEAD && state.value != State.ERROR) {
-                            errorText.value = "X server exited (code ${xSession?.exitCode}) — check terminal tab for launcher errors"
+                            // v0.1.43: include the captured session output tails
+                            // (painted on the pane) — "exited code 0" alone gave
+                            // the field no actionable information.
+                            val tails = listOf("x11", "capture").mapNotNull { t ->
+                                diag[t]?.toString()?.lineSequence()
+                                    ?.filter { it.isNotBlank() }?.toList()?.takeLast(4)?.joinToString(" | ")
+                            }.joinToString(" /// ")
+                            errorText.value =
+                                ("X server exited (code ${xSession?.exitCode}). " + tails).take(500)
                             state.value = State.ERROR
                         }
                     }

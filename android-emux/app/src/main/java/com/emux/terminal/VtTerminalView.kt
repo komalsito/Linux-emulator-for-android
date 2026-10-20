@@ -473,7 +473,16 @@ class VtTerminalView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attr
         canvas.drawColor(BG_COLOR)
         val fm = textPaint.fontMetrics
         for (y in 0 until rows) {
-            if (!allDirty && !dirtyRows[y]) continue
+            // v0.1.43 CRITICAL RENDER FIX: the "damage-only" repaint was
+            // self-defeating — every onDraw begins with a FULL-canvas
+            // drawColor(BG), but only dirty rows were re-drawn afterwards. On a
+            // full-view invalidate() (what feed() issues) the clip covers the
+            // whole view, so the clear wiped everything and only the rows that
+            // changed in that instant survived until the next frame wiped them
+            // again: "text disappears", vanishing notices, black screen with a
+            // lone cursor. Damage tracking only works with clipped partial
+            // invalidates; the reliable fix is to repaint every row (a text
+            // grid of <=40 runs/row is trivially cheap per frame).
             val row = screen[y]
             val top = y * cellH
             var x = 0
