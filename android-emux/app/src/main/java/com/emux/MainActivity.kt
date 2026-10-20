@@ -372,9 +372,12 @@ class MainActivity : AppCompatActivity() {
             }
             if (!s.outputSeen.value && s.ptyWrapped &&
                 s.state.value == com.emux.terminal.TerminalSession.State.RUNNING) {
-                val head = synchronized(s.streamHead) { s.streamHead.toString() }
+                val (head, tail) = synchronized(s.streamHead) {
+                    s.streamHead.toString() to s.streamTail.toString()
+                }
                 view.feed(
-                    ("\r\n[emux] dbg stream: " + head.take(300) +
+                    ("\r\n[emux] dbg stream: " + head.take(250) +
+                        "\r\n[emux] dbg tail: " + tail.take(250) +
                         "\r\n[emux] dbg view: " + view.dbgState() +
                         "\r\n[emux] shell produced no output for 12s — restarting it with diagnostics…\r\n").toByteArray()
                 )
@@ -477,8 +480,11 @@ class MainActivity : AppCompatActivity() {
                 }
                 if (s.outputSeen.value) {
                     kotlinx.coroutines.delay(1500)
-                    val head = synchronized(s.streamHead) { s.streamHead.toString() }
-                    view.feed(("\r\n[emux] dbg stream: " + head.take(300) +
+                    val (head, tail) = synchronized(s.streamHead) {
+                        s.streamHead.toString() to s.streamTail.toString()
+                    }
+                    view.feed(("\r\n[emux] dbg stream: " + head.take(250) +
+                        "\r\n[emux] dbg tail: " + tail.take(250) +
                         "\r\n[emux] dbg view: " + view.dbgState() + "\r\n").toByteArray())
                 }
             } catch (_: Exception) { }

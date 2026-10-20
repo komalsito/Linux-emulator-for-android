@@ -117,6 +117,10 @@ class TerminalSession(
     /** v0.1.40: escaped head of the raw child stream (diagnostics). */
     val streamHead = StringBuilder()
 
+    /** v0.1.42: escaped TAIL ring of the raw child stream (blank-after-content
+     *  garble is diagnosed from what came LAST, not first). */
+    val streamTail = StringBuilder()
+
     /**
      * v0.1.31: true when THIS session's child actually runs under a PTY wrapper
      * (script/busybox/distro-script). Sessions born before bootstrap finished
@@ -213,6 +217,11 @@ class TerminalSession(
                                 streamHead.append(if (v in 0x20..0x7E) v.toChar() else "<%02x>".format(v))
                             }
                         }
+                        for (i in 0 until n) {
+                            val v = buf[i].toInt() and 0xFF
+                            streamTail.append(if (v in 0x20..0x7E) v.toChar() else "<%02x>".format(v))
+                        }
+                        if (streamTail.length > 600) streamTail.delete(0, streamTail.length - 600)
                     }
                     outputSeen.value = true   // v0.1.19: liveness proof for the UI
                     lastActivityTs = System.currentTimeMillis()
