@@ -68,6 +68,20 @@ class DesktopView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attrs) 
             // showing an unexplained uniform dark rectangle.
             val p = Paint().apply { color = Color.argb(0xB0, 0xFF, 0x8A, 0x65); textSize = 28f }
             canvas.drawText("waiting for X frames…", 24f, height / 2f, p)
+            // v0.1.41: paint the failure tail ON the pane too — the status
+            // TextView is easy to miss off-screen, and these lines are the only
+            // field-visible proof of WHY X/capture died (Xvfb log, apk, nc…).
+            val err = desktop?.errorText?.value
+            if (!err.isNullOrBlank()) {
+                val pe = Paint().apply { color = Color.argb(0xD0, 0xFF, 0x8A, 0x65); textSize = 18f }
+                var y = height / 2f + 36f
+                for (line in err.lineSequence().filter { it.isNotBlank() }.take(10)) {
+                    canvas.drawText(line.take(150), 24f, y, pe)
+                    y += 24f
+                }
+            }
+            // keep repainting while frameless so late errorText appears
+            postInvalidateOnAnimation()
             return
         }
         // fit once, then honor user zoom/pan

@@ -261,7 +261,13 @@ class MainActivity : AppCompatActivity() {
                         DesktopService.State.IDLE -> ""
                         DesktopService.State.STARTING_X -> getString(R.string.x_starting)
                         DesktopService.State.CONNECTED ->
-                            getString(R.string.x_connected, desktop.x11?.screenWidth ?: 0, desktop.x11?.screenHeight ?: 0)
+                            getString(R.string.x_connected, desktop.x11?.screenWidth ?: 0, desktop.x11?.screenHeight ?: 0) +
+                                // v0.1.41 BUGFIX: the no-frames / input-disabled
+                                // diagnostics live in errorText, but this
+                                // collector only rendered it in ERROR state —
+                                // the desktop status never showed WHY frames
+                                // were missing ("waiting for X frames" forever).
+                                (desktop.errorText.value?.let { "\n" + it } ?: "")
                         DesktopService.State.ERROR ->
                             getString(R.string.x_error, desktop.errorText.value ?: "?")
                     }
@@ -327,6 +333,11 @@ class MainActivity : AppCompatActivity() {
                         view.session = s
                         pumpOutput(view, s)
                         watchLiveness(view, s)
+                        // v0.1.41: unconditional attach marker. If THIS never
+                        // appears on a field screenshot, the pump/render path
+                        // itself is broken (not the child stream).
+                        view.feed(("[emux] attached #" + s.id +
+                            " pty=" + s.ptyWrapped + "\r\n").toByteArray())
                         // v0.1.25 DIAGNOSTIC: surface PTY availability in the
                         // terminal itself so users can report exactly which
                         // layer is broken without adb/logcat access.
@@ -361,8 +372,11 @@ class MainActivity : AppCompatActivity() {
             }
             if (!s.outputSeen.value && s.ptyWrapped &&
                 s.state.value == com.emux.terminal.TerminalSession.State.RUNNING) {
+                val head = synchronized(s.streamHead) { s.streamHead.toString() }
                 view.feed(
-                    "\n[emux] shell produced no output for 12s — restarting it with diagnostics…\n".toByteArray()
+                    ("\r\n[emux] dbg stream: " + head.take(300) +
+                        "\r\n[emux] dbg view: " + view.dbgState() +
+                        "\r\n[emux] shell produced no output for 12s — restarting it with diagnostics…\r\n").toByteArray()
                 )
                 // Destroying the child drives state→DEAD (exitedCleanly=false),
                 // which the service's watcher turns into exactly one bounded
