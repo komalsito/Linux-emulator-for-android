@@ -52,12 +52,27 @@ else
   # -listen tcp : the Android-side X11Client talks X over loopback TCP :6000
   # -ac         : disable access control (loopback-only server)
   "$XVFB" :0 -screen 0 "$RES" -listen tcp -ac >/tmp/xvfb.log 2>&1 &
+  XPID=$!
+  # wait for the server socket
+  i=0
+  while [ ! -e /tmp/.X11-unix/X0 ] && [ "$i" -lt 150 ]; do sleep 0.1; i=$((i+1)); done
+  # v0.1.39 SHM FALLBACK: Android has no SysV shm; under proot, shmget can fail
+  # even with libandroid-shmem preloaded (ashmem is gone on Android 10+), which
+  # kills Xvfb at startup ("waiting for X frames" forever on the Android side).
+  # If the socket never appears, retry once with -noshmem before giving up.
+  if [ ! -e /tmp/.X11-unix/X0 ]; then
+    echo "emux-x11: X0 never appeared with shm - retrying with -noshmem" >&2
+    kill $XPID 2>/dev/null
+    rm -f /tmp/.X0-lock 2>/dev/null
+    "$XVFB" :0 -screen 0 "$RES" -listen tcp -ac -noshmem >/tmp/xvfb.log 2>&1 &
+    XPID=$!
+    i=0
+    while [ ! -e /tmp/.X11-unix/X0 ] && [ "$i" -lt 150 ]; do sleep 0.1; i=$((i+1)); done
+  fi
 fi
-XPID=$!
+[ -n "$XPID" ] || XPID=$!
 
-# wait for the server socket; fail loudly with the captured log
-i=0
-while [ ! -e /tmp/.X11-unix/X0 ] && [ "$i" -lt 150 ]; do sleep 0.1; i=$((i+1)); done
+# fail loudly with the captured log
 if [ ! -e /tmp/.X11-unix/X0 ]; then
   echo "emux-x11: X server did not create /tmp/.X11-unix/X0 within 15s - log follows:" >&2
   tail -20 /tmp/xvfb.log >&2

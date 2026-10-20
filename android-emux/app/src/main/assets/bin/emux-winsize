@@ -1,13 +1,32 @@
 #!/bin/sh
 # emux-winsize - keep the guest PTY window size in sync with the Android view.
 #
-# v0.1.38: EmuX has no NDK, so Java can never issue TIOCSWINSZ on the pts that
-# script(1) allocates inside proot. A size-less PTY (0x0) makes bash/readline
-# guess geometry: wrong wrap column, redraws that erase lines, prompts drawn
-# "out of place" - exactly the reported garbled terminal. The Android side
-# writes "ROWS COLS" to /tmp/emuxsize (rootfs tmp, shared host<->guest) on every
-# view resize; this watcher applies it with stty on its controlling tty.
-TTY=$(tty 2>/dev/null) || exit 0
+# EmuX has no NDK, so Java can never issue TIOCSWINSZ on the pts that script(1)
+# allocates inside proot. A size-less PTY (0x0) makes bash/readline guess
+# geometry: wrong wrap column, redraws that erase lines, prompts drawn out of
+# place. The Android side writes "ROWS COLS" to /tmp/emuxsize (rootfs tmp,
+# shared host<->guest) on every view resize; this watcher applies it with stty
+# on the controlling tty.
+#
+# v0.1.39 BUGFIX (verified in sandbox): launched as an asynchronous command from
+# a non-interactive shell (script -qfc "… & exec …"), POSIX gives the background
+# job stdin=/dev/null, so `tty` fails; and `ps -o tty=` proved unreliable for
+# such processes. The launcher now passes its own `tty` (its stdin IS the pts)
+# as $1, with two fallbacks: `tty`, then decoding field 7 (tty_nr) of
+# /proc/self/stat (UNIX98 pts = major 136-143, minor = pts index).
+TTY="$1"
+[ -c "$TTY" ] || TTY=$(tty 2>/dev/null)
+if [ ! -c "$TTY" ]; then
+  NR=$(awk "{print \$7}" /proc/self/stat 2>/dev/null)
+  case "$NR" in *[!0-9]*|"") NR=0 ;; esac
+  if [ "$NR" -gt 0 ]; then
+    MAJ=$((NR / 256))
+    MIN=$((NR % 256))
+    if [ "$MAJ" -ge 136 ] && [ "$MAJ" -le 143 ]; then
+      TTY="/dev/pts/$MIN"
+    fi
+  fi
+fi
 [ -c "$TTY" ] || exit 0
 LAST=""
 while :; do
@@ -17,7 +36,13 @@ while :; do
     C=${SZ##* }
     case "$R" in *[!0-9]*) : ;; *)
       case "$C" in *[!0-9]*) : ;; *)
-        stty -F "$TTY" rows "$R" cols "$C" 2>/dev/null && LAST="$SZ"
+        if stty -F "$TTY" rows "$R" cols "$C" 2>/dev/null; then
+          LAST="$SZ"
+          # poke the foreground process group (readline) to redraw now;
+          # pgrp = field 5 of the parent stat (parent = the login shell).
+          PG=$(awk "{print \$5}" /proc/$PPID/stat 2>/dev/null)
+          case "$PG" in *[!0-9]*|"") : ;; *) kill -WINCH "-$PG" 2>/dev/null ;; esac
+        fi
       ;; esac
     ;; esac
   fi

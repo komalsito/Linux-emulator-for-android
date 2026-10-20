@@ -81,10 +81,13 @@ if [ -x "$PROOT" ]; then
     if [ -f "$ROOT/usr/bin/script" ] || [ -f "$ROOT/bin/script" ]; then
       # v0.1.38: start the winsize sync watcher (same pts session) before the
       # login shell so bash/readline get real geometry instead of a 0x0 pts.
+      # v0.1.39: pass the launcher-own tty to the watcher: an asynchronous
+      # command of a non-interactive shell gets stdin=/dev/null (POSIX), so the
+      # watcher cannot discover the pts by itself on every platform.
       if [ -f "$ROOT/bin/bash" ]; then
-        exec "$PROOT" -0 -k -r "$ROOT" -b /dev -b /proc -b /sys -w /root /usr/bin/script -qfc "/usr/local/bin/emux-winsize >/dev/null 2>&1 & exec /bin/bash -l" /dev/null
+        exec "$PROOT" -0 -k -r "$ROOT" -b /dev -b /proc -b /sys -w /root /usr/bin/script -qfc "/usr/local/bin/emux-winsize $(tty) >/dev/null 2>&1 & exec /bin/bash -l" /dev/null
       fi
-      exec "$PROOT" -0 -k -r "$ROOT" -b /dev -b /proc -b /sys -w /root /usr/bin/script -qfc "/usr/local/bin/emux-winsize >/dev/null 2>&1 & exec /bin/sh -l" /dev/null
+      exec "$PROOT" -0 -k -r "$ROOT" -b /dev -b /proc -b /sys -w /root /usr/bin/script -qfc "/usr/local/bin/emux-winsize $(tty) >/dev/null 2>&1 & exec /bin/sh -l" /dev/null
     fi
     if [ -f "$ROOT/bin/bash" ]; then
       exec "$PROOT" -0 -k -r "$ROOT" -b /dev -b /proc -b /sys -w /root /bin/bash -l
