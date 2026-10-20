@@ -1,0 +1,25 @@
+#!/bin/sh
+# emux-winsize - keep the guest PTY window size in sync with the Android view.
+#
+# v0.1.38: EmuX has no NDK, so Java can never issue TIOCSWINSZ on the pts that
+# script(1) allocates inside proot. A size-less PTY (0x0) makes bash/readline
+# guess geometry: wrong wrap column, redraws that erase lines, prompts drawn
+# "out of place" - exactly the reported garbled terminal. The Android side
+# writes "ROWS COLS" to /tmp/emuxsize (rootfs tmp, shared host<->guest) on every
+# view resize; this watcher applies it with stty on its controlling tty.
+TTY=$(tty 2>/dev/null) || exit 0
+[ -c "$TTY" ] || exit 0
+LAST=""
+while :; do
+  SZ=$(cat /tmp/emuxsize 2>/dev/null | head -n 1)
+  if [ -n "$SZ" ] && [ "$SZ" != "$LAST" ]; then
+    R=${SZ%% *}
+    C=${SZ##* }
+    case "$R" in *[!0-9]*) : ;; *)
+      case "$C" in *[!0-9]*) : ;; *)
+        stty -F "$TTY" rows "$R" cols "$C" 2>/dev/null && LAST="$SZ"
+      ;; esac
+    ;; esac
+  fi
+  sleep 1
+done

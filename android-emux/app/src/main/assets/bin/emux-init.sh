@@ -79,10 +79,12 @@ if [ -x "$PROOT" ]; then
     # control, sane line discipline) relayed over our pipes. Fixes the raw-pipe
     # degraded mode artifacts (blind typing, buffered output, IME desync).
     if [ -f "$ROOT/usr/bin/script" ] || [ -f "$ROOT/bin/script" ]; then
+      # v0.1.38: start the winsize sync watcher (same pts session) before the
+      # login shell so bash/readline get real geometry instead of a 0x0 pts.
       if [ -f "$ROOT/bin/bash" ]; then
-        exec "$PROOT" -0 -k -r "$ROOT" -b /dev -b /proc -b /sys -w /root /usr/bin/script -qfc "/bin/bash -l" /dev/null
+        exec "$PROOT" -0 -k -r "$ROOT" -b /dev -b /proc -b /sys -w /root /usr/bin/script -qfc "/usr/local/bin/emux-winsize >/dev/null 2>&1 & exec /bin/bash -l" /dev/null
       fi
-      exec "$PROOT" -0 -k -r "$ROOT" -b /dev -b /proc -b /sys -w /root /usr/bin/script -qfc "/bin/sh -l" /dev/null
+      exec "$PROOT" -0 -k -r "$ROOT" -b /dev -b /proc -b /sys -w /root /usr/bin/script -qfc "/usr/local/bin/emux-winsize >/dev/null 2>&1 & exec /bin/sh -l" /dev/null
     fi
     if [ -f "$ROOT/bin/bash" ]; then
       exec "$PROOT" -0 -k -r "$ROOT" -b /dev -b /proc -b /sys -w /root /bin/bash -l

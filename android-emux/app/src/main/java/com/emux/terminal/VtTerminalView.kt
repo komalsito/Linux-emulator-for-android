@@ -167,6 +167,13 @@ class VtTerminalView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attr
         dirtyRows = BooleanArray(newRows) { true }   // keep damage map in sync with screen
         curX = curX.coerceAtMost(cols - 1); curY = curY.coerceAtMost(rows - 1)
         markAllDirty()
+        // v0.1.38: publish the renderer grid for the guest winsize watcher
+        // (assets/bin/emux-winsize): without TIOCSWINSZ from Java the guest PTY
+        // stays 0x0 and readline's redraws/wrapping garble the terminal.
+        runCatching {
+            java.io.File(com.emux.core.FsLayout.linuxRoot(context), "tmp/emuxsize")
+                .writeText("$newRows $newCols\n")
+        }
         session?.resize(rows, cols)
     }
 

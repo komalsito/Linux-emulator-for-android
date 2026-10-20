@@ -799,7 +799,7 @@ class BootstrapManager(private val ctx: Context) {
      * wedged AAsset handle on OEM ROMs.
      */
     private fun stageHelperAssets(): Map<String, ByteArray> {
-        val names = listOf("emux-init.sh", "emux-x11", "emux-capture", "emux-init-probe.sh")
+        val names = listOf("emux-init.sh", "emux-x11", "emux-capture", "emux-init-probe.sh", "emux-winsize")
         val result = java.util.concurrent.ConcurrentHashMap<String, ByteArray>()
         withHardTimeout(4_000L) {
             for (name in names) {
@@ -829,7 +829,7 @@ class BootstrapManager(private val ctx: Context) {
         var healed = staged
         if (healed.isEmpty()) {
             val binDir0 = java.io.File(ctx.filesDir, "bin")
-            healed = listOf("emux-init.sh", "emux-x11", "emux-capture", "emux-init-probe.sh").mapNotNull { n ->
+            healed = listOf("emux-init.sh", "emux-x11", "emux-capture", "emux-init-probe.sh", "emux-winsize").mapNotNull { n ->
                 val f = java.io.File(binDir0, n)
                 if (f.isFile && f.length() in 1..MAX_ASSET_BYTES)
                     runCatching { FileInputStream(f).use { readBounded(it, MAX_ASSET_BYTES) } }
@@ -838,7 +838,7 @@ class BootstrapManager(private val ctx: Context) {
             }.toMap()
         }
         val stagedFinal = healed
-        listOf("emux-init.sh", "emux-x11", "emux-capture", "emux-init-probe.sh").forEach { name ->
+        listOf("emux-init.sh", "emux-x11", "emux-capture", "emux-init-probe.sh", "emux-winsize").forEach { name ->
             // Heartbeat BEFORE each unit of work so the UI always advances even
             // if the following operation hits its timeout.
             report("Installing helper script: $name", -1)
@@ -889,7 +889,7 @@ class BootstrapManager(private val ctx: Context) {
         // storage that tar extraction can never clobber.
         try {
             val home = FsLayout.home(ctx)
-            listOf("emux-init.sh", "emux-x11", "emux-capture", "emux-init-probe.sh").forEach { name ->
+            listOf("emux-init.sh", "emux-x11", "emux-capture", "emux-init-probe.sh", "emux-winsize").forEach { name ->
                 val src = File(dest, name)
                 if (src.isFile) {
                     runCatching {
@@ -913,7 +913,7 @@ class BootstrapManager(private val ctx: Context) {
         // "emux-x11: not found" while bootstrap cheerfully said "Bootstrapped".
         try {
             val binDir = java.io.File(ctx.filesDir, "bin").apply { mkdirs() }
-            listOf("emux-init.sh", "emux-x11", "emux-capture", "emux-init-probe.sh").forEach { name ->
+            listOf("emux-init.sh", "emux-x11", "emux-capture", "emux-init-probe.sh", "emux-winsize").forEach { name ->
                 val src = File(dest, name)
                 if (!src.isFile) return@forEach
                 runCatching {
@@ -935,7 +935,8 @@ class BootstrapManager(private val ctx: Context) {
         // black desktop even in a working root session).
         try {
             val ulb = File(dest, "usr/local/bin").apply { mkdirs() }
-            listOf("emux-x11", "emux-capture").forEach { name ->
+            // v0.1.38: emux-winsize joins the in-distro helpers (guest PTY size sync).
+            listOf("emux-x11", "emux-capture", "emux-winsize").forEach { name ->
                 val bytes = stagedFinal[name] ?: return@forEach
                 runCatching {
                     if (replaceRegularFileWith(File(ulb, name)) { dst ->
