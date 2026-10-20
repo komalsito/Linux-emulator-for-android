@@ -331,9 +331,11 @@ class MainActivity : AppCompatActivity() {
                         // terminal itself so users can report exactly which
                         // layer is broken without adb/logcat access.
                         val tty = com.emux.terminal.TtyWrap
-                        if (!tty.available()) {
+                        // v0.1.37: guest-side PTY (script(1) inside proot) counts
+                        // as a real PTY even though no host wrapper probes OK.
+                        if (!tty.available() && !s.ptyWrapped) {
                             view.feed("\n[emux] WARNING: no PTY wrapper found on this ROM - typing will NOT echo and commands may hang. Install busybox or root the device.\n".toByteArray())
-                        } else if (!tty.hasCtty) {
+                        } else if (!tty.hasCtty && !s.ptyWrapped) {
                             view.feed("\n[emux] NOTE: PTY relay active but WITHOUT controlling terminal (toybox script). Ctrl-Z / background jobs may misbehave; normal typing works.\n".toByteArray())
                         }
                     }
@@ -385,9 +387,9 @@ class MainActivity : AppCompatActivity() {
                 // Print the exact engine once per session so device feedback
                 // tells us precisely which layer to fix next.
                 val tty = com.emux.terminal.TtyWrap
-                val line = if (!tty.available()) {
+                val line = if (!tty.available() && !s.ptyWrapped) {
                     "[emux] WARNING: no PTY wrapper (script/busybox) found on this ROM — running with raw pipes; interactive shells may not work. Install Termux busybox or root.\n"
-                } else if (!tty.hasCtty) {
+                } else if (!tty.hasCtty && !s.ptyWrapped) {
                     "[emux] PTY via toybox script (no controlling terminal): typing echoes, but Ctrl-Z and some job-control use cases are limited. Commands should still run.\n"
                 } else {
                     ""

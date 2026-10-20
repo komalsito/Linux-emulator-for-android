@@ -67,8 +67,23 @@ if [ -x "$PROOT" ]; then
     PROOT_LOADER_32="$NB/loader32"
     export PROOT_LOADER_32
   fi
-  export HOME LD_LIBRARY_PATH PROOT_TMP_DIR TMPDIR PROOT_LOADER
+  # guest-side SHELL: util-linux script(1) runs its -c payload via $SHELL; the
+  # inherited host value (/system/bin/sh) does not exist inside the rootfs.
+  SHELL=/bin/sh
+  export HOME LD_LIBRARY_PATH PROOT_TMP_DIR TMPDIR PROOT_LOADER SHELL
   if [ "$IS_LOGIN" = 1 ]; then
+    # v0.1.37 GUEST PTY: this ROM kills raw musl execs (seccomp SIGSYS) so the
+    # host-side PTY wrappers can never probe OK; but proot+loader now work, and
+    # bootstrap installed util-linux script(1) — so allocate the PTY INSIDE the
+    # guest: script gives the login shell a real pts + TIOCSCTTY (echo, job
+    # control, sane line discipline) relayed over our pipes. Fixes the raw-pipe
+    # degraded mode artifacts (blind typing, buffered output, IME desync).
+    if [ -f "$ROOT/usr/bin/script" ] || [ -f "$ROOT/bin/script" ]; then
+      if [ -f "$ROOT/bin/bash" ]; then
+        exec "$PROOT" -0 -k -r "$ROOT" -b /dev -b /proc -b /sys -w /root /usr/bin/script -qfc "/bin/bash -l" /dev/null
+      fi
+      exec "$PROOT" -0 -k -r "$ROOT" -b /dev -b /proc -b /sys -w /root /usr/bin/script -qfc "/bin/sh -l" /dev/null
+    fi
     if [ -f "$ROOT/bin/bash" ]; then
       exec "$PROOT" -0 -k -r "$ROOT" -b /dev -b /proc -b /sys -w /root /bin/bash -l
     fi

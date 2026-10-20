@@ -200,6 +200,27 @@ class DesktopService(
                     "emux-capture 127.0.0.1:$FRAME_PORT",
                 ).also { it.start() }
 
+                // v0.1.37 BUGFIX ("desktop says waiting for X frames" with zero
+                // explanation): the X and capture sessions are HEADLESS — their
+                // output (Xvfb crash logs, apk add failures, nc errors) vanished
+                // into scrollback channels nobody reads. Mirror it into a ring
+                // buffer + EmuXLog, and if no frame lands within 20 s surface the
+                // tail verbatim in the desktop status line so the next field
+                // screenshot names the failing component.
+                xSession?.let { pumpDiag("x11", it) }
+                captureSession?.let { pumpDiag("capture", it) }
+                scope.launch {
+                    val startFrames = frameId
+                    kotlinx.coroutines.delay(20_000)
+                    if (frameId == startFrames && state.value == State.CONNECTED) {
+                        val tails = listOf("x11", "capture").mapNotNull { t ->
+                            diag[t]?.toString()?.lineSequence()
+                                ?.filter { it.isNotBlank() }?.toList()?.takeLast(3)?.joinToString(" | ")
+                        }.joinToString(" /// ")
+                        errorText.value = ("no X frames in 20s. " + tails).take(400)
+                    }
+                }
+
                 // 3) Wait for :6000 then connect the X11 client (retry w/ backoff).
                 //    v0.1.17: failure here is NON-FATAL now — frames keep flowing,
                 //    we just lose XTEST input injection until the next retry.
@@ -248,6 +269,22 @@ class DesktopService(
                 Log.e(TAG, "desktop start failed", e)
                 errorText.value = e.message ?: "unknown error"
                 state.value = State.ERROR
+            }
+        }
+    }
+
+    /** v0.1.37: per-session output ring for headless desktop sessions (see startDesktop). */
+    private val diag = mutableMapOf<String, StringBuilder>()
+
+    private fun pumpDiag(tag: String, s: TerminalSession) {
+        scope.launch {
+            val sb = diag.getOrPut(tag) { StringBuilder() }
+            sb.setLength(0)
+            for (chunk in s.scrollback) {
+                val txt = String(chunk, Charsets.UTF_8)
+                com.emux.EmuXLog.i("desktop[$tag]: ${txt.take(300)}")
+                sb.append(txt)
+                if (sb.length > 4000) sb.delete(0, sb.length - 4000)
             }
         }
     }

@@ -123,6 +123,9 @@ class TerminalSession(
     @Volatile var ptyWrapped: Boolean = false
         private set
 
+    /** v0.1.37: set by buildProcess when emux-init will allocate the PTY inside the guest. */
+    @Volatile private var guestPty = false
+
     /**
      * v0.1.31: generation guard so a superseded child process can never publish
      * DEAD (which would trigger the service's respawn watcher and double-spawn
@@ -184,7 +187,7 @@ class TerminalSession(
                 // allocates a PTY for the child and copies both directions over
                 // our pipes. If no script(1) exists on the ROM we fall back to an
                 // unbuffered stdio preload, and finally to the raw pipe.
-                ptyWrapped = TtyWrap.apply(pb)
+                ptyWrapped = TtyWrap.apply(pb) || guestPty
 
                 process = pb.start().also { p ->
                     state.value = State.RUNNING
@@ -230,6 +233,15 @@ class TerminalSession(
         // Apostrophes are still normalized to U+02BC so the quoting chain
         // (TtyWrap single-quoting, `export EMUX_ARGV1='…'`) can never break.
         val shellCmd = cmd.replace("'", "ʼ")
+        // v0.1.37 GUEST PTY (see emux-init.sh): when the bundled proot works and
+        // bootstrap installed util-linux script(1), the login shell gets a real
+        // PTY *inside* the guest (script -qfc … /dev/null). Host-side wrappers
+        // are useless on ROMs whose seccomp kills raw musl execs (SIGSYS), so
+        // this flag — not TtyWrap — is the source of truth for "we have a line
+        // discipline": it disables local echo and arms the output watchdog.
+        val guestPtyCandidate = FsLayout.prootBin(ctx).isFile &&
+            (File(rootfsFile, "usr/bin/script").isFile || File(rootfsFile, "bin/script").isFile) &&
+            shellCmd == "bash -l"
         // v0.1.31 DEGRADED MODE ("cannot type" insurance): when NO PTY wrapper
         // exists anywhere on this ROM (bootstrap apk extras still missing, or
         // exec of app-data denied), a non-interactive `bash -l` over raw pipes
@@ -239,7 +251,7 @@ class TerminalSession(
         // combined with VtTerminalView's local echo (ptyWrapped==false) typing
         // becomes visible and commands actually run. Belt & braces behind
         // MainActivity's in-place restart once the PTY engine appears.
-        val effectiveCmd = if (!TtyWrap.available() && shellCmd == "bash -l") {
+        val effectiveCmd = if (!TtyWrap.available() && !guestPtyCandidate && shellCmd == "bash -l") {
             if (File(rootfsFile, "bin/bash").isFile) "bash -i -l" else "sh -i -l"
         } else shellCmd
         val init = File(rootfsFile, "emux-init.sh")
@@ -357,6 +369,7 @@ class TerminalSession(
             // direct-invocation branch, and on Android 10+ that path dies
             // with EACCES on the noexec mount → instant silent exit ("cannot
             // type" survived every previous fix round).
+            guestPty = guestPtyCandidate   // v0.1.37: emux-init wraps login in guest script(1)
             val candidates = listOf(
                 File(File(ctx.filesDir, "bin"), "emux-init.sh"),
                 File(FsLayout.home(ctx), "emux-init.sh"),
