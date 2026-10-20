@@ -172,7 +172,14 @@ class VtTerminalView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attr
 
     // ------------------------------------------------------------------ feed
     var session: TerminalSession? = null
-        set(v) { field = v; resetToDefaults() }
+        set(v) {
+            field = v
+            resetToDefaults()
+            // v0.1.35: a session swap (respawn / in-place PTY upgrade) replaces
+            // the process behind the InputConnection; re-bind the soft keyboard
+            // immediately so the swap never leaves the user without input.
+            post { showKeyboard() }
+        }
 
     fun resetToDefaults() {
         screen = buildScreen(rows, cols); curX = 0; curY = 0; pen = Style(); penIdx = 0
@@ -520,9 +527,17 @@ class VtTerminalView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attr
     private fun markRowDirty(y: Int) { if (y in dirtyRows.indices) dirtyRows[y] = true }
     private fun markAllDirty() { allDirty = true }
 
+    /**
+     * v0.1.35 BUGFIX ("keyboard disappears after a short time"): banner/pane
+     * visibility changes in this window and OEM IME idle-hide behaviour can
+     * dismiss the soft keyboard while the terminal keeps focus. Re-assert the
+     * keyboard on every window-focus gain so typing is never silently dead.
+     * (Merged into the pre-existing focus override that drives cursor blink.)
+     */
     override fun onWindowFocusChanged(hasFocus: Boolean) {
         super.onWindowFocusChanged(hasFocus)
-        if (hasFocus) scheduleBlink() else removeCallbacks(blinkRunnable)
+        if (hasFocus) { scheduleBlink(); post { showKeyboard() } }
+        else removeCallbacks(blinkRunnable)
     }
 
     // ------------------------------------------------------------------ input
@@ -544,14 +559,26 @@ class VtTerminalView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attr
     }
 
     /** Explicitly (re-)open the soft keyboard against this view's input connection. */
-    fun showKeyboard() {
+    fun showKeyboard(forced: Boolean = false) {
         requestFocus()
         runCatching {
             val imm = context.getSystemService(android.content.Context.INPUT_METHOD_SERVICE)
                 as? InputMethodManager
-            imm?.showSoftInput(this, InputMethodManager.SHOW_IMPLICIT)
+            // v0.1.35: SHOW_IMPLICIT can be refused right after the IME was
+            // dismissed (banner layout changes, OEM idle-hide); the forced flag
+            // is reserved for explicit re-asserts after bootstrap UI updates.
+            imm?.showSoftInput(this,
+                if (forced) InputMethodManager.SHOW_FORCED
+                else InputMethodManager.SHOW_IMPLICIT)
         }
     }
+
+    /**
+     * v0.1.35 BUGFIX ("keyboard disappears after a short time"): banner/pane
+     * visibility changes in this window and OEM IME idle-hide behaviour can
+     * dismiss the soft keyboard while the terminal keeps focus; the re-assert
+     * lives in onWindowFocusChanged (merged with cursor-blink control).
+     */
 
     override fun onKeyDown(keyCode: Int, event: KeyEvent): Boolean {
         val s = session ?: return super.onKeyDown(keyCode, event)

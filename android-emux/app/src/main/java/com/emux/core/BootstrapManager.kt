@@ -1143,15 +1143,15 @@ class BootstrapManager(private val ctx: Context) {
             sb.append(if (!proot.isFile) "proot=missing\n"
                       else "exec(proot)=${probeExec(listOf(proot.absolutePath, "--version"), nb)}\n")
             if (proot.isFile) {
-                // v0.1.34: the micro-run must mirror runApkProot's environment
-                // (writable TMPDIR + same-path bind) or it reproduces the old
+                // v0.1.34/35: the micro-run must mirror runApkProot's environment
+                // (PROOT_TMP_DIR = writable host scratch) or it reproduces the
                 // false "ptrace blocked" verdict caused by proot's compiled-in
                 // Termux temp dir being uncreatable here.
                 val ht = prootTmp(ctx)
                 sb.append("proot-ptrace=${probeExec(
                     listOf(proot.absolutePath, "-0", "-r", dest.absolutePath,
-                        "-b", "/dev", "-b", ht.absolutePath, "/bin/true"),
-                    nb + ("TMPDIR" to ht.absolutePath))}\n")
+                        "-b", "/dev", "/bin/true"),
+                    nb + ("PROOT_TMP_DIR" to ht.absolutePath))}\n")
             }
             sb.append("dns(java)=${runCatching {
                 java.net.InetAddress.getByName("mirrors.tuna.tsinghua.edu.cn").hostAddress
@@ -1223,22 +1223,25 @@ class BootstrapManager(private val ctx: Context) {
         // v0.1.34 CRITICAL FIX (field probe, Android 12 MRDI-W09): proot is a
         // Termux build whose COMPILED-IN temp dir is /data/data/com.termux/
         // files/usr/tmp — nonexistent and uncreatable on any non-Termux device.
-        // With no writable TMPDIR proot's execve machinery dies with
-        // "execve(/sbin/apk): Permission denied" (plus the f2fs-probe warning).
-        // The old env TMPDIR=/tmp was equally broken: / is read-only for app
-        // processes on Android. Give proot a real host-writable temp dir and
-        // bind it at the SAME path inside the guest so guest apk's $TMPDIR use
-        // resolves too.
+        // With no writable scratch dir proot dies with "can't create glue
+        // rootfs" / "execve(/sbin/apk): Permission denied".
+        // v0.1.35 CORRECTION (field probe round 2): proot reads PROOT_TMP_DIR,
+        // NOT TMPDIR — v0.1.34 set the wrong variable and the error survived.
+        // TMPDIR stays "/tmp" for the GUEST (rootfs /tmp exists and is writable
+        // through proot); the host scratch dir goes into PROOT_TMP_DIR. The
+        // v0.1.34 same-path bind was dropped by proot ("sanitizing the guest
+        // path … No such file or directory") because Android cache paths do
+        // not exist inside the guest — so no extra bind at all now.
         val hostTmp = prootTmp(ctx)
         val argv = listOf(
             proot.absolutePath, "-0", "-r", dest.absolutePath,
-            "-b", "/dev", "-b", "/proc", "-b", "/sys", "-b", hostTmp.absolutePath,
-            "-w", "/",
+            "-b", "/dev", "-b", "/proc", "-b", "/sys", "-w", "/",
             "/sbin/apk", "add", "--arch", archName(), "--no-cache",
         ) + pkgs
         val env = mapOf(
             "LD_LIBRARY_PATH" to FsLayout.nativeBridgeDir(ctx).absolutePath,
-            "TMPDIR" to hostTmp.absolutePath,
+            "PROOT_TMP_DIR" to hostTmp.absolutePath,
+            "TMPDIR" to "/tmp",
             "HOME" to "/root",
             "PATH" to "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
             "LANG" to "C",

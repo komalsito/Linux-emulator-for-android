@@ -52,14 +52,21 @@ esac
 if [ -x "$PROOT" ]; then
   HOME=/root
   LD_LIBRARY_PATH="$NB"
-  export HOME LD_LIBRARY_PATH
+  # v0.1.35: proot reads PROOT_TMP_DIR (NOT TMPDIR) for its host-side scratch;
+  # the compiled-in Termux default is uncreatable outside Termux ("can-t create
+  # glue rootfs" -> execve EACCES on every guest binary). Guest programs get
+  # TMPDIR=/tmp (real dir inside the rootfs); the host scratch stays outside.
+  PROOT_TMP_DIR="$TMPDIR"
+  mkdir -p "$PROOT_TMP_DIR" 2>/dev/null
+  TMPDIR=/tmp
+  export HOME LD_LIBRARY_PATH PROOT_TMP_DIR TMPDIR
   if [ "$IS_LOGIN" = 1 ]; then
     if [ -f "$ROOT/bin/bash" ]; then
-      exec "$PROOT" -0 -k -r "$ROOT" -b /dev -b /proc -b /sys -b "$TMPDIR" -w /root /bin/bash -l
+      exec "$PROOT" -0 -k -r "$ROOT" -b /dev -b /proc -b /sys -w /root /bin/bash -l
     fi
-    exec "$PROOT" -0 -k -r "$ROOT" -b /dev -b /proc -b /sys -b "$TMPDIR" -w /root /bin/sh -l
+    exec "$PROOT" -0 -k -r "$ROOT" -b /dev -b /proc -b /sys -w /root /bin/sh -l
   fi
-  exec "$PROOT" -0 -k -r "$ROOT" -b /dev -b /proc -b /sys -b "$TMPDIR" -w /root /bin/sh -l -c "$CMD"
+  exec "$PROOT" -0 -k -r "$ROOT" -b /dev -b /proc -b /sys -w /root /bin/sh -l -c "$CMD"
 fi
 
 # --- Path 2: musl loader exec (no proot available) ---------------------------

@@ -191,6 +191,18 @@ class MainActivity : AppCompatActivity() {
             b.btnInstall.visibility = android.view.View.GONE
             b.bootstrapPane.visibility = android.view.View.GONE
         }
+        refocusTerminal()
+    }
+
+    /**
+     * v0.1.35 BUGFIX ("keyboard disappears after a short time"): every bootstrap
+     * banner update changes pane visibility in this window, which on several OEM
+     * IMEs dismisses the soft keyboard even though the terminal keeps focus.
+     * Re-assert (forced) after each terminal bootstrap result so the user never
+     * ends up staring at a shell with no input method.
+     */
+    private fun refocusTerminal() {
+        runCatching { termView?.post { termView?.showKeyboard(true) } }
     }
 
     /** Bootstrap banner without auto-starting anything (fresh install path). */
@@ -345,7 +357,8 @@ class MainActivity : AppCompatActivity() {
                     kotlinx.coroutines.delay(250)
                 }
             }
-            if (!s.outputSeen.value && s.state.value == com.emux.terminal.TerminalSession.State.RUNNING) {
+            if (!s.outputSeen.value && s.ptyWrapped &&
+                s.state.value == com.emux.terminal.TerminalSession.State.RUNNING) {
                 view.feed(
                     "\n[emux] shell produced no output for 12s — restarting it with diagnostics…\n".toByteArray()
                 )
@@ -353,6 +366,16 @@ class MainActivity : AppCompatActivity() {
                 // which the service's watcher turns into exactly one bounded
                 // respawn — instead of an eternal silent zombie.
                 runCatching { s.debugKillForDiagnostics() }
+            } else if (!s.ptyWrapped && !s.outputSeen.value) {
+                // v0.1.35 BUGFIX ("keyboard disappears after a short time"):
+                // in DEGRADED mode (no PTY engine — bootstrap apk still failing)
+                // an interactive shell over raw pipes may print NOTHING until
+                // the first command runs (toybox sh writes no prompt to a pipe).
+                // The 12 s watchdog therefore killed perfectly healthy idle
+                // shells: respawn churn swapped the session under the user and
+                // the IME connection died with each swap ("keyboard vanishes,
+                // comes back when I type/tap again"). Only PTY-backed sessions
+                // guarantee a prompt, so only they get the output watchdog.
             } else if (s.outputSeen.value) {
                 // v0.1.22 DIAGNOSTIC BANNER: the user reported "i can write on
                 // the terminal" but commands never ran / desktop stayed black.
@@ -504,6 +527,7 @@ class MainActivity : AppCompatActivity() {
                             com.emux.core.BootstrapDiagnostics.describe(r.exceptionOrNull()))
                         b.bootstrapBar.visibility = android.view.View.GONE
                         b.btnInstall.visibility = android.view.View.VISIBLE
+                        refocusTerminal()
                     }
                 }
             }
@@ -574,6 +598,7 @@ class MainActivity : AppCompatActivity() {
                             r.exceptionOrNull() ?: RuntimeException("in-process fallback failed")))
                     b.bootstrapBar.visibility = android.view.View.GONE
                     b.btnInstall.visibility = android.view.View.VISIBLE
+                    refocusTerminal()
                 }
             }
         }
@@ -601,6 +626,8 @@ class MainActivity : AppCompatActivity() {
                         b.bootstrapLabel.visibility = android.view.View.VISIBLE
                         b.bootstrapBar.visibility = android.view.View.GONE
                         b.btnInstall.visibility = android.view.View.VISIBLE
+                        refocusTerminal()
+                        refocusTerminal()
                     } else if (step.isNotEmpty()) {
                         b.bootstrapLabel.text = step
                         b.bootstrapLabel.visibility = android.view.View.VISIBLE
@@ -632,6 +659,7 @@ class MainActivity : AppCompatActivity() {
                                 }
                                 b.bootstrapLabel.visibility = android.view.View.VISIBLE
                                 b.btnInstall.visibility = android.view.View.VISIBLE
+                                refocusTerminal()
                             }
                             else -> { /* ENQUEUED/RUNNING — keep showing the bar */ }
                         }
