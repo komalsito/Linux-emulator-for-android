@@ -83,8 +83,15 @@ else
       # giving up on the first lock race.
       TRIES=0
       while [ "$TRIES" -lt 4 ]; do
+        # v0.1.57: include the CAPTURE toolchain (xwd from x11-apps, netpbm,
+        # netcat) - the cascade used to install only the X server + WM, so on
+        # devices whose bootstrap desktop install never ran, emux-capture then
+        # found no xwd/pnmtoplainpnm/nc and its own old-style apt fallback
+        # died on the dpkg state: Xvfb ran, frames never arrived, pane said
+        # "waiting for X frames" forever.
         DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-          xvfb xkbcomp x11-xserver-utils openbox xterm >&2 && break
+          xvfb xkbcomp x11-xserver-utils x11-apps netpbm netcat-openbsd \
+          openbox xterm >&2 && break
         TRIES=$((TRIES + 1))
         echo "emux-x11: apt install failed (lock or mirror?) - retry $TRIES/4 in 5s" >&2
         sleep 5

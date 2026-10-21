@@ -438,3 +438,26 @@ Root causes & fixes:
    stageHelperAssets + installHelperScripts + re-stamp), and
    DesktopService.startDesktop() now runs BootstrapManager.desktopPreRepair()
    (journal heal + shim) BEFORE launching the X session cascade.
+
+## 13. v0.1.57 field round — post-Install apply, "waiting for X frames" with Xvfb running
+
+1. "After Install I must close and reopen the app": sessions born before
+   bootstrap finishes stay on raw pipes with the pre-install env; the
+   session-list collector never re-fires on a finished bootstrap (the list
+   does not change), so nothing upgraded them until the next process start.
+   The Bootstrapped/pct==100 branch now upgrades every live session to the
+   guest PTY in place and refocuses the IME.
+2. Desktop stuck at "waiting for X frames" with Xvfb actually running: the
+   emux-x11 cascade installed ONLY the X server + WM; the capture pipeline
+   needs xwd (x11-apps), pnmtoplainpnm (netpbm) and nc (netcat-openbsd). On
+   devices whose bootstrap desktop install never ran, emux-capture found no
+   tools and its own fallback apt run died on the dpkg state (bare
+   configure -a). Cascade list now includes the capture toolchain;
+   emux-capture fallbacks run emux-apt-repair first; the startup gap probe
+   treats missing capture tools as a desktop gap; and a dead capture
+   session now paints its exit code + log tail on the pane (it used to be
+   silent - only the X session had a death watcher).
+3. WM chooser clarification (summary text): Openbox ships with the desktop
+   components; Xfce4/LXDE/i3 must be apt-installed inside the guest first;
+   every choice falls back openbox -> twm/icewm -> xterm, so frames flow
+   regardless of WM availability.

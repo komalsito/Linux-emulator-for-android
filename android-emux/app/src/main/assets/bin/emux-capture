@@ -62,7 +62,14 @@ if [ -z "$XWD" ] || [ -z "$PNM" ]; then
   # Alpine); pnmtoplainpnm is netpbm on both families.
   echo "emux-capture: installing xwd+netpbm via the distro package manager (one time, needs network)" >&2
   if command -v apt-get >/dev/null 2>&1; then
-    dpkg --configure -a >&2 || true
+    # v0.1.57: heal dpkg FIRST (the old bare configure -a cannot fix a dirty
+    # journal or the proot link(2) backup bug, so this install used to die
+    # and the desktop sat at "waiting for X frames" with Xvfb running fine).
+    if [ -x /usr/local/bin/emux-apt-repair ]; then
+      emux-apt-repair >&2 || true
+    else
+      dpkg --configure -a >&2 || true
+    fi
     apt-get update >&2
     DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends x11-apps netpbm >&2
   elif command -v pacman >/dev/null 2>&1; then
@@ -83,7 +90,7 @@ if [ -z "$NC" ]; then
   # v0.1.47 multi-distro: netcat-openbsd exists under the same name on Alpine
   # and Debian/Ubuntu; apt installs it via alternatives to /usr/bin/nc.
   if command -v apt-get >/dev/null 2>&1; then
-    dpkg --configure -a >&2 || true
+    [ -x /usr/local/bin/emux-apt-repair ] && emux-apt-repair >&2 || true
     DEBIAN_FRONTEND=noninteractive apt-get install -y netcat-openbsd >&2
   elif command -v pacman >/dev/null 2>&1; then
     pacman -Sy --noconfirm --needed openbsd-netcat >&2

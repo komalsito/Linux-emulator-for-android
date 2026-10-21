@@ -15,6 +15,7 @@
     <ListPreference
         app:key="wm"
         app:title="@string/pref_wm_title"
+        app:summary="Openbox is installed with the desktop components; Xfce4/LXDE/i3 need their packages installed inside the Linux environment first (apt install xfce4 / lxde / i3). Any choice falls back to Openbox, then xterm."
         app:entries="@array/wm_entries"
         app:entryValues="@array/wm_values"
         app:defaultValue="openbox"

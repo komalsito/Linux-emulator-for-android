@@ -822,6 +822,21 @@ class MainActivity : AppCompatActivity() {
                             restartStaleDistroSessions()
                             hideBootstrapUi()
                             ensureSessionAttached()
+                            // v0.1.57 FIELD FIX ("after Install I must close and
+                            // reopen the app"): sessions born before bootstrap
+                            // finished stay on raw pipes with the pre-install
+                            // env until something restarts them. The collector
+                            // below only re-runs when the session LIST changes,
+                            // which a finished bootstrap does not trigger - so
+                            // upgrade every live session to the guest PTY now.
+                            runCatching {
+                                for (s in com.emux.terminal.TerminalService.sessions().value) {
+                                    if (s.id < 9000 && !s.ptyWrapped) {
+                                        s.upgradeToGuestPtyIfAvailable()
+                                    }
+                                }
+                            }
+                            refocusTerminal()
                         }
                         b.bootstrapBar.isIndeterminate = pct < 0
                         if (pct >= 0) b.bootstrapBar.progress = pct

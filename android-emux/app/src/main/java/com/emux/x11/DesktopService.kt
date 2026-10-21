@@ -263,6 +263,20 @@ class DesktopService(
                 // screenshot names the failing component.
                 xSession?.let { pumpDiag("x11", it) }
                 captureSession?.let { pumpDiag("capture", it) }
+                // v0.1.57: the capture helper dying used to be SILENT - only
+                // the X session had a death watcher, so a dead emux-capture
+                // (missing xwd/netpbm/nc, connect refused ...) left the pane
+                // at "waiting for X frames" with no explanation at all.
+                scope.launch {
+                    captureSession?.state?.collect { st ->
+                        if (st == TerminalSession.State.DEAD && frameId == 0) {
+                            val tails = diag["capture"]?.toString()?.lineSequence()
+                                ?.filter { it.isNotBlank() }?.toList()?.takeLast(4)
+                                ?.joinToString(" | ") ?: ""
+                            setError(("capture helper exited (code ${captureSession?.exitCode}). " + tails).take(500))
+                        }
+                    }
+                }
                 scope.launch {
                     val startFrames = frameId
                     kotlinx.coroutines.delay(20_000)

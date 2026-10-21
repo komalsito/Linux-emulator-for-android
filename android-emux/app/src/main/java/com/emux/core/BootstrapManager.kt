@@ -2134,7 +2134,15 @@ class BootstrapManager(private val ctx: Context) {
                     androidx.preference.PreferenceManager.getDefaultSharedPreferences(ctx)
                         .getBoolean("desktop_components", true)
                 }.getOrDefault(true)
-                if (desktopWanted && !File(dest, "usr/bin/Xvfb").isFile) gaps += spec.desktopPkgs
+                // v0.1.57: Xvfb alone is NOT a working desktop - the capture
+                // pipeline needs xwd (x11-apps), pnmtoplainpnm (netpbm) and nc
+                // (netcat-openbsd) too; probing only Xvfb left devices with a
+                // running X server and zero frames ("waiting for X frames").
+                if (desktopWanted && (!File(dest, "usr/bin/Xvfb").isFile ||
+                            !File(dest, "usr/bin/pnmtoplainpnm").isFile ||
+                            !(File(dest, "usr/bin/xwd").isFile || File(dest, "usr/local/bin/xwd").isFile) ||
+                            !(File(dest, "usr/bin/nc").isFile || File(dest, "bin/nc").isFile))
+                ) gaps += spec.desktopPkgs
                 val dirty = aptJournalDirty(dest)
                 if (!force && !dirty && shim.isFile && stamp.isFile && gaps.isEmpty()) return@runCatching
                 installLinkFixShim(dest)
