@@ -3,14 +3,14 @@
 # Prints one marker per subsystem so MainActivity can show exactly which layer
 # is broken on-device without adb/logcat.
 ROOT=${EMUX_ROOTFS:-$HOME/../linuxroot}
-[ -d "$ROOT/etc" ] || ROOT=$HOME/linuxroot
-# v0.1.47 multi-distro: probe ANY installed distro when the selected one is
-# not on disk yet (mirrors the emux-init.sh fallback).
+# v0.1.49 BUGFIX: scan files/distros/* BEFORE the legacy fallback overwrites
+# ROOT (see emux-init.sh); otherwise the probe never sees co-installed distros.
 if [ ! -d "$ROOT/etc" ]; then
-  for CAND in "$(dirname "$ROOT")"/*; do
+  for CAND in "$(dirname "$HOME")/distros"/*; do
     [ -d "$CAND/etc" ] && { ROOT="$CAND"; break; }
   done
 fi
+[ -d "$ROOT/etc" ] || ROOT=$HOME/linuxroot
 if [ ! -d "$ROOT/etc" ]; then echo PROBE_NOROOTFS; exit 0; fi
 echo "ROOTFS=$ROOT"
 

@@ -14,16 +14,19 @@
 #      $CMD instead of silently dropping it (v0.1.27 bug: the fallback ignored
 #      the command entirely, so desktop sessions opened idle shells).
 ROOT="${EMUX_ROOTFS:-${EMUX_ROOT:-$HOME/../linuxroot}}"
-[ -d "$ROOT/etc" ] || ROOT="$HOME/linuxroot"
-[ -d "$ROOT/etc" ] || ROOT="$(dirname "$HOME")/linuxroot"
-# v0.1.47 multi-distro: the SELECTED distro may not be installed yet (pending
-# switch). Fall back to ANY installed distro (files/distros/*) so the terminal
-# keeps working meanwhile; the main screen prompts the install separately.
+# v0.1.49 BUGFIX (field screenshot): the v0.1.47 fallback scan ran AFTER the
+# legacy assignments below had already overwritten ROOT with files/linuxroot,
+# so it scanned files/* (where no distro has etc/ directly) instead of
+# files/distros/* — a pending switch therefore never fell back to a
+# co-installed distro and every message named the dead legacy path. Scan the
+# distros dir FIRST, explicitly, while ROOT still points at the selection.
 if [ ! -d "$ROOT/etc" ]; then
-  for CAND in "$(dirname "$ROOT")"/*; do
+  for CAND in "$(dirname "$HOME")/distros"/*; do
     [ -d "$CAND/etc" ] && { ROOT="$CAND"; break; }
   done
 fi
+[ -d "$ROOT/etc" ] || ROOT="$HOME/linuxroot"
+[ -d "$ROOT/etc" ] || ROOT="$(dirname "$HOME")/linuxroot"
 export TMPDIR="${TMPDIR:-$ROOT/tmp}"
 mkdir -p "$ROOT/tmp" 2>/dev/null
 CMD="${EMUX_ARGV1:-$*}"

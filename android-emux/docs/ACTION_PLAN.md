@@ -230,6 +230,13 @@ Pitfalls checklist (each caused a real crash/bug once):
   extractor verbatim into a JVM harness (needs an EmuXLog stub + xz jar),
   extract each catalog image, diff name/type sets vs `tar -tvf` (device nodes
   excluded, wrapper prefix stripped), then run the FsLayout probe paths.
+- v0.1.49 FIELD BUG #2 (same screenshot): emux-init.sh / emux-init-probe.sh
+  distro-fallback scan ran AFTER the legacy `ROOT=$HOME/linuxroot` assignment
+  had overwritten ROOT, so it scanned files/* instead of files/distros/* —
+  with a pending switch the terminal never fell back to a co-installed distro
+  and every message named the dead legacy path ("rootfs missing at
+  …/files/linuxroot", PROBE_NOROOTFS) even though a distro WAS on disk.
+  Fix: scan "$(dirname "$HOME")/distros"/* FIRST, before legacy fallbacks.
 - Keystore: NOW COMMITTED (`android-emux/debug-keystore/emux-debug.jks`,
   pass `emuxdebug`, alias `emux`) — signatures are stable across sandboxes;
   no more uninstall churn after the one-time pre-0.1.47 migration.
@@ -263,7 +270,8 @@ SHA256 verification, committed debug keystore, ENV_VERSION 21) ·
 v0.1.48 extraction correctness: wrapper-dir unwrap + PAX/GNU-long-header
 handling + absolute/forward hardlink resolution (field bug: v0.1.47 Ubuntu
 install aborted post-extract); all five images verified byte-faithful vs
-system tar in sandbox.
+system tar in sandbox · v0.1.49 launcher/probe distro-fallback scan order
+(scan files/distros before legacy linuxroot fallbacks).
 
 ## 9. Field-report protocol (keep using it)
 Every failure banner embeds: android/model/targetSdk/selinux, exec(loader),
