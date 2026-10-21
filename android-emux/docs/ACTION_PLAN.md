@@ -98,7 +98,17 @@ Since v0.1.47 it is MULTI-DISTRO: Alpine (default) + Debian 12 + Ubuntu 24.04
    cloud-images dropped armhf), NO Ubuntu image for 32-bit x86 (error is
    explicit). Debian/Ubuntu/Arch/Fedora desktop components install was never
    field-tested either (package names verified against distro repos only).
-1. **Desktop frames**: pane shows "waiting for X frames…". Since v0.1.45 the
+1. **Desktop frames**: pane shows "waiting for X frames…". v0.1.52 removed
+   the two proven blockers below; if frames STILL never arrive on the field
+   tablet with v0.1.52+, read the pane's live x11/capture tails (Xvfb shm,
+   capture→host TCP) as before.
+   a) EADDRINUSE (field-verified v0.1.51): openFrameListener() set
+      SO_REUSEADDR AFTER the binding constructor — a TIME_WAIT socket from
+      the previous desktop visit made every re-bind fail. Now: unbound
+      ServerSocket → reuseAddress → bind, plus 8×400 ms retry.
+   b) stale guest Xvfb: a leftover Xvfb from an earlier session holds :0 and
+      tcp/6000; emux-x11 now proc-scans and kills "Xvfb :0"/"Xorg :0" and
+      removes /tmp/.X11-unix/X0 + lock before starting. Since v0.1.45 the
    pane ALSO paints the live x11/capture session log tail while waiting — get a
    desktop screenshot on v0.1.46 and read the tail (Xvfb log / apk / nc errors).
    Suspects in order: Xvfb shm (retry with -noshmem exists), xwd/netpbm/nc
@@ -294,7 +304,11 @@ system tar in sandbox · v0.1.49 launcher/probe distro-fallback scan order
 (scan files/distros before legacy linuxroot fallbacks) · v0.1.50 version-
 tagged failure banners + live distro switching (pref listener) · v0.1.51
 wrapper-aware post-extract completeness check (the last field blocker for
-pd-image installs; re-verified end-to-end for all five images).
+pd-image installs; re-verified end-to-end for all five images) · v0.1.52
+desktop EADDRINUSE fix (SO_REUSEADDR pre-bind + retry; stale-Xvfb kill in
+emux-x11) + apt self-heal (`dpkg --configure -a` before every apt run —
+field: a killed mid-install apt run left dpkg journal dirty, "apt tells
+me to use dpkg").
 
 ## 9. Field-report protocol (keep using it)
 Every failure banner embeds: android/model/targetSdk/selinux, exec(loader),
