@@ -58,6 +58,14 @@ fi
 apt-get install -y -f --no-install-recommends >&2 || true
 apt-get install -y --no-install-recommends coreutils util-linux bash >&2 || true
 
+# v0.1.61: settle pass - a first-pass postinst can fail under proot's statx
+# translation (libpaper1/ucf case); a retry of configure -a always completes.
+i=0
+while [ "$i" -lt 2 ]; do
+    dpkg --configure -a >&2 && break
+    i=$((i + 1))
+done
+
 mkdir -p /var/lib 2>/dev/null
 date +%s >/var/lib/emux-repair.stamp 2>/dev/null
 echo "emux-apt-repair: done" >&2

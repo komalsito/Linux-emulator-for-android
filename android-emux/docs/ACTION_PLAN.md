@@ -531,3 +531,28 @@ Reproduced end-to-end in the sandbox with the PINNED Ubuntu noble image
    received the EMUX stream header (720x1280) + full RGB565 frames.
    Capture deps added to the apk/pacman/dnf cascade lists too.
 ENV_VERSION 28, versionCode 60.
+
+## 16. v0.1.61 field round — first-pass postinst failure under proot + the v0.1.59 DesktopService edits that never shipped
+
+1. SANDBOX-REPRODUCED (fresh extract of the pinned noble image, exact gap
+   payload): the FIRST apt pass dies at "Setting up libpaper1" - its postinst
+   does `echo $RET > /etc/papersize.dpkg-inst` then ucf stats it, and under
+   proot the statx translation reports the brand-new file as missing
+   ("stat: cannot statx '/etc/papersize.dpkg-inst': No such file"), postinst
+   exits 1, and the chain libgs10/libspectre1/libimlib2/libobrender/openbox
+   stays unpacked (apt exit 100). A plain retry of `dpkg --configure -a`
+   configures everything cleanly (verified: 0 stuck packages). The field
+   "illegal number" lines are dash errors from the same class of first-pass
+   maintainer-script failures under proot. Fix: a settle loop
+   (configure -a, up to 2 rounds) appended to runAptProot's payload,
+   emux-apt-repair and the emux-x11 cascade.
+2. AUDIT FINDING: the v0.1.59 DesktopService edits (control-plane retry
+   loop, capture respawn) were NEVER APPLIED - that edit script died on a
+   Python syntax error before writing, and the follow-up only covered
+   emux-x11/versions. v0.1.59/60 therefore still had the single 25 s +
+   single 30 s control-plane attempts: exactly the persistent "server did
+   not come up within 25s". Now actually applied: connectControlPlane()
+   with a 60 s first attempt + endless 10 s-cadence background retry,
+   capture respawn (<=3) while frameId==0. Shipped-artifact grep markers
+   are now part of the release checklist (see commit).
+ENV_VERSION 29, versionCode 61.

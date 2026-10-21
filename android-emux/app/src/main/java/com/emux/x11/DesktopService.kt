@@ -100,6 +100,7 @@ class DesktopService(
      *  died with EADDRINUSE even with SO_REUSEADDR (REUSEADDR never reuses a
      *  live same-tuple socket). Closing it from stop() unblocks the reader. */
     @Volatile private var activeSock: Socket? = null
+    private var captureRespawns = 0
 
     /** Latest decoded frame; the View reads this under lock during draw. */
     @Volatile var currentFrame: Bitmap? = null
@@ -269,7 +270,21 @@ class DesktopService(
                 // at "waiting for X frames" with no explanation at all.
                 scope.launch {
                     captureSession?.state?.collect { st ->
-                        if (st == TerminalSession.State.DEAD && frameId == 0) {
+                        if (st == TerminalSession.State.DEAD && frameId == 0 &&
+                            state.value != State.IDLE && captureRespawns < 3) {
+                            // v0.1.59: capture can die waiting for the X socket
+                            // while the cascade install is still running. With
+                            // zero frames so far, respawn it (bounded) instead
+                            // of leaving the pane at "waiting for X frames".
+                            captureRespawns++
+                            com.emux.EmuXLog.i("desktop: capture died before first frame - respawning (#$captureRespawns)")
+                            delay(2_000)
+                            captureSession = TerminalSession(
+                                9002 + captureRespawns, ctx, root,
+                                "emux-capture 127.0.0.1:$FRAME_PORT",
+                            ).also { it.start() }
+                            pumpDiag("capture", captureSession!!)
+                        } else if (st == TerminalSession.State.DEAD && frameId == 0) {
                             val tails = diag["capture"]?.toString()?.lineSequence()
                                 ?.filter { it.isNotBlank() }?.toList()?.takeLast(4)
                                 ?.joinToString(" | ") ?: ""
@@ -292,17 +307,26 @@ class DesktopService(
                 // 3) Wait for :6000 then connect the X11 client (retry w/ backoff).
                 //    v0.1.17: failure here is NON-FATAL now — frames keep flowing,
                 //    we just lose XTEST input injection until the next retry.
-                var ctrlOk = false
-                try {
-                    waitForPort(6000, timeoutMs = 25_000)
-                    val c = X11Client(display = 0)
-                    c.connect()
-                    x11 = c
-                    ctrlOk = true
-                    Log.i(TAG, "X connected: ${c.screenWidth}x${c.screenHeight}@${c.depth} vendor=${c.vendor}")
-                } catch (e: Exception) {
-                    Log.e(TAG, "X control plane unavailable (frames still streamed)", e)
-                    setError("input disabled: ${e.message ?: "X TCP unreachable"}")
+                // v0.1.59+v0.1.61 FIELD FIX (the persistent "input disabled:
+                // X server did not come up within 25s"): the old code made ONE
+                // 25 s attempt plus ONE 30 s background retry. When the desktop
+                // cascade has to install Xvfb first (minutes on slow links) both
+                // expire while apt is still running and touch input stays dead
+                // for the whole session even after X comes up. Now: a bounded
+                // first attempt (60 s), then a background loop that retries
+                // until connected or the desktop is stopped.
+                var ctrlOk = connectControlPlane(60_000)
+                if (!ctrlOk) {
+                    errorText.value = "touch input: X TCP not up yet - retrying in background"
+                    scope.launch {
+                        while (isActive && x11 == null && state.value != State.IDLE) {
+                            delay(10_000)
+                            if (connectControlPlane(20_000)) {
+                                errorText.value = null
+                                break
+                            }
+                        }
+                    }
                 }
 
                 // v0.1.17 BUGFIX #3: the frame reader was NEVER started by anyone
@@ -320,19 +344,6 @@ class DesktopService(
                 beginFrameLoop { frameCallback?.invoke() }
 
                 state.value = State.CONNECTED
-                if (!ctrlOk) {
-                    // Keep CONNECTED (frames visible); retry control plane once more
-                    // in background so touch input eventually works.
-                    scope.launch {
-                        runCatching {
-                            waitForPort(6000, timeoutMs = 30_000)
-                            val c = X11Client(display = 0)
-                            c.connect()
-                            x11 = c
-                            errorText.value = null
-                        }
-                    }
-                }
             } catch (e: Exception) {
                 Log.e(TAG, "desktop start failed", e)
                 // v0.1.54: a failed start must not leak the listener/accepted
@@ -424,6 +435,19 @@ class DesktopService(
             wd.interrupt()
             com.emux.EmuXLog.i("killDesktopGuests done")
         }.onFailure { com.emux.EmuXLog.e("killDesktopGuests failed (non-fatal)", it) }
+    }
+
+    /** v0.1.59: one bounded attempt to reach the X server + handshake. */
+    private suspend fun connectControlPlane(timeoutMs: Long): Boolean = try {
+        waitForPort(6000, timeoutMs = timeoutMs)
+        val c = X11Client(display = 0)
+        c.connect()
+        x11 = c
+        Log.i(TAG, "X connected: ${c.screenWidth}x${c.screenHeight}@${c.depth} vendor=${c.vendor}")
+        true
+    } catch (e: Exception) {
+        Log.e(TAG, "X control plane unavailable (frames still streamed)", e)
+        false
     }
 
     private suspend fun waitForPort(port: Int, timeoutMs: Long) {

@@ -1673,10 +1673,19 @@ class BootstrapManager(private val ctx: Context) {
         // proot's link(2) translation breaks dpkg's status-old backup
         // (EACCES/EEXIST, termux/proot#377), so the dirty state survived
         // every retry and bricked the desktop install on the field device.
+        // v0.1.61 FIELD FIX: under proot, a FIRST-pass postinst can fail on a
+        // proot statx quirk (sandbox-reproduced with the pinned noble image:
+        // libpaper1's postinst does echo>/etc/papersize.dpkg-inst then ucf
+        // stats it -> "stat: cannot statx ... No such file" -> postinst exit 1
+        // -> libgs10/libspectre1/libimlib2/libobrender/openbox left unpacked
+        // and apt exits 100). A plain retry of dpkg --configure -a configures
+        // everything cleanly (verified: 0 stuck packages), so settle after
+        // every install pass instead of leaving the tree half-configured.
         val payload = APT_REPAIR_PAYLOAD + "; " +
             "apt-get update -o APT::Sandbox::User=root; " +
             "apt-get install -y --no-install-recommends -o APT::Sandbox::User=root " +
-            pkgs.joinToString(" ")
+            pkgs.joinToString(" ") + "; " +
+            "i=0; while [ \$i -lt 2 ]; do dpkg --configure -a >&2 && break; i=\$((i + 1)); done"
         val argv = listOf(
             proot.absolutePath, "-0", "-r", dest.absolutePath,
             "-b", "/dev", "-b", "/proc", "-b", "/sys", "-w", "/",

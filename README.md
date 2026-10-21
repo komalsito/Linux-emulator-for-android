@@ -104,7 +104,10 @@ musl-loader exec (terminal only), then plain Android sh (CMD honored).
 
 ## Status / caveats
 
-- v0.1.60 debug build — not yet release-signed or R8-minified.
+- v0.1.61 debug build — not yet release-signed or R8-minified.
+  v0.1.61: settle-pass for first-pass proot postinst failures (libpaper1/
+  statx case), and the control-plane retry loop + capture respawn that
+  v0.1.59 announced but never actually shipped.
   v0.1.60 fixes the two real desktop dependency bugs (sandbox-reproduced on
   the pinned image): wrong apt package name (xkbcomp -> x11-xkb-utils, which
   aborted the whole desktop install) and the missing xwdtopnm conversion step

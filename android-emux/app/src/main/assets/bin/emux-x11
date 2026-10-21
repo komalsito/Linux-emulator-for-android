@@ -134,6 +134,14 @@ else
         heal_dpkg
         sleep 2
       done
+      # v0.1.61: settle pass (first-pass postinst failures under proot's statx
+      # translation leave packages unpacked-but-unconfigured; a configure
+      # retry completes them - sandbox-verified on the pinned noble image).
+      i=0
+      while [ "$i" -lt 2 ]; do
+        dpkg --configure -a >&2 && break
+        i=$((i + 1))
+      done
     elif command -v pacman >/dev/null 2>&1; then
       pacman -Sy --noconfirm --needed xorg-server-xvfb xorg-xkbcomp xkeyboard-config xorg-xwd netpbm openbox xterm >&2
     elif command -v dnf >/dev/null 2>&1; then
