@@ -331,9 +331,32 @@ class DesktopService(
 
     // ---------------------------------------------------------- frame ingestion
     private fun openFrameListener() {
-        listener?.close()
-        listener = ServerSocket(FRAME_PORT, 1, java.net.InetAddress.getByName("127.0.0.1"))
-            .apply { reuseAddress = true }
+        // v0.1.52 FIELD FIX ("waiting for X frames … bind failed: EADDRINUSE"):
+        // the ServerSocket(port,…) constructor BINDS IMMEDIATELY, so the old
+        // post-constructor `apply { reuseAddress = true }` never took effect —
+        // a socket left in TIME_WAIT by the previous desktop session made the
+        // re-bind fail and the pane waited for frames forever. Set
+        // SO_REUSEADDR on an UNBOUND socket, then bind; and retry a few times
+        // for the case of a live stale listener still tearing down.
+        runCatching { listener?.close() }
+        listener = null
+        var lastErr: java.net.BindException? = null
+        repeat(8) {
+            try {
+                listener = ServerSocket().apply {
+                    reuseAddress = true
+                    bind(java.net.InetSocketAddress(
+                        java.net.InetAddress.getByName("127.0.0.1"), FRAME_PORT), 1)
+                }
+                return
+            } catch (e: java.net.BindException) {
+                lastErr = e
+                runCatching { listener?.close() }
+                listener = null
+                try { Thread.sleep(400) } catch (_: InterruptedException) {}
+            }
+        }
+        throw lastErr ?: java.net.BindException("frame port $FRAME_PORT unavailable")
     }
 
     /**

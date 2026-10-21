@@ -32,8 +32,19 @@ fi
 export HOME="${HOME:-/root}"
 export DISPLAY=:0
 export TMPDIR=/tmp
+# v0.1.52 FIELD FIX: a leftover Xvfb/Xorg from an earlier desktop session
+# still holds :0 and tcp/6000 — a fresh Xvfb then dies with EADDRINUSE and
+# the Android pane waits for frames forever. Kill stale servers (proc scan:
+# pkill/procps are not guaranteed in minimal images) and drop stale sockets.
+for CMDF in /proc/[0-9]*/cmdline; do
+  if tr "\0" " " < "$CMDF" 2>/dev/null | grep -qE "Xvfb :0|Xorg :0"; then
+    K=${CMDF#/proc/}; K=${K%/cmdline}
+    [ "$K" != "$$" ] && kill "$K" 2>/dev/null
+  fi
+done
+sleep 0.3
 mkdir -p /tmp/.X11-unix
-rm -f /tmp/.X0-lock 2>/dev/null
+rm -f /tmp/.X0-lock /tmp/.X11-unix/X0 2>/dev/null
 
 if [ "$(id -u)" = "0" ] && [ -x /usr/bin/Xorg ] && [ -n "$EMUX_USE_XORG" ]; then
   Xorg :0 -config /etc/X11/emux-xorg.conf &
@@ -47,6 +58,7 @@ else
     # active distro ships (apk on Alpine, apt on Debian/Ubuntu).
     echo "emux-x11: Xvfb missing - installing via the distro package manager (one time, needs network)" >&2
     if command -v apt-get >/dev/null 2>&1; then
+      dpkg --configure -a >&2 || true
       apt-get update >&2
       DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
         xvfb xkbcomp x11-xserver-utils openbox xterm >&2

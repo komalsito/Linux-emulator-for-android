@@ -1621,7 +1621,13 @@ class BootstrapManager(private val ctx: Context) {
     ): ApkRun {
         val hostTmp = prootTmp(ctx)
         val nb = FsLayout.nativeBridgeDir(ctx)
+        // v0.1.52 FIELD FIX: a killed apt run (user closes the app mid
+        // desktop-components install) leaves dpkg's journal dirty — every
+        // later apt invocation then dies with "dpkg was interrupted, you
+        // must manually run dpkg --configure -a". Self-heal before each run;
+        // idempotent and cheap when the state is clean.
         val payload = "export DEBIAN_FRONTEND=noninteractive; " +
+            "(dpkg --configure -a || true); " +
             "apt-get update -o APT::Sandbox::User=root; " +
             "apt-get install -y --no-install-recommends -o APT::Sandbox::User=root " +
             pkgs.joinToString(" ")
