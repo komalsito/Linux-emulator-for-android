@@ -48,7 +48,7 @@ for CMDF in /proc/[0-9]*/cmdline; do
 done
 sleep 0.3
 mkdir -p /tmp/.X11-unix
-rm -f /tmp/.X0-lock /tmp/.X11-unix/X0 2>/dev/null
+rm -f /tmp/.X0-lock /tmp/.X11-unix/X0 /tmp/emux_wm_launched /tmp/emux_xvfb_restarted 2>/dev/null
 
 if [ "$(id -u)" = "0" ] && [ -x /usr/bin/Xorg ] && [ -n "$EMUX_USE_XORG" ]; then
   Xorg :0 -config /etc/X11/emux-xorg.conf &
@@ -110,6 +110,16 @@ else
       if ! apt_busy && [ -x /usr/local/bin/emux-apt-repair ]; then
         emux-apt-repair >&2 || true
       fi
+      # v0.1.62: SPLIT the cascade. CORE is what the X server itself needs;
+      # everything else (WM + capture toolchain: xwd from x11-apps,
+      # pnmtoplainpnm from netpbm, nc from netcat-openbsd) installs in the
+      # BACKGROUND once X is up. Before, one multi-minute transaction gated
+      # Xvfb startup: the pane sat in dpkg/apt output for minutes and the
+      # control-plane wait expired ("touch input: X TCP not up yet").
+      # v0.1.60 CRITICAL: "xkbcomp" is NOT a Debian/Ubuntu package name
+      # (x11-xkb-utils is) - apt aborts the WHOLE transaction on one bad name.
+      CORE="xvfb x11-xkb-utils xkb-data xfonts-base"
+      REST="x11-xserver-utils x11-apps netpbm netcat-openbsd openbox xterm"
       TRIES=0
       while [ "$TRIES" -lt 30 ]; do
         if apt_busy; then
@@ -118,19 +128,10 @@ else
           sleep 10
           continue
         fi
-        # capture toolchain included: xwd (x11-apps), pnmtoplainpnm (netpbm),
-        # nc (netcat-openbsd) - without them Xvfb runs but zero frames arrive.
-        # v0.1.60 CRITICAL: "xkbcomp" is NOT a Debian/Ubuntu package name
-        # (x11-xkb-utils is) - apt aborts the WHOLE transaction on one bad
-        # name, so on the field device NOTHING of the desktop stack ever
-        # installed ("Unable to locate package" + "server did not come up").
-        # xkb-data + xfonts-base are what Xvfb needs to activate its keyboard
-        # and default fonts; x11-apps/netpbm/netcat are the capture chain.
         DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-          xvfb x11-xkb-utils xkb-data xfonts-base x11-xserver-utils x11-apps \
-          netpbm netcat-openbsd openbox xterm >&2 && break
+          $CORE >&2 && break
         TRIES=$((TRIES + 1))
-        echo "emux-x11: apt install failed - healing dpkg and retrying ($TRIES/12)" >&2
+        echo "emux-x11: apt install failed - healing dpkg and retrying ($TRIES/30)" >&2
         heal_dpkg
         sleep 2
       done
@@ -142,6 +143,30 @@ else
         dpkg --configure -a >&2 && break
         i=$((i + 1))
       done
+      # REST in background; when it lands, start the WM if none runs yet.
+      if [ -x /usr/bin/Xvfb ]; then
+        (
+          TRIES=0
+          while [ "$TRIES" -lt 30 ]; do
+            if apt_busy; then TRIES=$((TRIES + 1)); sleep 10; continue; fi
+            DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+              $REST >&2 && break
+            TRIES=$((TRIES + 1)); heal_dpkg; sleep 2
+          done
+          i=0
+          while [ "$i" -lt 2 ]; do dpkg --configure -a >&2 && break; i=$((i + 1)); done
+          sleep 1
+          if [ ! -e /tmp/emux_wm_launched ]; then
+            for c in "/usr/bin/$WM" /usr/bin/openbox; do
+              if [ -x "$c" ]; then
+                "$c" >/tmp/wm.log 2>&1 &
+                touch /tmp/emux_wm_launched
+                break
+              fi
+            done
+          fi
+        ) >/dev/null 2>&1 &
+      fi
     elif command -v pacman >/dev/null 2>&1; then
       pacman -Sy --noconfirm --needed xorg-server-xvfb xorg-xkbcomp xkeyboard-config xorg-xwd netpbm openbox xterm >&2
     elif command -v dnf >/dev/null 2>&1; then
@@ -188,13 +213,14 @@ fi
 # window manager; fall back through installed WMs to xterm so SOMETHING draws
 run_wm() {
   for c in "/usr/bin/$1" "/usr/local/bin/$1" "/bin/$1"; do
-    [ -x "$c" ] && { "$c" >/tmp/wm.log 2>&1 & return 0; }
+    [ -x "$c" ] && { "$c" >/tmp/wm.log 2>&1 & touch /tmp/emux_wm_launched; return 0; }
   done
   return 1
 }
 run_wm "$WM" || run_wm openbox || run_wm twm || run_wm icewm || {
   if [ -x /usr/bin/xterm ]; then
     /usr/bin/xterm -e /bin/sh -l >/tmp/wm.log 2>&1 &
+    touch /tmp/emux_wm_launched
   else
     echo "emux-x11: no window manager found ($WM/openbox/twm/icewm) and no xterm - root window will be blank. Install one with the distro package manager (apk add openbox / apt-get install openbox / pacman -S openbox / dnf install openbox)" >&2
   fi
@@ -203,6 +229,19 @@ run_wm "$WM" || run_wm openbox || run_wm twm || run_wm icewm || {
 # pane, so a dying X server now names its own reason in the field.
 wait $XPID
 RC=$?
+# v0.1.62: if Xvfb dies mid-session (shm SIGBUS class), restart ONCE with
+# -noshmem instead of ending the session and orphaning the pane.
+if [ "$RC" != 0 ] && [ ! -e /tmp/emux_xvfb_restarted ]; then
+  touch /tmp/emux_xvfb_restarted
+  echo "emux-x11: Xvfb died rc=$RC - restarting once with -noshmem" >&2
+  rm -f /tmp/.X0-lock /tmp/.X11-unix/X0 2>/dev/null
+  "$XVFB" :0 -screen 0 "$RES" -listen tcp -ac -noshmem >/tmp/xvfb.log 2>&1 &
+  XPID=$!
+  i=0
+  while [ ! -e /tmp/.X11-unix/X0 ] && [ "$i" -lt 150 ]; do sleep 0.1; i=$((i+1)); done
+  wait $XPID
+  RC=$?
+fi
 echo "emux-x11: X server (pid $XPID) exited rc=$RC - log tail:" >&2
 tail -15 /tmp/xvfb.log >&2
 exit $RC

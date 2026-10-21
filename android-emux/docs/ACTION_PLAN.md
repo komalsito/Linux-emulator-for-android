@@ -556,3 +556,25 @@ ENV_VERSION 28, versionCode 60.
    capture respawn (<=3) while frameId==0. Shipped-artifact grep markers
    are now part of the release checklist (see commit).
 ENV_VERSION 29, versionCode 61.
+
+## 17. v0.1.62 field round — reopen-EADDRINUSE root cause + faster X startup
+
+1. EADDRINUSE on close/reopen (FINAL root cause): DesktopService was built
+   PER ACTIVITY while the process outlives the activity (foreground terminal
+   service) - the old instance's frame listener (:7001), reader thread and
+   sessions leaked, so the reopened activity's fresh instance could never
+   bind. Now a process-wide singleton (DesktopService.get()); verified in
+   the shipped dex ($Companion type + MainActivity call site).
+2. "touch input: X TCP not up" after a pile of dpkg/apt output: the cascade
+   gated Xvfb behind ONE multi-package transaction (openbox chain included
+   the libpaper1-first-pass postinst mire, minutes long). Split: CORE
+   (xvfb x11-xkb-utils xkb-data xfonts-base) installs first and X starts as
+   soon as it lands; REST (WM + capture toolchain) installs in the
+   background and starts the WM when it arrives (marker file prevents a
+   double WM). Sandbox-verified end-to-end on the pinned noble image:
+   X0 + host tcp/6000 + openbox running.
+3. Xvfb mid-session death (shm SIGBUS class): restart once with -noshmem
+   instead of ending the session and orphaning the pane.
+4. Sandbox re-checks this round: noble Xvfb -listen tcp DOES open tcp/6000
+   and the host reaches it (the 21.1.x removal fear was unfounded).
+ENV_VERSION 30, versionCode 62.

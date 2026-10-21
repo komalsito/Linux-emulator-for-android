@@ -36,7 +36,7 @@ class MainActivity : AppCompatActivity() {
 
     private lateinit var b: ActivityMainBinding
     private val root by lazy { RootManager(this) }
-    private val desktop by lazy { DesktopService(this, root) }
+    private val desktop by lazy { DesktopService.get(this, root) }   // v0.1.62 singleton
 
     private var termView: VtTerminalView? = null
 

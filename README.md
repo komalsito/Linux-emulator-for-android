@@ -104,7 +104,11 @@ musl-loader exec (terminal only), then plain Android sh (CMD honored).
 
 ## Status / caveats
 
-- v0.1.61 debug build — not yet release-signed or R8-minified.
+- v0.1.62 debug build — not yet release-signed or R8-minified.
+  v0.1.62: DesktopService is a process-wide singleton (the reopen EADDRINUSE
+  root cause), the X server starts as soon as its CORE packages land (WM +
+  capture tools install in the background), and Xvfb auto-restarts once with
+  -noshmem if it dies mid-session.
   v0.1.61: settle-pass for first-pass proot postinst failures (libpaper1/
   statx case), and the control-plane retry loop + capture respawn that
   v0.1.59 announced but never actually shipped.

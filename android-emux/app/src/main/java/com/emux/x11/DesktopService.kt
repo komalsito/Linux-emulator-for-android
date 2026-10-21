@@ -54,6 +54,20 @@ class DesktopService(
     companion object {
         private const val TAG = "EmuXDesktop"
         const val FRAME_PORT = 7001
+
+        /**
+         * v0.1.62 FIELD FIX (EADDRINUSE on every app re-open): DesktopService
+         * used to be constructed PER ACTIVITY while the process outlives the
+         * activity (foreground terminal service keeps it alive). The old
+         * instance's frame listener + reader thread + sessions leaked, still
+         * holding 127.0.0.1:7001, so the new activity's fresh instance died
+         * in openFrameListener with EADDRINUSE. One instance per process.
+         */
+        @Volatile private var inst: DesktopService? = null
+        fun get(ctx: Context, root: RootManager): DesktopService =
+            inst ?: synchronized(this) {
+                inst ?: DesktopService(ctx.applicationContext, root).also { inst = it }
+            }
         const val MAX_FPS_FOREGROUND = 30
         const val MAX_FPS_IDLE = 5
     }
