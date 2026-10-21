@@ -736,8 +736,8 @@ class BootstrapManager(private val ctx: Context) {
      *   2. plain `tar -xzf`                     (full-featured tar, e.g. LineageOS)
      *   3. pure-Java GZIPInputStream + TarInputStream (no external binaries at all)
      */
-    private fun extractTarGz(tgz: File, dest: File) {
-        val cmds = listOf(
+    private fun extractTarGz(tgz: File, dest: File, allowHostTools: Boolean = true) {
+        val cmds = if (!allowHostTools) emptyList() else listOf(
             arrayOf("/system/bin/sh", "-c", "gzip -dc '${tgz.absolutePath}' | tar -x -C '${dest.absolutePath}'"),
             arrayOf("tar", "-xzf", tgz.absolutePath, "-C", dest.absolutePath),
         )
@@ -773,7 +773,7 @@ class BootstrapManager(private val ctx: Context) {
                 .use { extractTarStream(it, dest) }
         }
             .onFailure { throw RuntimeException("Extraction failed on this device. tar: $lastErr; java: ${it.message}") }
-        if (!File(dest, "etc").exists()) throw RuntimeException("Extraction produced an incomplete rootfs (tar: $lastErr)")
+        if (!rootfsLooksExtracted(dest)) throw RuntimeException("Extraction produced an incomplete rootfs (tar: $lastErr)")
     }
 
     /**
@@ -784,8 +784,8 @@ class BootstrapManager(private val ctx: Context) {
      * Same watchdog + strategy-fallthrough shape as extractTarGz; the longer
      * budget accounts for xz being slower to decompress than gzip on big images.
      */
-    private fun extractTarXz(txz: File, dest: File) {
-        val cmds = listOf(
+    private fun extractTarXz(txz: File, dest: File, allowHostTools: Boolean = true) {
+        val cmds = if (!allowHostTools) emptyList() else listOf(
             arrayOf("/system/bin/sh", "-c", "xz -dc '${txz.absolutePath}' | tar -x -C '${dest.absolutePath}'"),
             arrayOf("/system/bin/sh", "-c", "unxz -c '${txz.absolutePath}' | tar -x -C '${dest.absolutePath}'"),
             arrayOf("tar", "-xJf", txz.absolutePath, "-C", dest.absolutePath),
@@ -814,12 +814,29 @@ class BootstrapManager(private val ctx: Context) {
             org.tukaani.xz.XZInputStream(java.io.BufferedInputStream(FileInputStream(txz), 64 * 1024))
                 .use { extractTarStream(it, dest) }
         }.onFailure { throw RuntimeException("xz extraction failed on this device. tar: $lastErr; java: ${it.message}") }
-        if (!File(dest, "etc").exists()) throw RuntimeException("Extraction produced an incomplete rootfs (tar: $lastErr)")
+        if (!rootfsLooksExtracted(dest)) throw RuntimeException("Extraction produced an incomplete rootfs (tar: $lastErr)")
     }
 
-    /** Compression-aware dispatch (xz for the Debian/Ubuntu images, gz for Alpine). */
-    private fun extractArchive(arc: File, dest: File, xz: Boolean) =
-        if (xz) extractTarXz(arc, dest) else extractTarGz(arc, dest)
+    /**
+     * v0.1.51: wrapper-aware post-extract probe. pd/official images keep the
+     * tree inside ONE top-level dir until unwrapSingleTopDir() runs (which
+     * happens in the CALLER, after extraction) — so the end-of-extraction
+     * completeness check must accept the wrapped shape, otherwise a perfect
+     * extraction is reported as "incomplete rootfs" (the v0.1.48-50 field
+     * loop: check threw before the unwrap ever ran).
+     */
+    private fun rootfsLooksExtracted(dest: File): Boolean {
+        if (File(dest, "etc").isDirectory) return true
+        val ch = runCatching { dest.listFiles() }.getOrNull()
+        return ch != null && ch.size == 1 && ch[0].isDirectory &&
+            File(ch[0], "etc").isDirectory
+    }
+
+    /** Compression-aware dispatch (xz for the Debian/Ubuntu images, gz for Alpine).
+     *  [allowHostTools]=false forces the pure-Java path (device-like ROMs with
+     *  no xz binary; also how the sandbox harness verifies the real sequence). */
+    private fun extractArchive(arc: File, dest: File, xz: Boolean, allowHostTools: Boolean = true) =
+        if (xz) extractTarXz(arc, dest, allowHostTools) else extractTarGz(arc, dest, allowHostTools)
 
     /**
      * Minimal streaming tar reader. v0.1.48 REWRITE (field bug: Ubuntu install

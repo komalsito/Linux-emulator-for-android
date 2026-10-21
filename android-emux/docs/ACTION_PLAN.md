@@ -237,6 +237,16 @@ Pitfalls checklist (each caused a real crash/bug once):
   and every message named the dead legacy path ("rootfs missing at
   …/files/linuxroot", PROBE_NOROOTFS) even though a distro WAS on disk.
   Fix: scan "$(dirname "$HOME")/distros"/* FIRST, before legacy fallbacks.
+- v0.1.51 FIELD BUG #3 (banner "v0.1.50 · … incomplete rootfs (tar: exec xz…)"):
+  the end-of-extraction completeness check inside extractTarXz/extractTarGz
+  demanded dest/etc IMMEDIATELY — but wrapped images only get etc/ after the
+  CALLER's unwrapSingleTopDir(), so a perfect extraction was rejected on
+  device (ROMs without an xz binary = the pure-Java path = always wrapped).
+  The v0.1.48 sandbox harness missed it because it called parser+unwrap
+  directly, never the real sequence. Fix: wrapper-aware rootfsLooksExtracted()
+  inside the extractors; harness v6 now runs extractArchive(allowHostTools=
+  false) → unwrap → strict etc gate → probes for ALL FIVE images (all green).
+  Lesson: harnesses must execute the CALLER sequence, not just the leaf fn.
 - v0.1.50: (a) bootstrap failure banners now embed the RUNNING app version
   ("v0.1.50 · RuntimeException: …") — the 0.1.48/49 field round was actually a
   device still executing 0.1.47 (banner string provenance + the process-scoped
@@ -282,7 +292,9 @@ handling + absolute/forward hardlink resolution (field bug: v0.1.47 Ubuntu
 install aborted post-extract); all five images verified byte-faithful vs
 system tar in sandbox · v0.1.49 launcher/probe distro-fallback scan order
 (scan files/distros before legacy linuxroot fallbacks) · v0.1.50 version-
-tagged failure banners + live distro switching (pref listener).
+tagged failure banners + live distro switching (pref listener) · v0.1.51
+wrapper-aware post-extract completeness check (the last field blocker for
+pd-image installs; re-verified end-to-end for all five images).
 
 ## 9. Field-report protocol (keep using it)
 Every failure banner embeds: android/model/targetSdk/selinux, exec(loader),

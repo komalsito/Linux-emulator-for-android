@@ -104,7 +104,7 @@ musl-loader exec (terminal only), then plain Android sh (CMD honored).
 
 ## Status / caveats
 
-- v0.1.50 debug build — not yet release-signed or R8-minified.
+- v0.1.51 debug build — not yet release-signed or R8-minified.
 - Terminal geometry: no TIOCSWINSZ from Java (no NDK); shells default to 80x24.
 - Desktop requires the one-time distro component install (Settings → “Install
   desktop components”, on by default) and ~90 MB of disk on Alpine (~400 MB on
