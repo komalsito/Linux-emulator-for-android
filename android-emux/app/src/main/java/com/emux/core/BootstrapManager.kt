@@ -63,8 +63,8 @@ class BootstrapManager(private val ctx: Context) {
          * exited (code 1)". Guest-side retries in emux-x11 cover foreign apt
          * runs; this covers our own.
          */
-        private val aptLockObj = Any()
-        internal fun aptLock(): Any = aptLockObj
+        private val aptLockObj = java.util.concurrent.locks.ReentrantLock()
+        internal fun aptLock(): java.util.concurrent.locks.ReentrantLock = aptLockObj
         // NOTE: Alpine publishes point releases as .0 only (3.20.0, 3.20.3 …);
         // a bare "3.20" produces a 404 URL — that was the bootstrap failure.
         const val ALPINE_VERSION = "3.20.3"
@@ -1660,7 +1660,7 @@ class BootstrapManager(private val ctx: Context) {
      */
     private fun runAptProot(
         proot: File, dest: File, pkgs: List<String>, phase: String, report: (String, Int) -> Unit,
-    ): ApkRun = synchronized(Companion.aptLock()) {
+    ): ApkRun = withAptLock {
         val hostTmp = prootTmp(ctx)
         val nb = FsLayout.nativeBridgeDir(ctx)
         // v0.1.52 FIELD FIX: a killed apt run (user closes the app mid
@@ -2030,7 +2030,7 @@ class BootstrapManager(private val ctx: Context) {
      * assets/bin/emux-apt-repair (inlined so it also works on rootfs trees
      * seeded by older APKs that lack the helper script).
      */
-    private fun runRepairProot(proot: File, dest: File): ApkRun = synchronized(Companion.aptLock()) {
+    private fun runRepairProot(proot: File, dest: File): ApkRun = withAptLock {
         val hostTmp = prootTmp(ctx)
         val nb = FsLayout.nativeBridgeDir(ctx)
         val argv = listOf(
@@ -2090,6 +2090,15 @@ class BootstrapManager(private val ctx: Context) {
      * of Xvfb & friends actually succeed.
      */
     fun desktopPreRepair() {
+        // v0.1.58: wait (bounded) for any IN-PROCESS apt run (the app-start gap
+        // install of the desktop stack) to finish before judging dpkg state -
+        // apt reports "dpkg was interrupted" for a journal that is merely IN
+        // USE, and the desktop cascade then raced the multi-minute install
+        // (field pane: "E: dpkg was interrupted ... apt install failed").
+        val got = runCatching {
+            Companion.aptLock().tryLock(90, java.util.concurrent.TimeUnit.SECONDS)
+        }.getOrDefault(true)
+        try {
         runCatching {
             val spec = DistroCatalog.requested(ctx)
             if (spec.pkg != PkgManager.APT) return
@@ -2102,6 +2111,7 @@ class BootstrapManager(private val ctx: Context) {
             val r = runRepairProot(proot, dest)
             com.emux.EmuXLog.i("desktopPreRepair: ok=${r.ok} tail=${r.tail.take(200)}")
         }.onFailure { com.emux.EmuXLog.e("desktopPreRepair failed (non-fatal)", it) }
+        } finally { if (got) runCatching { Companion.aptLock().unlock() } }
     }
 
     fun startupRepairAsync(force: Boolean = false) {
@@ -2226,6 +2236,14 @@ class BootstrapManager(private val ctx: Context) {
             "LANG" to "C",
         )
         return runApkProcess(argv, env, pkgs, phase, report)
+    }
+
+    /** v0.1.58: bounded-waitable mutex for proot apt/dpkg runs (ReentrantLock
+     *  so desktopPreRepair can tryLock instead of blocking the desktop start
+     *  forever behind a multi-minute gap install). */
+    private inline fun <T> withAptLock(block: () -> T): T {
+        Companion.aptLock().lock()
+        try { return block() } finally { Companion.aptLock().unlock() }
     }
 
     private fun runApkProcess(

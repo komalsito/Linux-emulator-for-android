@@ -104,7 +104,11 @@ musl-loader exec (terminal only), then plain Android sh (CMD honored).
 
 ## Status / caveats
 
-- v0.1.56 debug build — not yet release-signed or R8-minified.
+- v0.1.58 debug build — not yet release-signed or R8-minified.
+  v0.1.58: desktop no longer races the background desktop-stack install
+  (waits for foreign apt/dpkg, heals between retries); v0.1.57 applied
+  Install immediately to live sessions and added the capture-toolchain
+  cascade + silent-capture-death watcher.
   v0.1.56: off-UI-thread VT parsing (fixes apt-list ANR), helper re-seed on
   upgraded devices, dpkg pre-heal before the desktop cascade.
   v0.1.55: guest-PTY upgrade on seccomp-strict ROMs (real PTY instead of raw

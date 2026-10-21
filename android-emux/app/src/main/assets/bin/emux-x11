@@ -81,20 +81,52 @@ else
       # lock when the desktop cascade runs - apt then fails with "Could not
       # get lock" and Xvfb never gets installed. Retry a few times instead of
       # giving up on the first lock race.
+      # v0.1.58 FIELD FIX (pane: "E: dpkg was interrupted ... apt install
+      # failed (lock or mirror?) - retry"): apt reports "dpkg was interrupted"
+      # whenever /var/lib/dpkg/updates/ is non-empty - which is ALSO true while
+      # ANOTHER dpkg transaction is legitimately running (the app-start gap
+      # install of the desktop stack takes minutes on slow links). The old
+      # 4x5s retry loop raced that multi-minute install and always lost, then
+      # gave up with Xvfb absent. Now: wait while a foreign apt/dpkg runs, and
+      # heal the journal between retries when nothing is running.
+      apt_busy() {
+        for f in /proc/[0-9]*/cmdline; do
+          c=$(tr "\0" " " < "$f" 2>/dev/null)
+          case "$c" in *dpkg*|*apt-get*) return 0 ;; esac
+        done
+        return 1
+      }
+      heal_dpkg() {
+        rm -f /var/lib/dpkg/status-old
+        if ! dpkg --configure -a >&2; then
+          mkdir -p /var/lib/dpkg/updates.emux-broken 2>/dev/null
+          for f in /var/lib/dpkg/updates/*; do
+            [ -e "$f" ] && mv "$f" /var/lib/dpkg/updates.emux-broken/ 2>/dev/null
+          done
+          rm -f /var/lib/dpkg/updates/* 2>/dev/null
+          dpkg --configure -a >&2 || true
+        fi
+      }
+      if ! apt_busy && [ -x /usr/local/bin/emux-apt-repair ]; then
+        emux-apt-repair >&2 || true
+      fi
       TRIES=0
-      while [ "$TRIES" -lt 4 ]; do
-        # v0.1.57: include the CAPTURE toolchain (xwd from x11-apps, netpbm,
-        # netcat) - the cascade used to install only the X server + WM, so on
-        # devices whose bootstrap desktop install never ran, emux-capture then
-        # found no xwd/pnmtoplainpnm/nc and its own old-style apt fallback
-        # died on the dpkg state: Xvfb ran, frames never arrived, pane said
-        # "waiting for X frames" forever.
+      while [ "$TRIES" -lt 12 ]; do
+        if apt_busy; then
+          TRIES=$((TRIES + 1))
+          echo "emux-x11: another apt/dpkg transaction is running - waiting ($TRIES/12)" >&2
+          sleep 10
+          continue
+        fi
+        # capture toolchain included: xwd (x11-apps), pnmtoplainpnm (netpbm),
+        # nc (netcat-openbsd) - without them Xvfb runs but zero frames arrive.
         DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
           xvfb xkbcomp x11-xserver-utils x11-apps netpbm netcat-openbsd \
           openbox xterm >&2 && break
         TRIES=$((TRIES + 1))
-        echo "emux-x11: apt install failed (lock or mirror?) - retry $TRIES/4 in 5s" >&2
-        sleep 5
+        echo "emux-x11: apt install failed - healing dpkg and retrying ($TRIES/12)" >&2
+        heal_dpkg
+        sleep 2
       done
     elif command -v pacman >/dev/null 2>&1; then
       pacman -Sy --noconfirm --needed xorg-server-xvfb xorg-xkbcomp xkeyboard-config openbox xterm >&2

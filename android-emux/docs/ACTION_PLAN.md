@@ -461,3 +461,28 @@ Root causes & fixes:
    components; Xfce4/LXDE/i3 must be apt-installed inside the guest first;
    every choice falls back openbox -> twm/icewm -> xterm, so frames flow
    regardless of WM availability.
+
+## 13. v0.1.58 field round — the apt-collision desktop failure
+
+Pane (v0.1.57): "E: dpkg was interrupted, you must manually run
+'dpkg --configure -a' ... | emux-x11: apt install failed (lock or mirror?) -
+retry", then "desktop did not start in 25s", on EVERY WM choice.
+
+Root cause: apt's "dpkg was interrupted" check fires whenever
+/var/lib/dpkg/updates/ is non-empty - which is ALSO true while another dpkg
+transaction is legitimately mid-flight. The v0.1.55 app-start gap install of
+the desktop stack (xvfb+netpbm+netcat+..., minutes on slow links) was still
+running when the user opened the Desktop tab; desktopPreRepair saw a
+"dirty" (in-use) journal, and the emux-x11 cascade's 4x5s retries raced the
+multi-minute install and always lost -> no Xvfb -> no frames.
+
+Fixes:
+- aptLock is now a ReentrantLock; desktopPreRepair tryLock(90s) so the
+  desktop start waits for the in-process gap install instead of racing it.
+- emux-x11 cascade: apt_busy() proc scan - WAIT (12x10s) while a foreign
+  apt/dpkg runs; heal_dpkg() (status-old drop + journal quarantine) between
+  retries only when nothing is running; emux-apt-repair guarded by apt_busy.
+- emux-capture: same foreign-apt wait (30x5s) before its fallback installs.
+- Settings WM summary now explains Openbox is the preinstalled session and
+  Xfce4/LXDE/i3 need their packages installed inside the distro first.
+ENV_VERSION 26, versionCode 58.

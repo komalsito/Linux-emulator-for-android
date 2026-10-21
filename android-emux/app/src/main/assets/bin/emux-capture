@@ -61,6 +61,18 @@ if [ -z "$XWD" ] || [ -z "$PNM" ]; then
   # v0.1.47 multi-distro: xwd lives in x11-apps on Debian/Ubuntu (xwd pkg on
   # Alpine); pnmtoplainpnm is netpbm on both families.
   echo "emux-capture: installing xwd+netpbm via the distro package manager (one time, needs network)" >&2
+  # v0.1.58: wait out a foreign dpkg/apt first - installing against a live
+  # transaction is what corrupts journals and produces "dpkg was interrupted".
+  i=0
+  while [ "$i" -lt 30 ]; do
+    BUSTY=0
+    for f in /proc/[0-9]*/cmdline; do
+      c=$(tr "\0" " " < "$f" 2>/dev/null)
+      case "$c" in *dpkg*|*apt-get*) BUSTY=1; break ;; esac
+    done
+    [ "$BUSTY" = 0 ] && break
+    i=$((i + 1)); sleep 5
+  done
   if command -v apt-get >/dev/null 2>&1; then
     # v0.1.57: heal dpkg FIRST (the old bare configure -a cannot fix a dirty
     # journal or the proot link(2) backup bug, so this install used to die
