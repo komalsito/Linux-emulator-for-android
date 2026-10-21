@@ -178,7 +178,7 @@ class TerminalSession(
      */
     fun restart() {
         generation++
-        runCatching { process?.destroy() }
+        destroyTree()   // v0.1.54: old wrapper AND its proot guests go away
         runCatching { job?.cancel() }
         state.value = State.STARTING
         start()
@@ -536,15 +536,70 @@ class TerminalSession(
      */
     fun debugKillForDiagnostics() {
         com.emux.EmuXLog.e("session $id produced no output — killing for respawn diagnostics")
-        runCatching { process?.destroy() }
+        destroyTree()
     }
 
     suspend fun stop() {
         releaseWake()
         job?.cancelAndJoin()
-        process?.destroy()
+        destroyTree()          // v0.1.54: guests included, not just the wrapper
         process = null
         state.value = State.DEAD
+    }
+
+    /**
+     * v0.1.54 FIELD FIX (desktop EADDRINUSE / orphan Xvfb): Process.destroy()
+     * kills ONLY the direct child (the Android-side shell wrapper). The proot
+     * tracer and its guest processes are reparented and KEEP RUNNING - when the
+     * tracer dies the kernel DETACHES tracees, it does not kill them. So a
+     * stopped desktop session left Xvfb + emux-capture alive holding tcp/6000,
+     * the :7001 capture connection and /tmp/.X11-unix/X0. Walk /proc once and
+     * SIGKILL every descendant (deepest first), then the child itself.
+     */
+    private fun destroyTree() {
+        val p = process ?: return
+        runCatching {
+            // java.lang.Process.pid() is not in every Android stub/guest level
+            // we compile/run against - reflect with a graceful skip.
+            val pid = runCatching {
+                (p.javaClass.getMethod("pid").invoke(p) as Long).toInt()
+            }.getOrDefault(-1)
+            if (pid <= 0) { runCatching { p.destroy() }; return@runCatching }
+            val parentOf = HashMap<Int, Int>()
+            val proc = java.io.File("/proc")
+            val dirs = proc.listFiles() ?: return@runCatching
+            for (d in dirs) {
+                val name = d.name
+                if (!name.isNotEmpty() || !name.all { it in '0'..'9' }) continue
+                runCatching {
+                    val stat = java.io.File(d, "stat").readText()
+                    val close = stat.lastIndexOf(')')
+                    if (close > 0) {
+                        // fields after ") ": state ppid ...
+                        val f = stat.substring(close + 2).split(' ')
+                        val ppid = f.getOrNull(1)?.toIntOrNull()
+                        if (ppid != null) parentOf[name.toInt()] = ppid
+                    }
+                }
+            }
+            fun descendantOf(target: Int, me: Int): Boolean {
+                var cur = me
+                var hops = 0
+                while (hops++ < 48) {
+                    val pp = parentOf[cur] ?: return false
+                    if (pp == target) return true
+                    cur = pp
+                }
+                return false
+            }
+            val victims = parentOf.keys.filter { it != pid && descendantOf(pid, it) }
+                .sortedDescending()
+            for (v in victims) {
+                runCatching { android.system.Os.kill(v, android.system.OsConstants.SIGKILL) }
+            }
+            if (victims.isNotEmpty()) com.emux.EmuXLog.i("session $id: killed ${victims.size} descendant pids")
+        }
+        runCatching { p.destroy() }
     }
 }
 

@@ -83,6 +83,44 @@ class VtTerminalView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attr
     private var dirtyRows = BooleanArray(rows) { true }
     private var allDirty = true
 
+    // ---- v0.1.54: SCROLLBACK -------------------------------------------------
+    // Rows scrolled off the top are kept in [history] (plain-shell mode only;
+    // alternate-screen apps like less/vim manage their own viewport). The view
+    // can render any window of history+screen: [scrollOffset] = how many rows
+    // back from live we are (0 = live). Finger-drag scrolls, double-tap jumps
+    // to live, ExtraKeys pgup/pgdn page through it.
+    private val history = ArrayDeque<Row>()
+    private val MAX_HISTORY = 3000
+    private var scrollOffset = 0
+    private var touchLastY = 0f
+    private var touchAcc = 0f
+    private var dragging = false
+    private var lastTapTs = 0L
+    private val touchSlopPx = android.view.ViewConfiguration.get(context).scaledTouchSlop * 1.5f
+
+    /** Push a row that is about to scroll off the top into scrollback. */
+    private fun pushHistory(r: Row) {
+        history.addLast(r)
+        while (history.size > MAX_HISTORY) history.removeFirst()
+        // keep the SAME content on screen while the user reads history
+        if (scrollOffset > 0) scrollOffset = (scrollOffset + 1).coerceAtMost(history.size)
+    }
+
+    /** Scroll the viewport by [deltaRows] towards history (+) / live (-). */
+    fun scrollViewportBy(deltaRows: Int) {
+        if (history.isEmpty()) return
+        val nv = (scrollOffset + deltaRows).coerceIn(0, history.size)
+        if (nv != scrollOffset) { scrollOffset = nv; markAllDirty(); invalidate() }
+    }
+
+    /** Page through scrollback: +1 page up (older), -1 page down (towards live). */
+    fun scrollPage(pagesUp: Int) = scrollViewportBy(pagesUp * (rows / 2))
+
+    /** Jump back to the live edge. */
+    fun scrollToEnd() {
+        if (scrollOffset != 0) { scrollOffset = 0; markAllDirty(); invalidate() }
+    }
+
     // ------------------------------------------------------------------ paint
     private val textPaint = TextPaint(Paint.ANTI_ALIAS_FLAG).apply {
         typeface = Typeface.MONOSPACE
@@ -190,6 +228,7 @@ class VtTerminalView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attr
 
     fun resetToDefaults() {
         screen = buildScreen(rows, cols); curX = 0; curY = 0; pen = Style(); penIdx = 0
+        history.clear(); scrollOffset = 0   // v0.1.54: fresh session = fresh scrollback
         markAllDirty()
     }
 
@@ -313,6 +352,9 @@ class VtTerminalView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attr
 
     private fun scrollUp(n: Int) {
         repeat(n) {
+            // v0.1.54: the row leaving the top goes to scrollback (plain shell
+            // mode only - alt-screen TUIs repaint the whole screen themselves)
+            if (!altScreen) pushHistory(screen[0])
             for (y in 0 until rows - 1) { screen[y] = screen[y + 1] }
             screen[rows - 1] = Row(IntArray(cols) { 0x20 }, ByteArray(cols))
         }
@@ -360,6 +402,9 @@ class VtTerminalView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attr
     }
 
     private fun deleteLines(n: Int) {
+        // v0.1.54: CSI M loses rows at the region top - archive them too when
+        // the region is the whole screen (the common shell case).
+        if (!altScreen && curY == 0) repeat(minOf(n, rows)) { pushHistory(screen[0]) }
         repeat(n) {
             for (y in curY until rows - 1) screen[y] = screen[y + 1]
             screen[rows - 1] = Row(IntArray(cols) { 0x20 }, ByteArray(cols))
@@ -476,6 +521,10 @@ class VtTerminalView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attr
         super.onDraw(canvas)
         canvas.drawColor(BG_COLOR)
         val fm = textPaint.fontMetrics
+        // v0.1.54: render the scrollback window (history + live grid) instead of
+        // only the live grid. v = virtual row index; offset 0 == live view.
+        val hsize = history.size
+        val vTop = hsize - scrollOffset
         for (y in 0 until rows) {
             // v0.1.43 CRITICAL RENDER FIX: the "damage-only" repaint was
             // self-defeating — every onDraw begins with a FULL-canvas
@@ -487,14 +536,16 @@ class VtTerminalView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attr
             // lone cursor. Damage tracking only works with clipped partial
             // invalidates; the reliable fix is to repaint every row (a text
             // grid of <=40 runs/row is trivially cheap per frame).
-            val row = screen[y]
+            val v = vTop + y
+            val row = if (v < hsize) history[v] else screen[v - hsize]
+            val rcols = row.chars.size      // rows keep their birth width across resizes
             val top = y * cellH
             var x = 0
-            while (x < cols) {
+            while (x < rcols) {
                 val st = stylePool.getOrElse(row.styles[x].toInt() and 0xFF) { defStyle }
                 // background run
                 var runEnd = x
-                while (runEnd < cols && row.styles[runEnd] == row.styles[x]) runEnd++
+                while (runEnd < rcols && row.styles[runEnd] == row.styles[x]) runEnd++
                 if (st.bg != Color.TRANSPARENT || st.inverse) {
                     boxPaint.color = if (st.inverse) st.fg else st.bg
                     if (boxPaint.color != Color.TRANSPARENT)
@@ -517,12 +568,31 @@ class VtTerminalView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attr
         }
         allDirty = false
 
-        // cursor
-        if (cursorVisible && blinkOn && hasWindowFocus()) {
+        // cursor (live edge only - a blinking cursor inside scrollback is a lie)
+        if (scrollOffset == 0 && cursorVisible && blinkOn && hasWindowFocus()) {
             boxPaint.color = CURSOR_COLOR
             canvas.drawRect(curX * cellW, curY * cellH, (curX + 1) * cellW, (curY + 1) * cellH, boxPaint)
         }
+
+        // v0.1.54: scrollback affordances - position thumb on the right edge and
+        // a one-line hint while the user is NOT at the live edge.
+        if (hsize > 0) {
+            val trackH = height.toFloat()
+            val thumbH = max(cellH, trackH * rows.toFloat() / (hsize + rows))
+            val y0 = trackH * vTop.toFloat() / (hsize + rows)
+            boxPaint.color = if (scrollOffset > 0) 0xFF5A6470.toInt() else 0xFF2A3038.toInt()
+            canvas.drawRect(width - dp(3f), y0, width.toFloat(), y0 + thumbH, boxPaint)
+        }
+        if (scrollOffset > 0) {
+            textPaint.color = 0xFF8899AA.toInt()
+            textPaint.isFakeBoldText = false
+            textPaint.flags = 0
+            canvas.drawText("-- scrollback $scrollOffset/$hsize - drag or pgdn to return, double-tap = live --",
+                cellW, baseline, textPaint)
+        }
     }
+
+    private fun dp(v: Float) = v * resources.displayMetrics.density
 
 
     // ---- blink, scheduled only while attached+visible ----
@@ -574,7 +644,41 @@ class VtTerminalView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attr
         //     focus + explicitly shows the keyboard again.
         if (tag == null) tag = "term"
         if (!isFocused) requestFocus()
-        if (event?.actionMasked == android.view.MotionEvent.ACTION_UP) showKeyboard()
+        // v0.1.54 SCROLLBACK GESTURES: one-finger vertical drag scrolls the
+        // history (the grid has no other use for drags - mouse reporting is not
+        // implemented), double-tap jumps to the live edge, a plain tap keeps the
+        // v0.1.17 focus+keyboard behaviour untouched.
+        when (event?.actionMasked) {
+            android.view.MotionEvent.ACTION_DOWN -> {
+                touchLastY = event.y; touchAcc = 0f; dragging = false
+            }
+            android.view.MotionEvent.ACTION_MOVE -> {
+                val dy = event.y - touchLastY
+                if (!dragging && kotlin.math.abs(dy) > touchSlopPx && history.isNotEmpty()) {
+                    dragging = true; touchAcc = 0f
+                }
+                if (dragging) {
+                    touchLastY = event.y
+                    touchAcc += dy / cellH          // finger down = pull older rows in
+                    val r = touchAcc.toInt()
+                    if (r != 0) { scrollViewportBy(r); touchAcc -= r.toFloat() }
+                    return true
+                }
+            }
+            android.view.MotionEvent.ACTION_UP -> {
+                val now = System.currentTimeMillis()
+                if (dragging) {
+                    dragging = false
+                } else if (now - lastTapTs < 300) {
+                    lastTapTs = 0L
+                    scrollToEnd()                   // double-tap = back to live
+                } else {
+                    lastTapTs = now
+                    showKeyboard()
+                }
+            }
+            android.view.MotionEvent.ACTION_CANCEL -> dragging = false
+        }
         return true
     }
 

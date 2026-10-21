@@ -68,6 +68,13 @@ class DesktopService(
     private var listener: ServerSocket? = null
     private var frameReader: Job? = null
 
+    /** v0.1.54: the ACCEPTED capture socket. Coroutine.cancel() does NOT unblock
+     *  a thread parked in a blocking read, so without this handle the old
+     *  ESTABLISHED 127.0.0.1:7001 socket survived stop() and the next bind()
+     *  died with EADDRINUSE even with SO_REUSEADDR (REUSEADDR never reuses a
+     *  live same-tuple socket). Closing it from stop() unblocks the reader. */
+    @Volatile private var activeSock: Socket? = null
+
     /** Latest decoded frame; the View reads this under lock during draw. */
     @Volatile var currentFrame: Bitmap? = null
     private val frameLock = Any()
@@ -197,6 +204,13 @@ class DesktopService(
                     }
                 }
 
+                // 0b) v0.1.54: clear orphaned desktop guests (and their X locks /
+                //     tcp sockets) from a previous tab visit or app life BEFORE we
+                //     bind :7001 and start a fresh capture - otherwise the old
+                //     emux-capture keeps an ESTABLISHED socket on our port and the
+                //     bind fails EADDRINUSE, and the old Xvfb holds :0.
+                killDesktopGuests()
+
                 // 1) Open our frame listener BEFORE starting capture so no frames lost.
                 openFrameListener()
 
@@ -275,6 +289,11 @@ class DesktopService(
                 }
             } catch (e: Exception) {
                 Log.e(TAG, "desktop start failed", e)
+                // v0.1.54: a failed start must not leak the listener/accepted
+                // socket/sessions - the leaked :7001 tuple is exactly what made
+                // the NEXT start die with EADDRINUSE on the field device.
+                runCatching { activeSock?.close() }; activeSock = null
+                runCatching { listener?.close() }; listener = null
                 errorText.value = e.message ?: "unknown error"
                 state.value = State.ERROR
             }
@@ -305,12 +324,60 @@ class DesktopService(
 
     private fun resetForRestart() {
         runCatching { frameReader?.cancel() }; frameReader = null
+        runCatching { activeSock?.close() }; activeSock = null   // v0.1.54
         runCatching { listener?.close() }; listener = null
         runCatching { x11?.close() }; x11 = null
         scope.launch {
             runCatching { xSession?.stop() }; xSession = null
             runCatching { captureSession?.stop() }; captureSession = null
+            killDesktopGuests()   // v0.1.54: orphans hold :6000/:7001 guest-side
         }
+    }
+
+    /**
+     * v0.1.54 FIELD FIX (desktop "exit 1" then EADDRINUSE on reopen):
+     * proot guests are DETACHED, not killed, when their tracer (our process or
+     * the wrapper shell) dies - so a closed desktop tab / killed app left Xvfb
+     * and emux-capture running forever, holding tcp/6000, the :7001 connection
+     * and /tmp/.X11-unix/X0. emux-x11 only killed stale "Xvfb :0"/"Xorg :0";
+     * nothing ever killed the capture side. One-shot proot pass that kills the
+     * whole desktop guest family and drops the X locks.
+     */
+    private fun killDesktopGuests() {
+        runCatching {
+            val proot = com.emux.core.FsLayout.prootBin(ctx)
+            val rootfs = com.emux.core.FsLayout.linuxRoot(ctx)
+            if (!proot.isFile || !java.io.File(rootfs, "etc").isDirectory) return
+            val nb = com.emux.core.FsLayout.nativeBridgeDir(ctx)
+            val payload =
+                "for f in /proc/[0-9]*/cmdline; do " +
+                "c=\$(tr '\\0' ' ' < \$f 2>/dev/null); " +
+                "case \$c in *Xvfb*|*Xorg*|*emux-capture*|*xwd*) " +
+                "p=\${f#/proc/}; p=\${p%/cmdline}; [ \$p != \$\$ ] && kill -9 \$p 2>/dev/null;; " +
+                "esac; done; " +
+                "rm -f /tmp/.X0-lock /tmp/.X11-unix/X0 2>/dev/null; true"
+            val pb = ProcessBuilder(
+                proot.absolutePath, "-0", "-r", rootfs.absolutePath,
+                "-b", "/dev", "-b", "/proc", "-b", "/sys", "-w", "/",
+                "/bin/sh", "-c", payload)
+            pb.environment().clear()
+            pb.environment().putAll(mapOf(
+                "LD_LIBRARY_PATH" to nb.absolutePath,
+                "PROOT_TMP_DIR" to java.io.File(com.emux.core.FsLayout.safeTmp(ctx), "proot").apply { mkdirs() }.absolutePath,
+                "TMPDIR" to "/tmp",
+                "HOME" to "/root",
+                "PATH" to "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+                "PROOT_LOADER" to java.io.File(nb, "loader").absolutePath,
+            ))
+            pb.redirectErrorStream(true)
+            val p = pb.start()
+            val wd = Thread { try { Thread.sleep(6_000); p.destroy() } catch (_: Exception) {} }
+                .apply { isDaemon = true; start() }
+            p.inputStream.bufferedReader().readText()
+            p.waitFor()
+            wd.interrupt()
+            com.emux.EmuXLog.i("killDesktopGuests done")
+        }.onFailure { com.emux.EmuXLog.e("killDesktopGuests failed (non-fatal)", it) }
     }
 
     private suspend fun waitForPort(port: Int, timeoutMs: Long) {
@@ -368,10 +435,13 @@ class DesktopService(
      */
     fun beginFrameLoop(onUiInvalidated: () -> Unit) {
         frameReader?.cancel()
+        runCatching { activeSock?.close() }   // v0.1.54: drop any previous stream
+        activeSock = null
         frameReader = scope.launch {
             var sock: Socket? = null
             try {
                 sock = listener!!.accept()          // blocks until helper connects
+                activeSock = sock                   // v0.1.54: closable from stop()
                 sock.tcpNoDelay = true
                 val din = DataInputStream(sock.inputStream.buffered(512 * 1024))
                 val hdr = ByteArray(8)
@@ -431,6 +501,7 @@ class DesktopService(
                 }
             } finally {
                 runCatching { sock?.close() }
+                if (activeSock === sock) activeSock = null
             }
         }
     }
@@ -493,11 +564,13 @@ class DesktopService(
     // -------------------------------------------------------------------- stop
     fun stop() {
         frameReader?.cancel(); frameReader = null
-        runCatching { listener?.close() }
+        runCatching { activeSock?.close() }; activeSock = null   // v0.1.54
+        runCatching { listener?.close() }; listener = null
         x11?.close(); x11 = null
         scope.launch {
             xSession?.stop(); captureSession?.stop()
             xSession = null; captureSession = null
+            killDesktopGuests()   // v0.1.54: guests outlive session stop otherwise
         }
         state.value = State.IDLE
     }

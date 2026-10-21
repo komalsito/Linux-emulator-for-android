@@ -361,3 +361,32 @@ it no-ops unless the journal is dirty / shim / stamp missing, then runs the
 in-guest repair inside proot. Bootstrap never re-runs on a stamped rootfs,
 so without this pass a broken dpkg survived forever (the field state).
 ENV_VERSION 21→22 re-seeds helpers (emux-apt-repair) on upgrade.
+
+## 10. v0.1.54 field round — terminal scrollback + desktop lifecycle
+
+1. TERMINAL COULD NOT SCROLL (user report): the renderer kept only the live
+   grid; rows scrolled off the top were destroyed. Now VtTerminalView keeps
+   a 3000-row scrollback (plain-shell mode only; alt-screen TUIs exempt),
+   renders any window of history+grid, and adds gestures: one-finger
+   vertical drag = scroll, double-tap = jump to live, ExtraKeys pgup/pgdn =
+   page up/down (handled locally, no bytes to the guest). Scrollbar thumb on
+   the right edge + a hint line while off the live edge; cursor hidden while
+   reading history; offset tracks new output so the page never jumps.
+2. DESKTOP "exited (code 1)" THEN EADDRINUSE ON REOPEN (user report):
+   chain of leaks - (a) Process.destroy() killed only the wrapper shell; the
+   proot tracer+guests are DETACHED by the kernel on tracer death, so Xvfb /
+   emux-capture survived session stop AND app death holding tcp/6000, the
+   :7001 capture connection and /tmp/.X11-unix/X0; (b) the accepted :7001
+   socket was never closed on stop (coroutine cancel does not unblock a
+   parked read) and a live same-tuple socket defeats SO_REUSEADDR -> the
+   next bind died EADDRINUSE; (c) a failed desktop start leaked listener +
+   sessions; (d) MainActivity only started the desktop from IDLE, so one
+   failed attempt (e.g. apt lock raced with the v0.1.53 startup repair)
+   left the pane on a stale error forever.
+   Fixes: TerminalSession.destroyTree() (/proc walk, SIGKILL descendants),
+   DesktopService.killDesktopGuests() one-shot proot pass (Xvfb/Xorg/
+   emux-capture/xwd + X locks) on start/stop/reset, activeSock handle
+   closed from stop/reset/failure paths, full reset in the start-failure
+   catch, ERROR state retries on tab reselect, emux-x11 stale-kill extended
+   to the capture family + apt install retries (4x5s) for dpkg-lock races,
+   BootstrapManager aptLock serializes in-process proot apt runs.

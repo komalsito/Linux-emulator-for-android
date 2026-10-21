@@ -334,7 +334,12 @@ class MainActivity : AppCompatActivity() {
         // NOT the X pipeline. If it appears then turns dark, frames are
         // simply never arriving (check the status line error text).
         b.desktopView.debugFlashRed()
-        if (desktop.state.value == DesktopService.State.IDLE) {
+        // v0.1.54: a FAILED desktop (State.ERROR) must retry when the user comes
+        // back to the tab - previously only IDLE started, so one bad attempt
+        // (e.g. the apt-lock race with the startup repair pass) left the pane
+        // showing a stale error forever ("desktop never launches").
+        if (desktop.state.value == DesktopService.State.IDLE ||
+            desktop.state.value == DesktopService.State.ERROR) {
             b.desktopStatus.text = getString(R.string.x_starting)
             // v0.1.28: set the UI callback BEFORE startDesktop — startDesktop
             // owns the single frame reader now (the old duplicate
@@ -629,6 +634,13 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun wireExtraKeys() {
+        // v0.1.54: pgup/pgdn page the renderer scrollback locally.
+        b.extraKeys.localScrollSink = { pagesUp ->
+            runOnUiThread {
+                b.termContainer.findViewWithTag<com.emux.terminal.VtTerminalView>("term")
+                    ?.scrollPage(pagesUp)
+            }
+        }
         b.extraKeys.currentSessionSink = { bytes -> termView?.session?.write(bytes) }
     }
 

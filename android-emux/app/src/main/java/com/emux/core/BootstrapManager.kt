@@ -54,6 +54,17 @@ class BootstrapManager(private val ctx: Context) {
             "date +%s > /var/lib/emux-repair.stamp 2>/dev/null || true"
 
         @Volatile private var startupRepairStarted = false
+
+        /**
+         * v0.1.54: in-process mutex for proot apt/dpkg runs. startupRepairAsync
+         * (daemon thread at app start) and a bootstrap extras pass could both
+         * run apt inside proot at once; the second dies on the dpkg lock and
+         * (on the desktop cascade path) bricked the Xvfb install -> "X server
+         * exited (code 1)". Guest-side retries in emux-x11 cover foreign apt
+         * runs; this covers our own.
+         */
+        private val aptLockObj = Any()
+        internal fun aptLock(): Any = aptLockObj
         // NOTE: Alpine publishes point releases as .0 only (3.20.0, 3.20.3 …);
         // a bare "3.20" produces a 404 URL — that was the bootstrap failure.
         const val ALPINE_VERSION = "3.20.3"
@@ -1649,7 +1660,7 @@ class BootstrapManager(private val ctx: Context) {
      */
     private fun runAptProot(
         proot: File, dest: File, pkgs: List<String>, phase: String, report: (String, Int) -> Unit,
-    ): ApkRun {
+    ): ApkRun = synchronized(Companion.aptLock()) {
         val hostTmp = prootTmp(ctx)
         val nb = FsLayout.nativeBridgeDir(ctx)
         // v0.1.52 FIELD FIX: a killed apt run (user closes the app mid
@@ -2019,7 +2030,7 @@ class BootstrapManager(private val ctx: Context) {
      * assets/bin/emux-apt-repair (inlined so it also works on rootfs trees
      * seeded by older APKs that lack the helper script).
      */
-    private fun runRepairProot(proot: File, dest: File): ApkRun {
+    private fun runRepairProot(proot: File, dest: File): ApkRun = synchronized(Companion.aptLock()) {
         val hostTmp = prootTmp(ctx)
         val nb = FsLayout.nativeBridgeDir(ctx)
         val argv = listOf(
@@ -2038,7 +2049,7 @@ class BootstrapManager(private val ctx: Context) {
         )
         val l32 = File(nb, "loader32")
         if (l32.isFile) env["PROOT_LOADER_32"] = l32.absolutePath
-        return runApkProcess(argv, env, listOf("dpkg-repair"), "Repairing package manager", { _, _ -> })
+        runApkProcess(argv, env, listOf("dpkg-repair"), "Repairing package manager", { _, _ -> })
     }
 
     /**

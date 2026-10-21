@@ -104,7 +104,9 @@ musl-loader exec (terminal only), then plain Android sh (CMD honored).
 
 ## Status / caveats
 
-- v0.1.53 debug build — not yet release-signed or R8-minified.
+- v0.1.54 debug build — not yet release-signed or R8-minified.
+  v0.1.54 adds terminal scrollback (drag / double-tap / pgup-pgdn) and fixes
+  the desktop restart leaks (orphaned Xvfb/capture + EADDRINUSE on reopen).
   v0.1.53 heals broken dpkg/apt state (interrupted journal + proot link(2)
   kernel bugs, termux/proot#377) at app start and via Settings →
   "Repair package manager", and fixes the host-side `$(tty)` launcher noise.

@@ -36,8 +36,12 @@ export TMPDIR=/tmp
 # still holds :0 and tcp/6000 — a fresh Xvfb then dies with EADDRINUSE and
 # the Android pane waits for frames forever. Kill stale servers (proc scan:
 # pkill/procps are not guaranteed in minimal images) and drop stale sockets.
+# v0.1.54: also kill orphaned capture helpers (emux-capture / xwd) - they
+# survive session stops and app deaths (proot tracees are detached, not
+# killed) and keep tcp/7001 + X connections open, which made the NEXT desktop
+# start die with "bind failed: EADDRINUSE" on the Android side.
 for CMDF in /proc/[0-9]*/cmdline; do
-  if tr "\0" " " < "$CMDF" 2>/dev/null | grep -qE "Xvfb :0|Xorg :0"; then
+  if tr "\0" " " < "$CMDF" 2>/dev/null | grep -qE "Xvfb :0|Xorg :0|emux-capture|xwd"; then
     K=${CMDF#/proc/}; K=${K%/cmdline}
     [ "$K" != "$$" ] && kill "$K" 2>/dev/null
   fi
@@ -72,8 +76,19 @@ else
         dpkg --configure -a >&2 || true
       fi
       apt-get update >&2
-      DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-        xvfb xkbcomp x11-xserver-utils openbox xterm >&2
+      # v0.1.54 FIELD FIX ("X server exited code 1" on FIRST desktop open right
+      # after an update): the app-start repair pass may still hold the dpkg
+      # lock when the desktop cascade runs - apt then fails with "Could not
+      # get lock" and Xvfb never gets installed. Retry a few times instead of
+      # giving up on the first lock race.
+      TRIES=0
+      while [ "$TRIES" -lt 4 ]; do
+        DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+          xvfb xkbcomp x11-xserver-utils openbox xterm >&2 && break
+        TRIES=$((TRIES + 1))
+        echo "emux-x11: apt install failed (lock or mirror?) - retry $TRIES/4 in 5s" >&2
+        sleep 5
+      done
     elif command -v pacman >/dev/null 2>&1; then
       pacman -Sy --noconfirm --needed xorg-server-xvfb xorg-xkbcomp xkeyboard-config openbox xterm >&2
     elif command -v dnf >/dev/null 2>&1; then
