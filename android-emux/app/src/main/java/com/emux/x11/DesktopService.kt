@@ -243,6 +243,16 @@ class DesktopService(
                             .joinToString(" ").take(300)
                         if (sum.isNotBlank()) noteInfo("selfcheck: $sum")
                     }
+                    // v0.1.64: Xvfb's OWN log is host-readable at
+                    // <rootfs>/tmp/xvfb.log - its fatal line ("Address already
+                    // in use", "Unrecognized option", shm errors ...) is the
+                    // shortest possible answer to "why no tcp/6000".
+                    val xl = java.io.File(rootfs, "tmp/xvfb.log")
+                    if (xl.isFile) {
+                        val t = xl.readText().lineSequence().filter { it.isNotBlank() }
+                            .toList().takeLast(2).joinToString(" | ").take(300)
+                        if (t.isNotBlank()) noteInfo("xvfb.log: $t")
+                    }
                 }
 
                 val cmd = "emux-x11 $wmCommand"
@@ -261,8 +271,14 @@ class DesktopService(
                                 diag[t]?.toString()?.lineSequence()
                                     ?.filter { it.isNotBlank() }?.toList()?.takeLast(4)?.joinToString(" | ")
                             }.joinToString(" /// ")
+                            val xlog = runCatching {
+                                java.io.File(com.emux.core.FsLayout.linuxRoot(ctx), "tmp/xvfb.log")
+                                    .readText().lineSequence().filter { it.isNotBlank() }
+                                    .toList().takeLast(3).joinToString(" | ")
+                            }.getOrDefault("")
                             setError(
-                                ("X server exited (code ${xSession?.exitCode}). " + tails).take(500))
+                                ("X server exited (code ${xSession?.exitCode}). " + tails +
+                                    if (xlog.isNotBlank()) " || xvfb.log: $xlog" else "").take(500))
                             state.value = State.ERROR
                         }
                     }
