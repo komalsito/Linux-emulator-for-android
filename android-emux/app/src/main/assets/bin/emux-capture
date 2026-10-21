@@ -56,6 +56,14 @@ while [ ! -e /tmp/.X11-unix/X0 ] && [ "$i" -lt 300 ]; do sleep 0.1; i=$((i+1)); 
 XWD=""; PNM=""; NC=""
 for c in /usr/bin/xwd /usr/local/bin/xwd; do [ -x "$c" ] && { XWD="$c"; break; }; done
 for c in /usr/bin/pnmtoplainpnm /usr/local/bin/pnmtoplainpnm; do [ -x "$c" ] && { PNM="$c"; break; }; done
+# v0.1.60 CRITICAL: xwd emits XWD format, which pnmtoplainpnm CANNOT read
+# ("pamtopnm: bad magic number") - the converter xwdtopnm (same netpbm
+# package) must sit between them. Without it grab_frame produced 0 bytes,
+# nc never connected and the pane sat at "waiting for X frames" forever
+# even with a perfectly healthy X server (sandbox-verified on the pinned
+# Ubuntu noble image).
+X2P=""
+for c in /usr/bin/xwdtopnm /usr/local/bin/xwdtopnm; do [ -x "$c" ] && { X2P="$c"; break; }; done
 for c in /bin/nc /usr/bin/nc; do [ -x "$c" ] || [ -L "$c" ] && { NC="$c"; break; }; done
 if [ -z "$XWD" ] || [ -z "$PNM" ]; then
   # v0.1.47 multi-distro: xwd lives in x11-apps on Debian/Ubuntu (xwd pkg on
@@ -93,6 +101,7 @@ if [ -z "$XWD" ] || [ -z "$PNM" ]; then
   fi
   [ -x /usr/bin/xwd ] && XWD=/usr/bin/xwd
   [ -x /usr/bin/pnmtoplainpnm ] && PNM=/usr/bin/pnmtoplainpnm
+  [ -x /usr/bin/xwdtopnm ] && X2P=/usr/bin/xwdtopnm
 fi
 if [ -z "$XWD" ] || [ -z "$PNM" ]; then
   echo "emux-capture: no grabber available (xwd/pnmtoplainpnm missing, apk add failed)" >&2
@@ -119,7 +128,12 @@ TMPF=/tmp/emux_frame.p3
 RAW=/tmp/emux_frame.rgb
 
 grab_frame() {
-  "$XWD" -root -silent 2>/dev/null | "$PNM" 2>/dev/null > "$TMPF" || return 1
+  # v0.1.60: XWD -> (xwdtopnm) -> plain PNM; the middle step is mandatory
+  if [ -n "$X2P" ]; then
+    "$XWD" -root -silent 2>/dev/null | "$X2P" 2>/dev/null | "$PNM" 2>/dev/null > "$TMPF" || return 1
+  else
+    "$XWD" -root -silent 2>/dev/null | "$PNM" 2>/dev/null > "$TMPF" || return 1
+  fi
   [ -s "$TMPF" ] || return 1
   awk '
     BEGIN{ st=0; hn=0; px=0; MX=255 }

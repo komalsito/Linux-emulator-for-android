@@ -120,20 +120,26 @@ else
         fi
         # capture toolchain included: xwd (x11-apps), pnmtoplainpnm (netpbm),
         # nc (netcat-openbsd) - without them Xvfb runs but zero frames arrive.
+        # v0.1.60 CRITICAL: "xkbcomp" is NOT a Debian/Ubuntu package name
+        # (x11-xkb-utils is) - apt aborts the WHOLE transaction on one bad
+        # name, so on the field device NOTHING of the desktop stack ever
+        # installed ("Unable to locate package" + "server did not come up").
+        # xkb-data + xfonts-base are what Xvfb needs to activate its keyboard
+        # and default fonts; x11-apps/netpbm/netcat are the capture chain.
         DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-          xvfb xkbcomp x11-xserver-utils x11-apps netpbm netcat-openbsd \
-          openbox xterm >&2 && break
+          xvfb x11-xkb-utils xkb-data xfonts-base x11-xserver-utils x11-apps \
+          netpbm netcat-openbsd openbox xterm >&2 && break
         TRIES=$((TRIES + 1))
         echo "emux-x11: apt install failed - healing dpkg and retrying ($TRIES/12)" >&2
         heal_dpkg
         sleep 2
       done
     elif command -v pacman >/dev/null 2>&1; then
-      pacman -Sy --noconfirm --needed xorg-server-xvfb xorg-xkbcomp xkeyboard-config openbox xterm >&2
+      pacman -Sy --noconfirm --needed xorg-server-xvfb xorg-xkbcomp xkeyboard-config xorg-xwd netpbm openbox xterm >&2
     elif command -v dnf >/dev/null 2>&1; then
-      dnf -y --skip-broken install xorg-x11-server-Xvfb xkbcomp xorg-x11-server-utils openbox xterm >&2
+      dnf -y --skip-broken install xorg-x11-server-Xvfb xkbcomp xkeyboard-config xorg-x11-apps netpbm nmap-ncat openbox xterm >&2
     else
-      apk add --no-cache xvfb xkbcomp xkeyboard-config >&2
+      apk add --no-cache xvfb xkbcomp xkeyboard-config xwd netpbm >&2
     fi
     [ -x /usr/bin/Xvfb ] && XVFB=/usr/bin/Xvfb
   fi

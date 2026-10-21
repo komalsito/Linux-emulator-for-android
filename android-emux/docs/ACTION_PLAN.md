@@ -508,3 +508,26 @@ Fixes:
 - emux-capture X0 wait 30 s -> 180 s; emux-x11 foreign-apt wait 12 -> 30
   rounds (5 min) for very slow first-run installs.
 ENV_VERSION 27, versionCode 59.
+
+## 15. v0.1.60 field round — the two REAL desktop dependency bugs (sandbox-reproduced)
+
+Reproduced end-to-end in the sandbox with the PINNED Ubuntu noble image
+(sha-verified) under proot, running the exact cascade list:
+
+1. `E: Unable to locate package xkbcomp` - on Debian/Ubuntu the package is
+   **x11-xkb-utils**; apt aborts the WHOLE transaction on one bad name, so
+   NOTHING of the desktop stack ever installed on apt-family devices
+   (field: "not finding dependencies", "server did not come up", rotating
+   pane errors). The bad name was in BOTH emux-x11's cascade and
+   DistroCatalog's debian/ubuntu desktopPkgs since v0.1.47. Fixed lists:
+   xvfb x11-xkb-utils xkb-data xfonts-base x11-xserver-utils x11-apps netpbm
+   netcat-openbsd openbox xterm (xkb-data/xfonts-base = Xvfb keymap+fonts;
+   verified Xvfb then starts, X0 + tcp/6000 up).
+2. emux-capture piped **XWD into pnmtoplainpnm** - netpbm's converter for
+   XWD is `xwdtopnm`; without it grab_frame yielded 0 bytes
+   ("pamtopnm: bad magic number"), nc never connected and the pane waited
+   for frames forever even with a healthy X server. Fixed chain
+   xwd | xwdtopnm | pnmtoplainpnm, verified end-to-end: host listener
+   received the EMUX stream header (720x1280) + full RGB565 frames.
+   Capture deps added to the apk/pacman/dnf cascade lists too.
+ENV_VERSION 28, versionCode 60.

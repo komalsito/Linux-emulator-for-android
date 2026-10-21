@@ -106,8 +106,10 @@ object DistroCatalog {
         // + /usr/bin/groups (half-installed coreutils after a killed dpkg
         // transaction / partial extraction) and nothing reinstalled them.
         extraPkgs = listOf("sudo", "netcat-openbsd", "ca-certificates", "wget", "coreutils"),
+        // v0.1.60: "xkbcomp" is not a Debian/Ubuntu package (x11-xkb-utils is);
+        // one bad name made apt abort the ENTIRE desktop install on device.
         desktopPkgs = listOf(
-            "xvfb", "xkbcomp", "x11-xserver-utils", "x11-apps", "netpbm",
+            "xvfb", "x11-xkb-utils", "x11-xserver-utils", "x11-apps", "netpbm",
             "openbox", "xterm", "xfonts-base", "xkb-data", "netcat-openbsd"),
     )
 
@@ -150,8 +152,10 @@ object DistroCatalog {
         // + /usr/bin/groups (half-installed coreutils after a killed dpkg
         // transaction / partial extraction) and nothing reinstalled them.
         extraPkgs = listOf("sudo", "netcat-openbsd", "ca-certificates", "wget", "coreutils"),
+        // v0.1.60: "xkbcomp" is not a Debian/Ubuntu package (x11-xkb-utils is);
+        // one bad name made apt abort the ENTIRE desktop install on device.
         desktopPkgs = listOf(
-            "xvfb", "xkbcomp", "x11-xserver-utils", "x11-apps", "netpbm",
+            "xvfb", "x11-xkb-utils", "x11-xserver-utils", "x11-apps", "netpbm",
             "openbox", "xterm", "xfonts-base", "xkb-data", "netcat-openbsd"),
     )
 
