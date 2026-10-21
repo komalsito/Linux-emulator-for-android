@@ -54,9 +54,12 @@
     <string name="pref_fps_title">Max desktop FPS</string>
     <string name="pref_keepawake_summary">Auto-expiring wake lock (30 s) — off saves more battery</string>
     <string name="pref_keepawake_title">Keep CPU awake during active bursts</string>
+    <string name="pref_repair_summary">Fixes “dpkg was interrupted” / status-old backup errors inside the active distro; runs in the background</string>
+    <string name="pref_repair_title">Repair package manager (dpkg/apt)</string>
     <string name="pref_root_mode_summary">chroot instead of interpreter-path mode + cgroup tuning</string>
     <string name="pref_root_mode_title">Use root when available</string>
     <string name="pref_wm_title">Window manager</string>
+    <string name="repair_started">Repair started in the background — retry your apt command in the terminal</string>
     <string name="root_available">root: %1$s (accelerator on)</string>
     <string name="root_none">root: not available</string>
     <string name="tab_desktop">Desktop</string>

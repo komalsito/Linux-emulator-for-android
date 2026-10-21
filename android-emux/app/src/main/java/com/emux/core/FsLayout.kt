@@ -18,7 +18,7 @@ import java.io.File
  *   cache/tmp        -> $TMPDIR (cleared by OS on demand = friendly to storage)
  */
 object FsLayout {
-    const val ENV_VERSION = 21  // v0.1.47: multi-distro layout (files/distros/<id>, marker carries distro id) — bump re-seeds helpers; existing rootfs is MIGRATED, never re-downloaded  // v0.1.39: winsize watcher + Xvfb shm fallback re-seed  // v0.1.37: guest-PTY emux-init re-seed  // v0.1.36: emux-init PROOT_LOADER re-seed  // v0.1.34: emux-init.sh proot TMPDIR bind re-seed  // v0.1.28: fixed hasCompleteRootfs (was always false → re-download loop), proot native-bridge seeding, apk-installed shell/desktop components; re-seed is now CHEAP (marker re-stamp, no re-download)
+    const val ENV_VERSION = 22  // v0.1.53: emux-apt-repair helper + link()->linkat() preload shim re-seed  // v0.1.47: multi-distro layout (files/distros/<id>, marker carries distro id) — bump re-seeds helpers; existing rootfs is MIGRATED, never re-downloaded  // v0.1.39: winsize watcher + Xvfb shm fallback re-seed  // v0.1.37: guest-PTY emux-init re-seed  // v0.1.36: emux-init PROOT_LOADER re-seed  // v0.1.34: emux-init.sh proot TMPDIR bind re-seed  // v0.1.28: fixed hasCompleteRootfs (was always false → re-download loop), proot native-bridge seeding, apk-installed shell/desktop components; re-seed is now CHEAP (marker re-stamp, no re-download)
 
     fun root(ctx: Context): File = rootOrFallback(ctx)
     fun usr(ctx: Context): File = File(root(ctx), "usr")

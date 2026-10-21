@@ -58,7 +58,19 @@ else
     # active distro ships (apk on Alpine, apt on Debian/Ubuntu).
     echo "emux-x11: Xvfb missing - installing via the distro package manager (one time, needs network)" >&2
     if command -v apt-get >/dev/null 2>&1; then
-      dpkg --configure -a >&2 || true
+      # v0.1.53 FIELD FIX: the bare `dpkg --configure -a || true` here could
+      # never succeed on devices where proot's link(2) translation breaks
+      # dpkg's status-old backup (EACCES/EEXIST, termux/proot#377) or where a
+      # killed apt run left the journal dirty - so the install below died and
+      # the desktop pane showed "X server exited (code 1)" with apt Hit: lines.
+      # emux-apt-repair installs the link()->linkat() preload shim, cleans the
+      # stale backup, quarantines an unrecoverable journal and fixes
+      # half-installed packages first.
+      if [ -x /usr/local/bin/emux-apt-repair ]; then
+        emux-apt-repair >&2 || true
+      else
+        dpkg --configure -a >&2 || true
+      fi
       apt-get update >&2
       DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
         xvfb xkbcomp x11-xserver-utils openbox xterm >&2

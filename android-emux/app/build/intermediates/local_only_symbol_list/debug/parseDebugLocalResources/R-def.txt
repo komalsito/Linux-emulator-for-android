@@ -50,9 +50,12 @@ string pref_distro_title
 string pref_fps_title
 string pref_keepawake_summary
 string pref_keepawake_title
+string pref_repair_summary
+string pref_repair_title
 string pref_root_mode_summary
 string pref_root_mode_title
 string pref_wm_title
+string repair_started
 string root_available
 string root_none
 string tab_desktop

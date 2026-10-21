@@ -42,6 +42,14 @@
         app:summary="@string/pref_desktop_components_summary"
         app:defaultValue="true" />
 
+    <!-- v0.1.53: manual escape hatch for the field dpkg failures
+         (interrupted journal / status-old backup EACCES). Runs the same
+         repair as the app-start pass, unconditionally. -->
+    <Preference
+        app:key="repair_apt"
+        app:title="@string/pref_repair_title"
+        app:summary="@string/pref_repair_summary" />
+
     <EditTextPreference
         app:key="mirror"
         app:title="@string/pref_distro_title"

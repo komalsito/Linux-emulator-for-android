@@ -145,6 +145,15 @@ class MainActivity : AppCompatActivity() {
         })
         maybeAskBatteryExemption()
 
+        // v0.1.53 FIELD FIX: one-shot background dpkg/apt repair for APT
+        // distros. The field device ended up with a permanently broken
+        // package manager (killed apt run + proot link(2) translation bug ->
+        // "dpkg was interrupted" / "status-old: Permission denied"), and
+        // bootstrap never re-runs on an already-stamped rootfs, so nothing
+        // ever healed it: no sudo, no coreutils repair, no Xvfb -> black
+        // desktop. Daemon thread; no-ops on healthy systems (3 File stats).
+        runCatching { com.emux.core.BootstrapManager(applicationContext).startupRepairAsync() }
+
         // v0.1.9 CRASH FIX: click listeners run on the main looper OUTSIDE every
         // enclosing try/catch — any Throwable escaping startBootstrapNow (OEM ROM
         // quirks in WorkManager, missing provider, ...) was an instant force-close

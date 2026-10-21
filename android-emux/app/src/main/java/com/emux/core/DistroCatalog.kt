@@ -102,7 +102,10 @@ object DistroCatalog {
         // util-linux (script(1) = PTY) + bash are ALREADY in the image; the
         // install run only fires when the on-disk probe fails (offline-proof).
         shellPkgs = listOf("util-linux", "bash", "sudo"),
-        extraPkgs = listOf("sudo", "netcat-openbsd", "ca-certificates", "wget"),
+        // v0.1.53: coreutils joins the extras — the field device lost /usr/bin/tty
+        // + /usr/bin/groups (half-installed coreutils after a killed dpkg
+        // transaction / partial extraction) and nothing reinstalled them.
+        extraPkgs = listOf("sudo", "netcat-openbsd", "ca-certificates", "wget", "coreutils"),
         desktopPkgs = listOf(
             "xvfb", "xkbcomp", "x11-xserver-utils", "x11-apps", "netpbm",
             "openbox", "xterm", "xfonts-base", "xkb-data", "netcat-openbsd"),
@@ -143,7 +146,10 @@ object DistroCatalog {
             // x86 (32-bit): no noble image exists anywhere → unsupported.
         ),
         shellPkgs = listOf("util-linux", "bash", "sudo"),
-        extraPkgs = listOf("sudo", "netcat-openbsd", "ca-certificates", "wget"),
+        // v0.1.53: coreutils joins the extras — the field device lost /usr/bin/tty
+        // + /usr/bin/groups (half-installed coreutils after a killed dpkg
+        // transaction / partial extraction) and nothing reinstalled them.
+        extraPkgs = listOf("sudo", "netcat-openbsd", "ca-certificates", "wget", "coreutils"),
         desktopPkgs = listOf(
             "xvfb", "xkbcomp", "x11-xserver-utils", "x11-apps", "netpbm",
             "openbox", "xterm", "xfonts-base", "xkb-data", "netcat-openbsd"),

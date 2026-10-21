@@ -33,6 +33,27 @@ class BootstrapManager(private val ctx: Context) {
         const val DEFAULT_DISTRO = "alpine-minirootfs"
         // v0.1.15: hard cap for helper-script asset copies (real ones are <1 KiB).
         const val MAX_ASSET_BYTES = 1_048_576L
+
+        /**
+         * v0.1.53: guest-side dpkg/apt repair (inlined twin of the
+         * emux-apt-repair helper so rootfs trees seeded by older APKs are
+         * covered too). Order matters: preload shim -> drop stale backup ->
+         * configure -a -> journal quarantine + retry -> fix-broken. Always
+         * exits 0; callers treat it as hygiene, never as a gate.
+         */
+        private const val APT_REPAIR_PAYLOAD =
+            "export DEBIAN_FRONTEND=noninteractive; " +
+            "SHIM=/usr/local/lib/emux/libemux-linkfix.so; " +
+            "if [ -f \"\$SHIM\" ]; then grep -qsx \"\$SHIM\" /etc/ld.so.preload || echo \"\$SHIM\" >> /etc/ld.so.preload; fi; " +
+            "rm -f /var/lib/dpkg/status-old; " +
+            "if ! dpkg --configure -a >&2; then " +
+            "mkdir -p /var/lib/dpkg/updates.emux-broken 2>/dev/null; " +
+            "for f in /var/lib/dpkg/updates/*; do [ -e \"\$f\" ] && mv \"\$f\" /var/lib/dpkg/updates.emux-broken/ 2>/dev/null; done; " +
+            "rm -f /var/lib/dpkg/status-old; dpkg --configure -a >&2 || true; fi; " +
+            "apt-get install -y -f --no-install-recommends >&2 || true; " +
+            "date +%s > /var/lib/emux-repair.stamp 2>/dev/null || true"
+
+        @Volatile private var startupRepairStarted = false
         // NOTE: Alpine publishes point releases as .0 only (3.20.0, 3.20.3 …);
         // a bare "3.20" produces a 404 URL — that was the bootstrap failure.
         const val ALPINE_VERSION = "3.20.3"
@@ -1066,7 +1087,7 @@ class BootstrapManager(private val ctx: Context) {
      * wedged AAsset handle on OEM ROMs.
      */
     private fun stageHelperAssets(): Map<String, ByteArray> {
-        val names = listOf("emux-init.sh", "emux-x11", "emux-capture", "emux-init-probe.sh", "emux-winsize")
+        val names = listOf("emux-init.sh", "emux-x11", "emux-capture", "emux-init-probe.sh", "emux-winsize", "emux-apt-repair")
         val result = java.util.concurrent.ConcurrentHashMap<String, ByteArray>()
         withHardTimeout(4_000L) {
             for (name in names) {
@@ -1096,7 +1117,7 @@ class BootstrapManager(private val ctx: Context) {
         var healed = staged
         if (healed.isEmpty()) {
             val binDir0 = java.io.File(ctx.filesDir, "bin")
-            healed = listOf("emux-init.sh", "emux-x11", "emux-capture", "emux-init-probe.sh", "emux-winsize").mapNotNull { n ->
+            healed = listOf("emux-init.sh", "emux-x11", "emux-capture", "emux-init-probe.sh", "emux-winsize", "emux-apt-repair").mapNotNull { n ->
                 val f = java.io.File(binDir0, n)
                 if (f.isFile && f.length() in 1..MAX_ASSET_BYTES)
                     runCatching { FileInputStream(f).use { readBounded(it, MAX_ASSET_BYTES) } }
@@ -1105,7 +1126,7 @@ class BootstrapManager(private val ctx: Context) {
             }.toMap()
         }
         val stagedFinal = healed
-        listOf("emux-init.sh", "emux-x11", "emux-capture", "emux-init-probe.sh", "emux-winsize").forEach { name ->
+        listOf("emux-init.sh", "emux-x11", "emux-capture", "emux-init-probe.sh", "emux-winsize", "emux-apt-repair").forEach { name ->
             // Heartbeat BEFORE each unit of work so the UI always advances even
             // if the following operation hits its timeout.
             report("Installing helper script: $name", -1)
@@ -1156,7 +1177,7 @@ class BootstrapManager(private val ctx: Context) {
         // storage that tar extraction can never clobber.
         try {
             val home = FsLayout.home(ctx)
-            listOf("emux-init.sh", "emux-x11", "emux-capture", "emux-init-probe.sh", "emux-winsize").forEach { name ->
+            listOf("emux-init.sh", "emux-x11", "emux-capture", "emux-init-probe.sh", "emux-winsize", "emux-apt-repair").forEach { name ->
                 val src = File(dest, name)
                 if (src.isFile) {
                     runCatching {
@@ -1180,7 +1201,7 @@ class BootstrapManager(private val ctx: Context) {
         // "emux-x11: not found" while bootstrap cheerfully said "Bootstrapped".
         try {
             val binDir = java.io.File(ctx.filesDir, "bin").apply { mkdirs() }
-            listOf("emux-init.sh", "emux-x11", "emux-capture", "emux-init-probe.sh", "emux-winsize").forEach { name ->
+            listOf("emux-init.sh", "emux-x11", "emux-capture", "emux-init-probe.sh", "emux-winsize", "emux-apt-repair").forEach { name ->
                 val src = File(dest, name)
                 if (!src.isFile) return@forEach
                 runCatching {
@@ -1203,7 +1224,7 @@ class BootstrapManager(private val ctx: Context) {
         try {
             val ulb = File(dest, "usr/local/bin").apply { mkdirs() }
             // v0.1.38: emux-winsize joins the in-distro helpers (guest PTY size sync).
-            listOf("emux-x11", "emux-capture", "emux-winsize").forEach { name ->
+            listOf("emux-x11", "emux-capture", "emux-winsize", "emux-apt-repair").forEach { name ->
                 val bytes = stagedFinal[name] ?: return@forEach
                 runCatching {
                     if (replaceRegularFileWith(File(ulb, name)) { dst ->
@@ -1555,6 +1576,16 @@ class BootstrapManager(private val ctx: Context) {
         report("Installing shell components", -1)
         var ok = shellOk()
         if (!ok) {
+            // v0.1.53: repair dpkg BEFORE rotating mirrors. On the field device
+            // every rotation (and the IP-literal last resort) died with the
+            // same dpkg status-old error — mirror rotation can never fix a
+            // broken package manager, and the failure banner blamed the
+            // network for what was a local dpkg/proot fault.
+            val rep = runRepairProot(proot, dest)
+            tail = "proot-repair: ${rep.tail}\n"
+            ok = shellOk()
+        }
+        if (!ok) {
             // attempt 0: the image's own sources; 1..2: rotated CN-friendly mirrors.
             for (rotate in 0..2) {
                 if (rotate > 0) seedAptSources(dest, spec, rotate)
@@ -1626,8 +1657,12 @@ class BootstrapManager(private val ctx: Context) {
         // later apt invocation then dies with "dpkg was interrupted, you
         // must manually run dpkg --configure -a". Self-heal before each run;
         // idempotent and cheap when the state is clean.
-        val payload = "export DEBIAN_FRONTEND=noninteractive; " +
-            "(dpkg --configure -a || true); " +
+        // v0.1.53: the heal is now APT_REPAIR_PAYLOAD — the bare
+        // `dpkg --configure -a || true` could never succeed on kernels where
+        // proot's link(2) translation breaks dpkg's status-old backup
+        // (EACCES/EEXIST, termux/proot#377), so the dirty state survived
+        // every retry and bricked the desktop install on the field device.
+        val payload = APT_REPAIR_PAYLOAD + "; " +
             "apt-get update -o APT::Sandbox::User=root; " +
             "apt-get install -y --no-install-recommends -o APT::Sandbox::User=root " +
             pkgs.joinToString(" ")
@@ -1921,6 +1956,121 @@ class BootstrapManager(private val ctx: Context) {
         val clean = out.replace('\n', ' ').trim()
         if (code == 0 && (expect == null || clean.contains(expect))) "ok" else "exit=$code $clean"
     }.getOrElse { e -> "DENIED(${e.message?.take(90)})" }
+
+    // ---- v0.1.53: dpkg/apt self-repair (field round: Ubuntu 24.04 arm64) ----
+    //
+    // Field device state (screenshots): `apt install sudo` ->
+    //   E: dpkg was interrupted, you must manually run 'dpkg --configure -a'
+    //   dpkg: error: error creating new backup file
+    //   '/var/lib/dpkg/status-old': Permission denied
+    // Two independent causes, both fatal for EVERY later apt/dpkg run (and
+    // therefore for the desktop stack, which emux-x11 installs via apt):
+    //  1) a killed apt run left dpkg's journal (var/lib/dpkg/updates/*) dirty;
+    //  2) dpkg's db backup is unlink(status-old)+link(status,status-old), and
+    //     under the bundled proot the legacy link(2) syscall is translated
+    //     through proot's seccomp avoider in a way several Android kernels
+    //     answer with a bogus errno (EEXIST on 3.4 per termux/proot#377,
+    //     EACCES on this field device) while linkat(2) translates fine.
+    // Fix: ship a tiny LD_PRELOAD shim implementing link() via linkat()
+    // (assets/linkfix/<abi>, freestanding so glibc AND musl guests can load
+    // it), register it in /etc/ld.so.preload, drop a stale status-old, and
+    // quarantine an unrecoverable journal before re-running configure -a.
+
+    /** assets/linkfix/<abi> dir matching the guest arch (assets/proot naming). */
+    private fun linkFixAbiDir(): String = when (archName()) {
+        "aarch64" -> "arm64-v8a"
+        "armv7" -> "armeabi-v7a"
+        "x86_64" -> "x86_64"
+        else -> "x86"
+    }
+
+    /**
+     * Copy the link()->linkat() preload shim into the rootfs and register it
+     * in /etc/ld.so.preload (idempotent). Non-fatal: without it, distros whose
+     * kernel translates link(2) correctly keep working as before.
+     */
+    internal fun installLinkFixShim(dest: File) {
+        runCatching {
+            val out = File(dest, "usr/local/lib/emux/libemux-linkfix.so")
+            out.parentFile?.mkdirs()
+            ctx.assets.open("linkfix/${linkFixAbiDir()}/libemux-linkfix.so").use { ins ->
+                replaceRegularFileWith(out) { f -> f.outputStream().use { os -> ins.copyTo(os) } }
+            }
+            out.setReadable(true, false)
+            val line = "/usr/local/lib/emux/libemux-linkfix.so"
+            val preload = File(dest, "etc/ld.so.preload")
+            val cur = runCatching { preload.readText() }.getOrDefault("")
+            if (cur.lineSequence().none { it.trim() == line }) {
+                preload.parentFile?.mkdirs()
+                val text = if (cur.isBlank()) "$line\n" else cur.trimEnd() + "\n" + line + "\n"
+                replaceRegularFileWith(preload) { it.writeText(text) }
+            }
+            com.emux.EmuXLog.i("linkfix shim installed for ${linkFixAbiDir()}")
+        }.onFailure { com.emux.EmuXLog.e("linkfix shim install failed (non-fatal)", it) }
+    }
+
+    /** Host-visible, allocation-cheap check: dpkg journal left dirty? */
+    internal fun aptJournalDirty(dest: File): Boolean = runCatching {
+        File(dest, "var/lib/dpkg/updates").listFiles()?.any { it.isFile } == true
+    }.getOrDefault(false)
+
+    /**
+     * One guest-side repair run inside the bundled proot — the same steps as
+     * assets/bin/emux-apt-repair (inlined so it also works on rootfs trees
+     * seeded by older APKs that lack the helper script).
+     */
+    private fun runRepairProot(proot: File, dest: File): ApkRun {
+        val hostTmp = prootTmp(ctx)
+        val nb = FsLayout.nativeBridgeDir(ctx)
+        val argv = listOf(
+            proot.absolutePath, "-0", "-r", dest.absolutePath,
+            "-b", "/dev", "-b", "/proc", "-b", "/sys", "-w", "/",
+            "/bin/sh", "-c", APT_REPAIR_PAYLOAD,
+        )
+        val env = mutableMapOf(
+            "LD_LIBRARY_PATH" to nb.absolutePath,
+            "PROOT_TMP_DIR" to hostTmp.absolutePath,
+            "TMPDIR" to "/tmp",
+            "HOME" to "/root",
+            "PATH" to "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+            "LANG" to "C",
+            "PROOT_LOADER" to File(nb, "loader").absolutePath,
+        )
+        val l32 = File(nb, "loader32")
+        if (l32.isFile) env["PROOT_LOADER_32"] = l32.absolutePath
+        return runApkProcess(argv, env, listOf("dpkg-repair"), "Repairing package manager", { _, _ -> })
+    }
+
+    /**
+     * v0.1.53: app-start hygiene for APT distros. The v0.1.52 self-heal lived
+     * ONLY inside runAptProot, i.e. only inside a fresh bootstrap — a device
+     * whose rootfs was already marked bootstrapped never ran it again, so a
+     * broken dpkg stayed broken forever (the field device). This runs once
+     * per process start, in a daemon thread, and no-ops on healthy systems
+     * (three cheap File stats: dirty journal? shim present? stamp present?).
+     */
+    fun startupRepairAsync(force: Boolean = false) {
+        synchronized(Companion) {
+            if (startupRepairStarted && !force) return
+            startupRepairStarted = true
+        }
+        Thread {
+            runCatching {
+                val spec = DistroCatalog.requested(ctx)
+                if (spec.pkg != PkgManager.APT) return@runCatching
+                val dest = FsLayout.linuxRoot(ctx)
+                if (!File(dest, "etc").isDirectory) return@runCatching
+                val proot = FsLayout.prootBin(ctx)
+                if (!proot.isFile) return@runCatching
+                val shim = File(dest, "usr/local/lib/emux/libemux-linkfix.so")
+                val stamp = File(dest, "var/lib/emux-repair.stamp")
+                if (!force && !aptJournalDirty(dest) && shim.isFile && stamp.isFile) return@runCatching
+                installLinkFixShim(dest)
+                val r = runRepairProot(proot, dest)
+                com.emux.EmuXLog.i("startupRepair: ok=${r.ok} tail=${r.tail.take(200)}")
+            }.onFailure { com.emux.EmuXLog.e("startupRepair failed (non-fatal)", it) }
+        }.apply { isDaemon = true; name = "emux-startup-repair" }.start()
+    }
 
     /** apk inside the bundled proot — guest DNS/certs/triggers are all native. */
     private fun runApkProot(
@@ -2445,6 +2595,10 @@ class BootstrapManager(private val ctx: Context) {
     }
 
     private fun postInstall(dest: File, spec: DistroSpec) {
+        // v0.1.53: seed the link()->linkat() preload shim BEFORE any apt run
+        // (both bootstrap branches reach postInstall before installDistroExtras),
+        // so the very first dpkg invocation on link()-broken kernels works.
+        installLinkFixShim(dest)
         // sane defaults: non-login shells get our env, disable services that need init
         // v0.1.13 THROW FIX: both writes are guarded now. The old code did a bare
         // writeText() on etc/profile.d/emux.sh and — worse — an unguarded

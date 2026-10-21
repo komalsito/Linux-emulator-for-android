@@ -96,9 +96,19 @@ if [ -x "$PROOT" ]; then
       # command of a non-interactive shell gets stdin=/dev/null (POSIX), so the
       # watcher cannot discover the pts by itself on every platform.
       if [ -f "$ROOT/bin/bash" ]; then
-        exec "$PROOT" -0 -r "$ROOT" -b /dev -b /proc -b /sys -w /root /usr/bin/script -qfc "/usr/local/bin/emux-winsize $(tty) >/dev/null 2>&1 & exec /bin/bash -l" /dev/null
+        # v0.1.53 FIELD FIX: \$(tty) MUST be expanded by the GUEST shell inside
+        # proot, not by the host shell that parses this line. The host session
+        # PATH (FsLayout.sessionEnv) prepends the rootfs dirs, so a bare $(tty)
+        # here made /system/bin/sh exec the GUEST ARM ELF $ROOT/usr/bin/tty on
+        # the host: execve ENOENT (no ELF interp) -> "/system/bin/sh:
+        # /data/.../usr/bin/tty: No such file or directory" on EVERY session
+        # start, and the watcher received an EMPTY tty argument (0x0 pts
+        # geometry). Escaped \$ hands the literal $(tty) to the guest dash,
+        # whose stdin IS the pts. The guard keeps a rootfs without the seeded
+        # watcher (interrupted bootstrap) from printing a not-found line.
+        exec "$PROOT" -0 -r "$ROOT" -b /dev -b /proc -b /sys -w /root /usr/bin/script -qfc "( [ -x /usr/local/bin/emux-winsize ] && /usr/local/bin/emux-winsize \$(tty) >/dev/null 2>&1 ) & exec /bin/bash -l" /dev/null
       fi
-      exec "$PROOT" -0 -r "$ROOT" -b /dev -b /proc -b /sys -w /root /usr/bin/script -qfc "/usr/local/bin/emux-winsize $(tty) >/dev/null 2>&1 & exec /bin/sh -l" /dev/null
+      exec "$PROOT" -0 -r "$ROOT" -b /dev -b /proc -b /sys -w /root /usr/bin/script -qfc "( [ -x /usr/local/bin/emux-winsize ] && /usr/local/bin/emux-winsize \$(tty) >/dev/null 2>&1 ) & exec /bin/sh -l" /dev/null
     fi
     if [ -f "$ROOT/bin/bash" ]; then
       exec "$PROOT" -0 -r "$ROOT" -b /dev -b /proc -b /sys -w /root /bin/bash -l

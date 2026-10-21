@@ -117,6 +117,14 @@ class SettingsActivity : AppCompatActivity() {
     class Prefs : PreferenceFragmentCompat() {
         override fun onCreatePreferences(savedInstanceState: Bundle?, rootKey: String?) {
             setPreferencesFromResource(R.xml.preferences, rootKey)
+            // v0.1.53: manual dpkg/apt repair (same pass as app-start hygiene).
+            findPreference<androidx.preference.Preference>("repair_apt")
+                ?.setOnPreferenceClickListener {
+                    val app = requireContext().applicationContext
+                    android.widget.Toast.makeText(app, R.string.repair_started, android.widget.Toast.LENGTH_LONG).show()
+                    com.emux.core.BootstrapManager(app).startupRepairAsync(force = true)
+                    true
+                }
         }
     }
 
@@ -155,6 +163,17 @@ class SettingsActivity : AppCompatActivity() {
                 key = "keepawake_burst"; title = "Keep-awake during activity"
                 summary = "Hold wake lock briefly after typing; auto-expire when idle"
                 setDefaultValue(true)
+            })
+            // v0.1.53: manual dpkg/apt repair (programmatic screen mirror).
+            screen.addPreference(androidx.preference.Preference(ctx).apply {
+                key = "repair_apt"; title = "Repair package manager (dpkg/apt)"
+                summary = "Fixes interrupted-dpkg / status-old backup errors inside the active distro; runs in the background"
+                setOnPreferenceClickListener {
+                    val app = ctx.applicationContext
+                    android.widget.Toast.makeText(app, "Repair started in the background — retry your apt command in the terminal", android.widget.Toast.LENGTH_LONG).show()
+                    com.emux.core.BootstrapManager(app).startupRepairAsync(force = true)
+                    true
+                }
             })
             screen.addPreference(androidx.preference.EditTextPreference(ctx).apply {
                 key = "mirror"; title = "Mirror / custom rootfs URL"

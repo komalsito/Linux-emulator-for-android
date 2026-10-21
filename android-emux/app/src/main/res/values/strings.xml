@@ -37,6 +37,9 @@
     <string name="pref_keepawake_title">Keep CPU awake during active bursts</string>
     <string name="pref_keepawake_summary">Auto-expiring wake lock (30 s) — off saves more battery</string>
     <string name="pref_desktop_components_title">Install desktop components</string>
+    <string name="pref_repair_title">Repair package manager (dpkg/apt)</string>
+    <string name="pref_repair_summary">Fixes “dpkg was interrupted” / status-old backup errors inside the active distro; runs in the background</string>
+    <string name="repair_started">Repair started in the background — retry your apt command in the terminal</string>
     <string name="pref_desktop_components_summary">During install, also fetch Xvfb + Openbox + xterm + capture tools via the distro package manager (~25 MB one time on Alpine, ~60 MB on Debian/Ubuntu). Disable on slow connections; the terminal works either way.</string>
     <string name="pref_distro_select_title">Linux distribution</string>
     <string name="pref_distro_select_summary">Distro to install/run (Alpine, Debian or Ubuntu). They coexist on disk; the selected one is active. Changing this shows an Install prompt — nothing downloads without your tap.</string>

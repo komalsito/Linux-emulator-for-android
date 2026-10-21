@@ -1,0 +1,64 @@
+#!/bin/sh
+# emux-apt-repair - make dpkg/apt usable again inside the distro (v0.1.53).
+#
+# Runs INSIDE proot/chroot as fake root. Fixes the two field failures that
+# brick every Debian/Ubuntu install on affected devices:
+#
+#  1) "dpkg: error: error creating new backup file
+#      '/var/lib/dpkg/status-old': Permission denied" (or "File exists").
+#     dpkg backs up its db with unlink(status-old)+link(status,status-old);
+#     under the bundled proot the legacy link(2) translation returns bogus
+#     errnos on several Android kernels (termux/proot#377: EEXIST on 3.4,
+#     EACCES on the v0.1.52 field device) while linkat(2) is fine. The
+#     libemux-linkfix.so LD_PRELOAD shim (assets/linkfix/<abi>) redefines
+#     link() as linkat(); this script registers it in /etc/ld.so.preload
+#     (honoured by glibc AND musl) and removes a stale status-old so the
+#     next backup starts clean.
+#
+#  2) "E: dpkg was interrupted, you must manually run 'dpkg --configure -a'"
+#     left behind by an apt run the user/app killed mid-transaction (or by
+#     an interrupted first bootstrap install). If configure -a still fails
+#     (half-applied journal on a partial tree), the pending journal is
+#     quarantined into updates.emux-broken/ and configure re-run - the
+#     standard rescue for an unrecoverable dpkg journal.
+#
+# Finally it reinstalls the base packages an interrupted transaction or a
+# killed extraction tends to lose (coreutils = tty/groups/..., util-linux =
+# script(1) = the PTY engine, bash), which is what produced the field
+# symptoms "bash: groups: command not found" and the missing PTY wrapper.
+#
+# Idempotent; safe to run on a healthy system (no-ops). Exit 0 always -
+# callers treat this as best-effort hygiene.
+
+SHIM=/usr/local/lib/emux/libemux-linkfix.so
+if [ -f "$SHIM" ]; then
+    mkdir -p /etc 2>/dev/null
+    if [ -r /etc/ld.so.preload ]; then
+        grep -qsx "$SHIM" /etc/ld.so.preload || echo "$SHIM" >>/etc/ld.so.preload
+    else
+        echo "$SHIM" >/etc/ld.so.preload
+    fi
+fi
+
+[ -d /var/lib/dpkg ] || exit 0
+export DEBIAN_FRONTEND=noninteractive
+
+rm -f /var/lib/dpkg/status-old
+if ! dpkg --configure -a >&2; then
+    echo "emux-apt-repair: configure -a failed - quarantining dpkg journal" >&2
+    mkdir -p /var/lib/dpkg/updates.emux-broken 2>/dev/null
+    for f in /var/lib/dpkg/updates/*; do
+        [ -e "$f" ] && mv "$f" /var/lib/dpkg/updates.emux-broken/ 2>/dev/null
+    done
+    rm -f /var/lib/dpkg/status-old
+    dpkg --configure -a >&2 || true
+fi
+
+# half-installed packages (interrupted transactions / partial extraction)
+apt-get install -y -f --no-install-recommends >&2 || true
+apt-get install -y --no-install-recommends coreutils util-linux bash >&2 || true
+
+mkdir -p /var/lib 2>/dev/null
+date +%s >/var/lib/emux-repair.stamp 2>/dev/null
+echo "emux-apt-repair: done" >&2
+exit 0

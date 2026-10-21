@@ -285,6 +285,10 @@ Pitfalls checklist (each caused a real crash/bug once):
   termux/proot-distro README.
 
 ## 8. Version log (condensed)
+v0.1.53 dpkg/apt self-repair field round: link()->linkat() LD_PRELOAD shim
+(assets/linkfix, termux/proot#377 class of kernel bugs), emux-apt-repair
+helper + app-start/Settings repair pass, guest-side $(tty) expansion fix in
+emux-init.sh, coreutils self-heal extras, ENV_VERSION 22 ·
 v0.1.31 live-DNS seeding + multi-mirror IP repos + untruncated banners ·
 v0.1.32 META-INF services in APK · v0.1.33 runtime-classpath dex ·
 v0.1.34/35 PROOT_TMP_DIR · v0.1.36 PROOT_LOADER shipped · v0.1.37 guest PTY +
@@ -316,3 +320,44 @@ exec(proot), proot-ptrace, dns(java), resolv.conf, dns-tcp, repo-tcp, and the
 apk output tails; terminal prints `[emux] dbg stream/tail/view` lines and the
 environment self-test; desktop pane paints x11/capture log tails. ONE screenshot
 per symptom is usually sufficient — read these sections first, guess second.
+
+## 7. v0.1.53 field round — Ubuntu 24.04 arm64: broken dpkg = black desktop
+
+Field screenshots (v0.1.52 build, Ubuntu noble, tuna mirror) showed four
+symptoms that are ONE causal chain:
+
+1. `/system/bin/sh: $ROOT/usr/bin/tty: No such file or directory` at every
+   session start — `emux-init.sh` expanded `$(tty)` on the ANDROID host
+   (double-quoted payload); the host session PATH prepends the rootfs dirs,
+   so the host exec'd the guest ARM ELF (execve ENOENT = missing interp) and
+   the winsize watcher got an empty tty arg. Fixed: `\$(tty)` → guest dash
+   expands it inside proot (its stdin IS the pts), plus an existence guard.
+2. `bash: groups: command not found` + missing `script(1)` (the "no PTY
+   wrapper" banner) — coreutils/util-linux half-installed: a killed dpkg
+   transaction (or killed extraction) removed files nothing reinstalled.
+   Fixed: `coreutils` joins Debian/Ubuntu extraPkgs; emux-apt-repair
+   reinstalls coreutils/util-linux/bash.
+3. `E: dpkg was interrupted…` then
+   `dpkg: error: error creating new backup file '/var/lib/dpkg/status-old':
+   Permission denied` — two causes: (a) dirty journal (var/lib/dpkg/updates/*)
+   from the killed run; (b) dpkg's db backup is unlink+**link(2)**, and under
+   the bundled proot several Android kernels answer the legacy link() with a
+   bogus errno (EEXIST on 3.4 per termux/proot#377, EACCES here) while
+   **linkat(2)** translates fine → EVERY apt/dpkg run dies forever.
+   Fixed: `tools/linkfix/` builds a freestanding LD_PRELOAD shim
+   (link→linkat, raw syscalls, no DT_NEEDED → glibc AND musl guests) for all
+   four ABIs; BootstrapManager installs it to
+   `<rootfs>/usr/local/lib/emux/libemux-linkfix.so` + `/etc/ld.so.preload`;
+   repair drops a stale status-old and quarantines an unrecoverable journal
+   (`updates.emux-broken/`) before retrying `dpkg --configure -a`.
+4. Desktop pane `waiting for X frames… / X server exited (code 1)` with apt
+   `Hit:` lines — emux-x11's apt self-install of Xvfb died on (3). Fixed by
+   calling emux-apt-repair in the cascade; the startup repair pass below
+   heals already-broken devices without a reinstall.
+
+New runtime hygiene: `BootstrapManager.startupRepairAsync()` — once per
+process start (daemon thread; Settings → "Repair package manager" forces it)
+it no-ops unless the journal is dirty / shim / stamp missing, then runs the
+in-guest repair inside proot. Bootstrap never re-runs on a stamped rootfs,
+so without this pass a broken dpkg survived forever (the field state).
+ENV_VERSION 21→22 re-seeds helpers (emux-apt-repair) on upgrade.
