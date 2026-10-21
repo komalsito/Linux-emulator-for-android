@@ -104,7 +104,10 @@ musl-loader exec (terminal only), then plain Android sh (CMD honored).
 
 ## Status / caveats
 
-- v0.1.54 debug build — not yet release-signed or R8-minified.
+- v0.1.55 debug build — not yet release-signed or R8-minified.
+  v0.1.55: guest-PTY upgrade on seccomp-strict ROMs (real PTY instead of raw
+  pipes), UTF-8 rendering + ONLCR emulation, startup gap-healing of missing
+  base/desktop packages, desktop error history in pane + files/logs/desktop.log.
   v0.1.54 adds terminal scrollback (drag / double-tap / pgup-pgdn) and fixes
   the desktop restart leaks (orphaned Xvfb/capture + EADDRINUSE on reopen).
   v0.1.53 heals broken dpkg/apt state (interrupted journal + proot link(2)

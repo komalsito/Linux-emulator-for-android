@@ -62,6 +62,32 @@ class DesktopService(
     val state = MutableStateFlow(State.IDLE)
     val errorText = MutableStateFlow<String?>(null)
 
+    /**
+     * v0.1.55 FIELD FIX: the pane showed only the NEWEST error - a rotating
+     * failure sequence (exit 1 -> EADDRINUSE -> no frames ...) overwrote
+     * itself faster than the user could screenshot it. Keep the last few
+     * timestamped errors, show them ALL in the pane, and mirror them to
+     * files/logs/desktop.log so a single `adb pull` (or screenshot) tells the
+     * whole story.
+     */
+    private val errHistory = ArrayDeque<String>()
+    private fun setError(msg: String) {
+        val line = "[${java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.US).format(java.util.Date())}] $msg"
+        synchronized(errHistory) {
+            errHistory.addLast(line)
+            while (errHistory.size > 5) errHistory.removeFirst()
+        }
+        runCatching {
+            val f = java.io.File(ctx.filesDir, "logs").apply { mkdirs() }
+            java.io.File(f, "desktop.log").appendText(line + "\n")
+        }
+        com.emux.EmuXLog.e("desktop: $msg")
+        errorText.value = msg
+    }
+    fun errorHistoryText(): String = synchronized(errHistory) {
+        if (errHistory.isEmpty()) errorText.value ?: "?" else errHistory.joinToString("\n")
+    }
+
     var x11: X11Client? = null; private set
     private var xSession: TerminalSession? = null
     private var captureSession: TerminalSession? = null
@@ -131,7 +157,7 @@ class DesktopService(
                 // have to guess.
                 val rootfs = com.emux.core.FsLayout.linuxRoot(ctx)
                 if (!java.io.File(rootfs, "etc").isDirectory) {
-                    errorText.value = "rootfs not installed — tap Install to bootstrap"
+                    setError("rootfs not installed — tap Install to bootstrap")
                     state.value = State.ERROR
                     return@launch
                 }
@@ -153,7 +179,7 @@ class DesktopService(
                 )
                 val emuxBin = binCandidates.firstOrNull { java.io.File(it, "emux-x11").isFile }
                 if (emuxBin == null) {
-                    errorText.value = "helper scripts missing — tap Install to re-bootstrap"
+                    setError("helper scripts missing — tap Install to re-bootstrap")
                     state.value = State.ERROR
                     return@launch
                 }
@@ -197,8 +223,8 @@ class DesktopService(
                                 diag[t]?.toString()?.lineSequence()
                                     ?.filter { it.isNotBlank() }?.toList()?.takeLast(4)?.joinToString(" | ")
                             }.joinToString(" /// ")
-                            errorText.value =
-                                ("X server exited (code ${xSession?.exitCode}). " + tails).take(500)
+                            setError(
+                                ("X server exited (code ${xSession?.exitCode}). " + tails).take(500))
                             state.value = State.ERROR
                         }
                     }
@@ -239,7 +265,7 @@ class DesktopService(
                             diag[t]?.toString()?.lineSequence()
                                 ?.filter { it.isNotBlank() }?.toList()?.takeLast(3)?.joinToString(" | ")
                         }.joinToString(" /// ")
-                        errorText.value = ("no X frames in 20s. " + tails).take(400)
+                        setError(("no X frames in 20s. " + tails).take(400))
                     }
                 }
 
@@ -256,7 +282,7 @@ class DesktopService(
                     Log.i(TAG, "X connected: ${c.screenWidth}x${c.screenHeight}@${c.depth} vendor=${c.vendor}")
                 } catch (e: Exception) {
                     Log.e(TAG, "X control plane unavailable (frames still streamed)", e)
-                    errorText.value = "input disabled: ${e.message ?: "X TCP unreachable"}"
+                    setError("input disabled: ${e.message ?: "X TCP unreachable"}")
                 }
 
                 // v0.1.17 BUGFIX #3: the frame reader was NEVER started by anyone
@@ -294,7 +320,7 @@ class DesktopService(
                 // the NEXT start die with EADDRINUSE on the field device.
                 runCatching { activeSock?.close() }; activeSock = null
                 runCatching { listener?.close() }; listener = null
-                errorText.value = e.message ?: "unknown error"
+                setError(e.message ?: "unknown error")
                 state.value = State.ERROR
             }
         }
@@ -496,7 +522,7 @@ class DesktopService(
                 }
             } catch (_: Exception) {
                 if (state.value == State.CONNECTED) {
-                    errorText.value = "frame stream ended"
+                    setError("frame stream ended")
                     state.value = State.ERROR
                 }
             } finally {

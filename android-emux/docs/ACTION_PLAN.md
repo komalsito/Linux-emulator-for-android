@@ -390,3 +390,33 @@ ENV_VERSION 21→22 re-seeds helpers (emux-apt-repair) on upgrade.
    catch, ERROR state retries on tab reselect, emux-x11 stale-kill extended
    to the capture family + apt install retries (4x5s) for dpkg-lock races,
    BootstrapManager aptLock serializes in-process proot apt runs.
+
+## 11. v0.1.55 field round — pty=false staircase, mojibake, missing base pkgs, rotating desktop errors
+
+Field screenshot (v0.1.54, Ubuntu): `attached #1 pty=false` + staircased
+banners + `â` mojibake + self-test `tr: No such file` + `Xvfb: missing`.
+Root causes & fixes:
+
+1. RAW-PIPE STAIRCASE + NO ECHO: the guest-PTY upgrade never fired on
+   seccomp-strict ROMs - MainActivity only upgraded when
+   TtyWrap.available() (HOST-side loader exec, which these ROMs kill with
+   SIGSYS). guestPty (script inside proot) was never considered post-start.
+   Fix: explicit guest-PTY upgrade path (canGuestPty() ->
+   upgradeToGuestPtyIfAvailable()), and the renderer emulates ONLCR
+   (LF also CR) while ptyWrapped==false so pipe mode no longer staircases.
+   Attach banner now prints WHY pty is missing (proot/script/cmd).
+2. MOJIBAKE: VtTerminalView fed bytes straight into the VT parser (no UTF-8
+   decoding) - every multibyte glyph rendered as latin-1 garbage. Fix:
+   proper UTF-8 decoder in feed() with U+FFFD fallback.
+3. SELF-TEST NOISE: emux-init-probe.sh ran bare `tr` - resolved through the
+   rootfs-first host PATH to the GUEST ELF (execve ENOENT), same class as
+   the v0.1.53 $(tty) bug. Pinned to /system/bin/tr.
+4. BASE/DESKTOP PACKAGES STILL MISSING (tr, script, Xvfb): those installs
+   only ever ran inside bootstrap, which never re-runs on a stamped rootfs;
+   the v0.1.53 repair payload healed dpkg but installed nothing. Fix:
+   startupRepairAsync now probes host-side for util-linux/coreutils/bash/
+   Xvfb gaps and installs exactly the missing sets via runAptProot (respect
+   the desktop_components pref) - heals the field device on next launch.
+5. ROTATING DESKTOP ERRORS UNCAPTURABLE: pane overwrote errorText on every
+   transition. Fix: DesktopService.setError() keeps a 5-entry timestamped
+   ring shown in the pane AND appended to files/logs/desktop.log.

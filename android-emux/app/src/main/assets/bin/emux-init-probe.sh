@@ -16,7 +16,10 @@ echo "ROOTFS=$ROOT"
 
 # SELinux domain of THIS process: untrusted_app_27 = exec of app-data allowed
 # (targetSdk<=28); plain untrusted_app = W^X blocked (targetSdk>=29 in effect).
-D=$(cat /proc/self/attr/current 2>/dev/null | tr -d "\000")
+# v0.1.55: pin tr to the ANDROID toybox - the session PATH prepends the
+# rootfs dirs, so a bare tr execd the GUEST ELF on the host (execve ENOENT
+# noise on every self-test, same class as the v0.1.53 tty fix).
+D=$(cat /proc/self/attr/current 2>/dev/null | /system/bin/tr -d "\000")
 [ -n "$D" ] && echo "DOMAIN=$D"
 
 NB=${EMUX_NATIVE_BRIDGE:-}

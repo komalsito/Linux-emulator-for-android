@@ -2075,10 +2075,34 @@ class BootstrapManager(private val ctx: Context) {
                 if (!proot.isFile) return@runCatching
                 val shim = File(dest, "usr/local/lib/emux/libemux-linkfix.so")
                 val stamp = File(dest, "var/lib/emux-repair.stamp")
-                if (!force && !aptJournalDirty(dest) && shim.isFile && stamp.isFile) return@runCatching
+                // v0.1.55: ALSO heal missing base/desktop packages. The field
+                // device still had no coreutils (tr/tty/groups), no util-linux
+                // script(1) (=> pty=false raw-pipe terminal) and no Xvfb
+                // (=> desktop cascade every time), because those installs only
+                // ever ran inside bootstrap - which never re-runs on a stamped
+                // rootfs. Host-side file probes are cheap; install only gaps.
+                val gaps = mutableListOf<String>()
+                if (!File(dest, "usr/bin/script").isFile && !File(dest, "bin/script").isFile) gaps += "util-linux"
+                if (!File(dest, "usr/bin/tr").isFile) gaps += "coreutils"
+                if (!File(dest, "bin/bash").isFile && !File(dest, "usr/bin/bash").isFile) gaps += "bash"
+                val desktopWanted = runCatching {
+                    androidx.preference.PreferenceManager.getDefaultSharedPreferences(ctx)
+                        .getBoolean("desktop_components", true)
+                }.getOrDefault(true)
+                if (desktopWanted && !File(dest, "usr/bin/Xvfb").isFile) gaps += spec.desktopPkgs
+                val dirty = aptJournalDirty(dest)
+                if (!force && !dirty && shim.isFile && stamp.isFile && gaps.isEmpty()) return@runCatching
                 installLinkFixShim(dest)
-                val r = runRepairProot(proot, dest)
-                com.emux.EmuXLog.i("startupRepair: ok=${r.ok} tail=${r.tail.take(200)}")
+                if (dirty || force || !stamp.isFile) {
+                    val r = runRepairProot(proot, dest)
+                    com.emux.EmuXLog.i("startupRepair: ok=${r.ok} tail=${r.tail.take(200)}")
+                }
+                if (gaps.isNotEmpty()) {
+                    val pkgs = gaps.distinct()
+                    com.emux.EmuXLog.i("startupRepair: installing missing components: $pkgs")
+                    val r2 = runAptProot(proot, dest, pkgs, "Installing missing components") { _, _ -> }
+                    com.emux.EmuXLog.i("startupRepair install: ok=${r2.ok} tail=${r2.tail.take(200)}")
+                }
             }.onFailure { com.emux.EmuXLog.e("startupRepair failed (non-fatal)", it) }
         }.apply { isDaemon = true; name = "emux-startup-repair" }.start()
     }

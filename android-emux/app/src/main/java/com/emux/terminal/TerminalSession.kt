@@ -137,6 +137,16 @@ class TerminalSession(
     /** v0.1.37: set by buildProcess when emux-init will allocate the PTY inside the guest. */
     @Volatile private var guestPty = false
 
+    /** v0.1.55: diagnostic - why this session has no PTY ("ok" when it has). */
+    @Volatile var ptyReason: String = "pending"
+        private set
+
+    /** v0.1.55: guest-PTY engine (proot + util-linux script) available now? */
+    fun canGuestPty(): Boolean =
+        com.emux.core.FsLayout.prootBin(ctx).isFile &&
+            (File(com.emux.core.FsLayout.linuxRoot(ctx), "usr/bin/script").isFile ||
+             File(com.emux.core.FsLayout.linuxRoot(ctx), "bin/script").isFile)
+
     /**
      * v0.1.47 MULTI-DISTRO: absolute path of the rootfs this session's CURRENT
      * child was launched against. MainActivity compares it with the active
@@ -296,6 +306,14 @@ class TerminalSession(
         val guestPtyCandidate = FsLayout.prootBin(ctx).isFile &&
             (File(rootfsFile, "usr/bin/script").isFile || File(rootfsFile, "bin/script").isFile) &&
             shellCmd == "bash -l"
+        // v0.1.55: say WHY in the attach banner when there is no PTY - field
+        // screenshots could show pty=false but never which leg was missing.
+        ptyReason = when {
+            guestPtyCandidate || TtyWrap.available() -> "ok"
+            !FsLayout.prootBin(ctx).isFile -> "proot-missing"
+            !(File(rootfsFile, "usr/bin/script").isFile || File(rootfsFile, "bin/script").isFile) -> "script-missing"
+            else -> "cmd=$shellCmd"
+        }
         // v0.1.31 DEGRADED MODE ("cannot type" insurance): when NO PTY wrapper
         // exists anywhere on this ROM (bootstrap apk extras still missing, or
         // exec of app-data denied), a non-interactive `bash -l` over raw pipes

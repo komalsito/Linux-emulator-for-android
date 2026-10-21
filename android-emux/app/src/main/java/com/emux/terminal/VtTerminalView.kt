@@ -235,9 +235,43 @@ class VtTerminalView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attr
     @Volatile var fedBytes: Long = 0L
         private set
 
+    /**
+     * v0.1.55: raw-pipe sessions (no PTY) emit bare LF - there is no tty
+     * driver to apply ONLCR - so lines staircased down the screen. When the
+     * session has no line discipline we emulate the tty: LF also returns the
+     * carriage. PTY sessions keep strict VT behaviour (the guest tty already
+     * sends CRLF).
+     */
+    @Volatile var onlcr = false
+
+    // v0.1.55 UTF-8 decoder state (the old byte-wise feed rendered every
+    // multibyte char as mojibake instead of the real glyph).
+    private var utf8Left = 0
+    private var utf8Cp = 0
+
     fun feed(bytes: ByteArray) {
         fedBytes += bytes.size          // v0.1.45 diag counter
-        for (b in bytes) parseByte(b.toInt() and 0xFF)
+        for (b in bytes) {
+            val v = b.toInt() and 0xFF
+            if (utf8Left == 0) {
+                when {
+                    v < 0x80 -> parseByte(v)
+                    v in 0xC2..0xDF -> { utf8Cp = v and 0x1F; utf8Left = 1 }
+                    v in 0xE0..0xEF -> { utf8Cp = v and 0x0F; utf8Left = 2 }
+                    v in 0xF0..0xF4 -> { utf8Cp = v and 0x07; utf8Left = 3 }
+                    else -> parseByte(0xFFFD)   // stray continuation byte
+                }
+            } else {
+                if (v and 0xC0 == 0x80) {
+                    utf8Cp = (utf8Cp shl 6) or (v and 0x3F)
+                    if (--utf8Left == 0) parseByte(utf8Cp)
+                } else {
+                    utf8Left = 0
+                    parseByte(0xFFFD)
+                    parseByte(v)
+                }
+            }
+        }
         markRowDirty(curY)
         invalidate()
     }
@@ -257,7 +291,7 @@ class VtTerminalView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attr
         when (pstate) {
             PState.GROUND -> when {
                 b == 0x1B -> { pstate = PState.ESC; paramCur = -1; clearParams() }
-                b == '\n'.code -> { newlineScroll() }
+                b == '\n'.code -> { newlineScroll(); if (onlcr) { curX = 0; wrapNext = false } }
                 b == '\r'.code -> { curX = 0; wrapNext = false }
                 b == '\t'.code -> { curX = ((curX / 8) + 1).coerceAtMost(cols - 1) * 8 }
                 b == 0x08 -> { curX = (curX - 1).coerceAtLeast(0) }

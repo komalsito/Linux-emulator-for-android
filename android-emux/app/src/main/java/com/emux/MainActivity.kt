@@ -45,6 +45,7 @@ class MainActivity : AppCompatActivity() {
      * (guards against repeat restarts if registry emissions race the flag).
      */
     private val ptyUpgradedSessions = mutableSetOf<Int>()
+    private val ptyGuestUpgraded = mutableSetOf<Int>()   // v0.1.55 guest-PTY upgrade gate
 
     private val notifPermission =
         registerForActivityResult(ActivityResultContracts.RequestPermission()) { /* fine if denied */ }
@@ -365,7 +366,11 @@ class MainActivity : AppCompatActivity() {
                                 // were missing ("waiting for X frames" forever).
                                 (desktop.errorText.value?.let { "\n" + it } ?: "")
                         DesktopService.State.ERROR ->
-                            getString(R.string.x_error, desktop.errorText.value ?: "?")
+                            // v0.1.55: show the LAST FEW failures, not just the
+                            // newest - the pane used to overwrite each error, so
+                            // a rotating failure sequence could never be caught
+                            // in one screenshot.
+                            getString(R.string.x_error, desktop.errorHistoryText())
                     }
                 }
             }
@@ -423,8 +428,22 @@ class MainActivity : AppCompatActivity() {
                         if (com.emux.terminal.TtyWrap.available() && ptyUpgradedSessions.add(s.id)) {
                             view.feed("\n[emux] PTY engine available now — restarting this shell with a real PTY…\n".toByteArray())
                             s.restart()
+                        } else if (!com.emux.terminal.TtyWrap.available() &&
+                            s.canGuestPty() && ptyGuestUpgraded.add(s.id)) {
+                            // v0.1.55 FIELD FIX: on ROMs whose seccomp kills the
+                            // host-side loader exec, TtyWrap.available() is
+                            // ALWAYS false - the old upgrade path never fired
+                            // and the shell stayed on raw pipes forever
+                            // (pty=false, no echo, staircased output) even
+                            // though the guest PTY engine (script inside proot)
+                            // was available. Upgrade through it explicitly.
+                            view.feed("\n[emux] guest PTY (script inside proot) available — restarting this shell with a real PTY…\n".toByteArray())
+                            s.upgradeToGuestPtyIfAvailable()
                         }
                     }
+                    // v0.1.55: raw-pipe sessions need ONLCR emulation in the
+                    // renderer or every line staircases (no tty driver adds CR)
+                    view.onlcr = !s.ptyWrapped
                     if (view.session !== s) {
                         view.session = s
                         watchLiveness(view, s)
@@ -432,7 +451,8 @@ class MainActivity : AppCompatActivity() {
                         // appears on a field screenshot, the pump/render path
                         // itself is broken (not the child stream).
                         view.feed(("[emux] attached #" + s.id +
-                            " pty=" + s.ptyWrapped + "\r\n").toByteArray())
+                            " pty=" + s.ptyWrapped +
+                            if (s.ptyWrapped) "\r\n" else " (" + s.ptyReason + ")\r\n").toByteArray())
                     }
                     // v0.1.45 CRITICAL: the scrollback pump used to live inside
                     // pumpOutput's repeatOnLifecycle block, which is CANCELLED on
