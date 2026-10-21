@@ -90,9 +90,9 @@ Since v0.1.47 it is MULTI-DISTRO: Alpine (default) + Debian 12 + Ubuntu 24.04
 - Self-test markers all OK: proot, PTY wrapper, bash, Xvfb, apk, PROOT_PTRACE_OK.
 
 ## 3. OPEN ISSUES (next actions)
-0. **Field-verify the new installers (v0.1.47)**: apt (Debian/Ubuntu),
-   pacman (Arch), dnf (Fedora) under proot are sandbox-designed but NOT yet
-   device-proven; the failure banners embed the apt/pacman/dnf output tails +
+0. **Field-verify the new installers (v0.1.47/48)**: extraction is now
+   sandbox-proven for all five images (v0.1.48), but apt (Debian/Ubuntu),
+   pacman (Arch), dnf (Fedora) runs under proot are NOT yet device-proven; the failure banners embed the apt/pacman/dnf output tails +
    device probe. Watch: dnf metadata refresh time on slow links, pacman
    keyring/CheckSpace noise, Ubuntu noble armhf (pd image only — Canonical
    cloud-images dropped armhf), NO Ubuntu image for 32-bit x86 (error is
@@ -212,6 +212,24 @@ Pitfalls checklist (each caused a real crash/bug once):
 - `cmd | head` swallows the exit status → `set -e` does NOT stop the pipeline
   on javac failure; the empty jar then sails into D8 (check class counts!).
 - resources.arsc must end up STORED (zip -0) like AGP packages it.
+- v0.1.48 FIELD BUG (Ubuntu install died before helper scripts; empty
+  self-test + "rootfs launcher missing"): THREE parser gaps, each verified
+  against system-tar ground truth for ALL FIVE images in the sandbox:
+   1. proot-distro tarballs wrap the tree in ONE top-level dir
+      (ubuntu-noble-aarch64/ …) → dest/etc never appeared → post-extract
+      check() aborted. Fix: unwrapSingleTopDir() after extraction.
+   2. pd images open with PAX extended headers ('x'); the old unknown-type
+      branch skipped payload WITHOUT the 512-byte padding → stream desync at
+      entry #1 → silent EMPTY extraction. Fix: every branch consumes
+      payload+pad; 'x'/'g'/'L'/'K' handled; PAX path/linkpath/size honored.
+   3. Alpine hardlink linknames are ABSOLUTE (/bin/busybox); File(dest,"/abs")
+      ignores dest → forward+absolute hardlinks vanished (busybox applets).
+      Fix: normalize linknames rootfs-relative + defer unresolved hardlinks
+      to a post-pass.
+  Verification method (repeat before shipping extractor changes): compile the
+  extractor verbatim into a JVM harness (needs an EmuXLog stub + xz jar),
+  extract each catalog image, diff name/type sets vs `tar -tvf` (device nodes
+  excluded, wrapper prefix stripped), then run the FsLayout probe paths.
 - Keystore: NOW COMMITTED (`android-emux/debug-keystore/emux-debug.jks`,
   pass `emuxdebug`, alias `emux`) — signatures are stable across sandboxes;
   no more uninstall churn after the one-time pre-0.1.47 migration.
@@ -241,7 +259,11 @@ v0.1.46 sudo+apt extras (best effort) ·
 v0.1.47 MULTI-DISTRO (Debian 12 / Ubuntu 24.04 / Arch ARM / Fedora 40 via
 pinned proot-distro images; coexisting files/distros/<id>, explicit switch
 guard, apt/pacman/dnf install ladders, tar.xz + hardlink-aware extraction,
-SHA256 verification, committed debug keystore, ENV_VERSION 21).
+SHA256 verification, committed debug keystore, ENV_VERSION 21) ·
+v0.1.48 extraction correctness: wrapper-dir unwrap + PAX/GNU-long-header
+handling + absolute/forward hardlink resolution (field bug: v0.1.47 Ubuntu
+install aborted post-extract); all five images verified byte-faithful vs
+system tar in sandbox.
 
 ## 9. Field-report protocol (keep using it)
 Every failure banner embeds: android/model/targetSdk/selinux, exec(loader),

@@ -548,6 +548,8 @@ class BootstrapManager(private val ctx: Context) {
             }
             extractArchive(tmp, dest, archiveIsXz)
             tmp.delete()
+            // v0.1.48: pd/official images wrap the tree in one top-level dir
+            unwrapSingleTopDir(dest)
 
             // v0.1.13: the old single "Linking /data/data paths" frame covered
             // three distinct phases (special-file prune + mountpoint seeding,
@@ -815,73 +817,187 @@ class BootstrapManager(private val ctx: Context) {
         if (xz) extractTarXz(arc, dest) else extractTarGz(arc, dest)
 
     /**
-     * Minimal streaming tar reader (ustar + gnu long names). v0.1.47: takes an
-     * ALREADY-DECOMPRESSED stream (gzip or xz) and materializes type-'1'
-     * HARDLINKS by copying the earlier-extracted target — Debian/Ubuntu images
-     * (unlike the Alpine minirootfs) DO contain hardlink entries, and the old
-     * size=0 fallthrough produced empty files for them.
+     * Minimal streaming tar reader. v0.1.48 REWRITE (field bug: Ubuntu install
+     * produced an EMPTY rootfs): the v0.1.47 parser desynchronized on the very
+     * first entry of every proot-distro image — those are PAX extended headers
+     * ('x'), and the old `else -> skip(gz, size)` branch skipped the payload
+     * but NOT the 512-byte block padding, so the next "header" read was
+     * mid-payload garbage/zeros → immediate end-of-archive → empty tree →
+     * bootstrap aborted before helper scripts (the v0.1.47 field screenshot).
+     * Also fixed: FORWARD hardlinks (Alpine lists busybox applet links BEFORE
+     * bin/busybox; the old copy-on-sight silently dropped ~330 of them) are now
+     * deferred and resolved after the pass; PAX path/linkpath/size overrides
+     * and GNU 'K' long-link extensions are honored; every branch consumes
+     * payload + padding exactly.
+     * Takes an ALREADY-DECOMPRESSED stream (gzip or xz).
      */
     private fun extractTarStream(gzIn: java.io.InputStream, dest: File) {
-        run {
-            val gz = gzIn
-            val hdr = ByteArray(512)
-            var pendingLongName: String? = null
-            while (true) {
-                var read = 0
-                while (read < 512) { val n = gz.read(hdr, read, 512 - read); if (n < 0) return; read += n }
-                if (String(hdr, 0, 100).all { it == '\u0000' }) break // end-of-archive block
-                val name0 = String(hdr, 0, 100).trim('\\', '\u0000')
-                val sizeStr = String(hdr, 124, 12).trim('\\', '\u0000', ' ')
-                val size = sizeStr.toLongOrNull(8) ?: 0L
-                val type = hdr[156].toInt().toChar()
-                val prefix = String(hdr, 345, 155).trim('\\', '\u0000')
-                val name = pendingLongName ?: (if (prefix.isNotEmpty()) "$prefix/$name0" else name0)
-                pendingLongName = null
-                val target = File(dest, name).canonicalFile
-                if (!target.path.startsWith(dest.canonicalFile.path + File.separator) && target != dest.canonicalFile) {
-                    // path traversal guard (Alpine tars are clean, but be safe)
-                    skip(gz, size); continue
+        val gz = gzIn
+        val hdr = ByteArray(512)
+        var pendingLongName: String? = null
+        var pendingLongLink: String? = null
+        var paxPath: String? = null
+        var paxLink: String? = null
+        var paxSize: Long? = null
+        // forward hardlinks: (target file, source rel path) resolved post-pass
+        val deferred = mutableListOf<Pair<File, String>>()
+        while (true) {
+            var read = 0
+            while (read < 512) { val n = gz.read(hdr, read, 512 - read); if (n < 0) return; read += n }
+            if (String(hdr, 0, 100).all { it == '\u0000' }) break // end-of-archive block
+            val name0 = String(hdr, 0, 100).trim('\\', '\u0000')
+            var size = String(hdr, 124, 12).trim('\\', '\u0000', ' ').toLongOrNull(8) ?: 0L
+            val type = hdr[156].toInt().toChar()
+            val prefix = String(hdr, 345, 155).trim('\\', '\u0000')
+            var link = String(hdr, 157, 100).trim('\\', '\u0000')
+            var name = when {
+                paxPath != null -> paxPath!!
+                pendingLongName != null -> pendingLongName!!
+                prefix.isNotEmpty() -> "$prefix/$name0"
+                else -> name0
+            }
+            if (paxLink != null) link = paxLink!!
+            else if (pendingLongLink != null) link = pendingLongLink!!
+            if (paxSize != null) size = paxSize!!
+            val pad = ((512 - (size % 512)) % 512)
+            // ---- extension headers: consume payload+padding, affect NEXT entry
+            when (type) {
+                'x', 'X' -> {   // PAX extended header (per-entry overrides)
+                    val payload = ByteArray(minOf(size, 1L * 1024 * 1024).toInt())
+                    var o = 0
+                    while (o < payload.size) { val n = gz.read(payload, o, payload.size - o); if (n < 0) break; o += n }
+                    if (size > payload.size) skip(gz, size - payload.size)
+                    skip(gz, pad)
+                    var r = 0
+                    while (r < o) {
+                        var sp = r
+                        while (sp < o && payload[sp].toInt().toChar().isDigit()) sp++
+                        val len = String(payload, r, sp - r).toIntOrNull() ?: break
+                        if (r + len > o) break
+                        val rec = String(payload, r, len).trimEnd('\n')
+                        val kv = rec.substringAfter(' ')
+                        when (kv.substringBefore('=')) {
+                            "path" -> paxPath = kv.substringAfter('=')
+                            "linkpath" -> paxLink = kv.substringAfter('=')
+                            "size" -> paxSize = kv.substringAfter('=').toLongOrNull()
+                        }
+                        r += len
+                    }
+                    continue
                 }
-                when {
-                    name0 == "././@LongLink" || name0 == "./@LongLink" /* GNU long name */ -> {
-                        val long = ByteArray(size.toInt()); var o = 0
-                        while (o < long.size) { val n = gz.read(long, o, long.size - o); if (n < 0) break; o += n }
-                        pendingLongName = String(long, 0, o).trim('\u0000', '\n')
-                        skip(gz, (512 - (size % 512)) % 512)
-                        continue // the NEXT header carries this long name
-                    }
-                    type == '5' || name.endsWith("/") -> target.mkdirs()
-                    type == '2' -> { /* symlink via android.system.Os (API 21+), best-effort */
-                        val link = String(hdr, 157, 100).trim('\u0000')
-                        target.parentFile?.mkdirs()
-                        runCatching { android.system.Os.symlink(link, target.path) }
-                        skip(gz, size)
-                    }
-                    type == '1' -> {
-                        // hardlink → copy the previously extracted target file
-                        val link = String(hdr, 157, 100).trim('\u0000')
-                        target.parentFile?.mkdirs()
+                'g' -> { skip(gz, size); skip(gz, pad); continue }   // PAX global: ignore
+                'L' -> {   // GNU long name
+                    val long = ByteArray(size.toInt()); var o = 0
+                    while (o < long.size) { val n = gz.read(long, o, long.size - o); if (n < 0) break; o += n }
+                    pendingLongName = String(long, 0, o).trim('\u0000', '\n')
+                    skip(gz, pad)
+                    continue
+                }
+                'K' -> {   // GNU long link target
+                    val long = ByteArray(size.toInt()); var o = 0
+                    while (o < long.size) { val n = gz.read(long, o, long.size - o); if (n < 0) break; o += n }
+                    pendingLongLink = String(long, 0, o).trim('\u0000', '\n')
+                    skip(gz, pad)
+                    continue
+                }
+            }
+            val target = File(dest, name).canonicalFile
+            if (!target.path.startsWith(dest.canonicalFile.path + File.separator) && target != dest.canonicalFile) {
+                // path traversal guard
+                skip(gz, size); skip(gz, pad)
+                pendingLongName = null; pendingLongLink = null; paxPath = null; paxLink = null; paxSize = null
+                continue
+            }
+            when {
+                type == '5' || name.endsWith("/") -> {
+                    target.mkdirs()
+                    skip(gz, size); skip(gz, pad)
+                }
+                type == '2' -> { /* symlink via android.system.Os (API 21+), best-effort */
+                    target.parentFile?.mkdirs()
+                    runCatching { android.system.Os.symlink(link, target.path) }
+                        .recoverCatching {
+                            // JVM-side fallback (unit harness; also covers ROMs
+                            // where the Os binding is missing)
+                            java.nio.file.Files.createSymbolicLink(
+                                target.toPath(), java.nio.file.Paths.get(link))
+                        }
+                    skip(gz, size); skip(gz, pad)
+                }
+                type == '1' -> {   // hardlink: copy target; defer if forward-referenced
+                    target.parentFile?.mkdirs()
+                    // v0.1.48: linknames arrive BOTH "./bin/busybox" (GNU relative)
+                    // AND "/bin/busybox" (Alpine absolute-in-rootfs). File(dest,
+                    // "/abs") IGNORES dest — normalize to rootfs-relative.
+                    val srcRel = link.removePrefix("./").trimStart('/')
+                    val srcF = File(dest, srcRel)
+                    if (srcF.isFile) {
                         runCatching {
-                            val srcF = File(dest, link.removePrefix("./"))
-                            if (srcF.isFile) java.nio.file.Files.copy(
-                                srcF.toPath(), target.toPath(),
+                            java.nio.file.Files.copy(srcF.toPath(), target.toPath(),
                                 java.nio.file.StandardCopyOption.REPLACE_EXISTING)
                         }
-                        skip(gz, size)
+                    } else {
+                        deferred += target to srcRel
                     }
-                    type == '0' || type == '\u0000' -> {
-                        target.parentFile?.mkdirs()
-                        target.outputStream().use { os -> var left = size; val buf = ByteArray(64 * 1024)
-                            while (left > 0) { val n = gz.read(buf, 0, minOf(buf.size.toLong(), left).toInt()); if (n < 0) break; os.write(buf, 0, n); left -= n } }
-                        val mode = String(hdr, 100, 8).trim('\u0000', ' ').toIntOrNull(8) ?: 0
-                        target.setExecutable(mode and 0x40 != 0, false)
-                        skip(gz, (512 - (size % 512)) % 512)
+                    skip(gz, size); skip(gz, pad)
+                }
+                type == '0' || type == '\u0000' -> {
+                    target.parentFile?.mkdirs()
+                    target.outputStream().use { os ->
+                        var left = size
+                        val buf = ByteArray(64 * 1024)
+                        while (left > 0) { val n = gz.read(buf, 0, minOf(buf.size.toLong(), left).toInt()); if (n < 0) break; os.write(buf, 0, n); left -= n }
                     }
-                    else -> skip(gz, size)
+                    val mode = String(hdr, 100, 8).trim('\u0000', ' ').toIntOrNull(8) ?: 0
+                    target.setExecutable(mode and 0x40 != 0, false)
+                    skip(gz, pad)
+                }
+                else -> {   // char/block/fifo/socket: skip safely (never create)
+                    skip(gz, size); skip(gz, pad)
+                }
+            }
+            pendingLongName = null; pendingLongLink = null
+            paxPath = null; paxLink = null; paxSize = null
+        }
+        // resolve forward hardlinks now that their targets exist
+        for ((target, srcRel) in deferred) {
+            runCatching {
+                val srcF = File(dest, srcRel)
+                if (srcF.isFile) {
+                    java.nio.file.Files.copy(srcF.toPath(), target.toPath(),
+                        java.nio.file.StandardCopyOption.REPLACE_EXISTING)
+                } else {
+                    com.emux.EmuXLog.e("tar: hardlink source missing: $srcRel (for ${target.path})")
                 }
             }
         }
     }
+
+    /**
+     * v0.1.48: proot-distro release tarballs (and several official images)
+     * wrap the whole rootfs in ONE top-level directory (e.g.
+     * "ubuntu-noble-aarch64/"); the Alpine minirootfs does not. Without
+     * unwrapping, dest/etc never appears and bootstrap aborts right after
+     * extraction. If dest holds exactly one directory that itself looks like
+     * a rootfs (has etc/), hoist its children up with cheap same-fs renames.
+     */
+    internal fun unwrapSingleTopDir(dest: File) {
+        runCatching {
+            val children = dest.listFiles() ?: return
+            if (children.size != 1) return
+            val top = children[0]
+            if (!top.isDirectory || !File(top, "etc").isDirectory) return
+            com.emux.EmuXLog.i("rootfs wrapped in ${top.name}/ — unwrapping")
+            top.listFiles()?.forEach { c ->
+                runCatching {
+                    java.nio.file.Files.move(c.toPath(), File(dest, c.name).toPath(),
+                        java.nio.file.StandardCopyOption.REPLACE_EXISTING)
+                }
+            }
+            runCatching { java.nio.file.Files.deleteIfExists(top.toPath()) }
+        }.onFailure { com.emux.EmuXLog.e("unwrapSingleTopDir failed", it) }
+    }
+
     private fun skip(gz: java.io.InputStream, n: Long) { var left = n; val b = ByteArray(8192)
         while (left > 0) { val k = gz.read(b, 0, minOf(left, b.size.toLong()).toInt()); if (k < 0) break; left -= k } }
 
