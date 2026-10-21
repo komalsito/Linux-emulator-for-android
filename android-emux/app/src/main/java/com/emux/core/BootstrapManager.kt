@@ -41,7 +41,25 @@ class BootstrapManager(private val ctx: Context) {
          * configure -a -> journal quarantine + retry -> fix-broken. Always
          * exits 0; callers treat it as hygiene, never as a gate.
          */
-        private const val APT_REPAIR_PAYLOAD =
+        /**
+         * v0.1.63: guest-side self-check written to /tmp/emux_selfcheck (host
+         * visible at <rootfs>/tmp/emux_selfcheck) and echoed to the repair
+         * run's stderr: does the link shim actually load, does link(2)
+         * succeed as fake root, and who owns /var/lib/dpkg.
+         */
+        private const val APT_SELFCHECK_PAYLOAD =
+            "{ echo \"== emux dpkg selfcheck ==\"; " +
+            "ls -l /usr/local/lib/emux/ 2>&1; " +
+            "cat /etc/ld.so.preload 2>&1; " +
+            "if grep -q libemux-linkfix /proc/self/maps; then echo SHIM_LOADED; else echo SHIM_NOT_LOADED; fi; " +
+            "rm -f /var/lib/dpkg/status-old; " +
+            "if ln /var/lib/dpkg/status /var/lib/dpkg/status-old 2>/tmp/link_err; then echo LINK_OK; else echo LINK_FAIL:; cat /tmp/link_err; fi; " +
+            "rm -f /var/lib/dpkg/status-old; " +
+            "stat -c 'dpkgdir u=%u m=%a' /var/lib/dpkg 2>&1; " +
+            "stat -c 'status u=%u m=%a' /var/lib/dpkg/status 2>&1; " +
+            "id -u; } > /tmp/emux_selfcheck 2>&1; cat /tmp/emux_selfcheck >&2"
+
+                private const val APT_REPAIR_PAYLOAD =
             "export DEBIAN_FRONTEND=noninteractive; " +
             "SHIM=/usr/local/lib/emux/libemux-linkfix.so; " +
             "if [ -f \"\$SHIM\" ]; then grep -qsx \"\$SHIM\" /etc/ld.so.preload || echo \"\$SHIM\" >> /etc/ld.so.preload; fi; " +
@@ -51,9 +69,10 @@ class BootstrapManager(private val ctx: Context) {
             "for f in /var/lib/dpkg/updates/*; do [ -e \"\$f\" ] && mv \"\$f\" /var/lib/dpkg/updates.emux-broken/ 2>/dev/null; done; " +
             "rm -f /var/lib/dpkg/status-old; dpkg --configure -a >&2 || true; fi; " +
             "apt-get install -y -f --no-install-recommends >&2 || true; " +
-            "date +%s > /var/lib/emux-repair.stamp 2>/dev/null || true"
+            "date +%s > /var/lib/emux-repair.stamp 2>/dev/null || true; " +
+            APT_SELFCHECK_PAYLOAD
 
-        @Volatile private var startupRepairStarted = false
+@Volatile private var startupRepairStarted = false
 
         /**
          * v0.1.54: in-process mutex for proot apt/dpkg runs. startupRepairAsync
@@ -1700,6 +1719,9 @@ class BootstrapManager(private val ctx: Context) {
             "LANG" to "C",
             "PROOT_LOADER" to File(nb, "loader").absolutePath,
         )
+        // v0.1.63: explicit shim preload - do not rely on /etc/ld.so.preload alone
+        if (File(dest, "usr/local/lib/emux/libemux-linkfix.so").isFile)
+            env["LD_PRELOAD"] = "/usr/local/lib/emux/libemux-linkfix.so"
         val l32 = File(nb, "loader32")
         if (l32.isFile) env["PROOT_LOADER_32"] = l32.absolutePath
         return runApkProcess(argv, env, pkgs, phase, report)
@@ -2017,6 +2039,8 @@ class BootstrapManager(private val ctx: Context) {
                 replaceRegularFileWith(out) { f -> f.outputStream().use { os -> ins.copyTo(os) } }
             }
             out.setReadable(true, false)
+            out.parentFile?.setReadable(true, false)
+            out.parentFile?.setExecutable(true, false)
             val line = "/usr/local/lib/emux/libemux-linkfix.so"
             val preload = File(dest, "etc/ld.so.preload")
             val cur = runCatching { preload.readText() }.getOrDefault("")
@@ -2024,6 +2048,19 @@ class BootstrapManager(private val ctx: Context) {
                 preload.parentFile?.mkdirs()
                 val text = if (cur.isBlank()) "$line\n" else cur.trimEnd() + "\n" + line + "\n"
                 replaceRegularFileWith(preload) { it.writeText(text) }
+            }
+            preload.setReadable(true, false)
+            runCatching {
+                val dbdir = File(dest, "var/lib/dpkg")
+                if (dbdir.isDirectory) {
+                    dbdir.setReadable(true, false)
+                    dbdir.setExecutable(true, false)
+                    dbdir.setWritable(true, true)
+                }
+                listOf("status", "status-old", "available").forEach { n2 ->
+                    val f = File(dbdir, n2)
+                    if (f.isFile) { f.setReadable(true, false); f.setWritable(true, true) }
+                }
             }
             com.emux.EmuXLog.i("linkfix shim installed for ${linkFixAbiDir()}")
         }.onFailure { com.emux.EmuXLog.e("linkfix shim install failed (non-fatal)", it) }
@@ -2058,6 +2095,8 @@ class BootstrapManager(private val ctx: Context) {
         )
         val l32 = File(nb, "loader32")
         if (l32.isFile) env["PROOT_LOADER_32"] = l32.absolutePath
+        if (File(dest, "usr/local/lib/emux/libemux-linkfix.so").isFile)
+            env["LD_PRELOAD"] = "/usr/local/lib/emux/libemux-linkfix.so"
         runApkProcess(argv, env, listOf("dpkg-repair"), "Repairing package manager", { _, _ -> })
     }
 

@@ -85,17 +85,22 @@ class DesktopService(
      * whole story.
      */
     private val errHistory = ArrayDeque<String>()
-    private fun setError(msg: String) {
+    /** v0.1.63: history+log entry WITHOUT setting the live error line. */
+    fun noteInfo(msg: String) {
         val line = "[${java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.US).format(java.util.Date())}] $msg"
         synchronized(errHistory) {
             errHistory.addLast(line)
-            while (errHistory.size > 5) errHistory.removeFirst()
+            while (errHistory.size > 6) errHistory.removeFirst()
         }
         runCatching {
             val f = java.io.File(ctx.filesDir, "logs").apply { mkdirs() }
             java.io.File(f, "desktop.log").appendText(line + "\n")
         }
-        com.emux.EmuXLog.e("desktop: $msg")
+        com.emux.EmuXLog.i("desktop: $msg")
+    }
+
+    private fun setError(msg: String) {
+        noteInfo(msg)
         errorText.value = msg
     }
     fun errorHistoryText(): String = synchronized(errHistory) {
@@ -227,6 +232,18 @@ class DesktopService(
                 // cannot recover from a dirty journal ("E: dpkg was
                 // interrupted" -> no Xvfb -> exit 1 -> rotating pane errors).
                 com.emux.core.BootstrapManager(ctx).desktopPreRepair()
+                // v0.1.63: surface the guest dpkg selfcheck (shim loaded? link()
+                // ok? db dir owner/mode?) in the pane history + desktop.log so
+                // the next field screenshot answers WHY instead of guessing.
+                runCatching {
+                    val sc = java.io.File(rootfs, "tmp/emux_selfcheck")
+                    if (sc.isFile) {
+                        val sum = sc.readText().lineSequence()
+                            .filter { it.startsWith("SHIM_") || it.startsWith("LINK_") || it.startsWith("dpkgdir") || it.startsWith("status u=") }
+                            .joinToString(" ").take(300)
+                        if (sum.isNotBlank()) noteInfo("selfcheck: $sum")
+                    }
+                }
 
                 val cmd = "emux-x11 $wmCommand"
                 xSession = TerminalSession(9001, ctx, root, cmd).also { it.start() }

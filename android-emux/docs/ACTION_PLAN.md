@@ -578,3 +578,21 @@ ENV_VERSION 29, versionCode 61.
 4. Sandbox re-checks this round: noble Xvfb -listen tcp DOES open tcp/6000
    and the host reaches it (the 21.1.x removal fear was unfounded).
 ENV_VERSION 30, versionCode 62.
+
+## 18. v0.1.63 field round — shim delivery belt + device selfcheck
+
+Field v0.1.62 still showed "status-old: Permission denied", i.e. the
+link()->linkat() shim was not reaching dpkg on that device even with
+/etc/ld.so.preload written. Since remote guessing has burned three rounds,
+this release (a) stops relying on the preload file alone - every proot
+apt/dpkg run now also sets LD_PRELOAD explicitly (runAptProot +
+runRepairProot), (b) normalizes permissions host-side (shim dir/file,
+ld.so.preload, var/lib/dpkg + status/status-old/available owner-write), and
+(c) ships a GUEST SELFCHECK (APT_SELFCHECK_PAYLOAD, written to
+<rootfs>/tmp/emux_selfcheck and echoed to the repair stderr) reporting
+SHIM_LOADED/SHIM_NOT_LOADED (via /proc/self/maps), a live link(2) test
+(LINK_OK/LINK_FAIL+errno), and owner/mode of the dpkg db dir. DesktopService
+paints the condensed selfcheck into the pane error history + desktop.log at
+every desktop start, so the next field screenshot identifies the broken leg
+in one shot instead of three rounds of inference.
+ENV_VERSION 31, versionCode 63.
