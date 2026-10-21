@@ -232,6 +232,7 @@ class DesktopService(
                 // cannot recover from a dirty journal ("E: dpkg was
                 // interrupted" -> no Xvfb -> exit 1 -> rotating pane errors).
                 com.emux.core.BootstrapManager(ctx).desktopPreRepair()
+                    ?.let { noteInfo(it) }
                 // v0.1.63: surface the guest dpkg selfcheck (shim loaded? link()
                 // ok? db dir owner/mode?) in the pane history + desktop.log so
                 // the next field screenshot answers WHY instead of guessing.
@@ -341,13 +342,28 @@ class DesktopService(
                 }
                 scope.launch {
                     val startFrames = frameId
-                    kotlinx.coroutines.delay(20_000)
-                    if (frameId == startFrames && state.value == State.CONNECTED) {
+                    // v0.1.65: while frameless, periodically snapshot the guest
+                    // logs into the pane history so ANY screenshot taken while
+                    // waiting carries the evidence (xvfb fatal line, cascade
+                    // progress, selfcheck), not just a transient status line.
+                    for (wait in listOf(20_000L, 40_000L, 60_000L)) {
+                        kotlinx.coroutines.delay(wait)
+                        if (frameId != startFrames || state.value != State.CONNECTED) return@launch
                         val tails = listOf("x11", "capture").mapNotNull { t ->
                             diag[t]?.toString()?.lineSequence()
                                 ?.filter { it.isNotBlank() }?.toList()?.takeLast(3)?.joinToString(" | ")
                         }.joinToString(" /// ")
-                        setError(("no X frames in 20s. " + tails).take(400))
+                        if (wait == 20_000L) setError(("no X frames in 20s. " + tails).take(400))
+                        else noteInfo("still no frames @${wait / 1000}s. " + tails.take(300))
+                        runCatching {
+                            val xl = java.io.File(rootfs, "tmp/xvfb.log")
+                            if (xl.isFile) noteInfo("xvfb.log: " + xl.readText().lineSequence()
+                                .filter { it.isNotBlank() }.toList().takeLast(2).joinToString(" | ").take(300))
+                            val sc = java.io.File(rootfs, "tmp/emux_selfcheck")
+                            if (sc.isFile) noteInfo("selfcheck: " + sc.readText().lineSequence()
+                                .filter { it.startsWith("SHIM_") || it.startsWith("LINK_") || it.startsWith("dpkgdir") }
+                                .joinToString(" ").take(300))
+                        }
                     }
                 }
 

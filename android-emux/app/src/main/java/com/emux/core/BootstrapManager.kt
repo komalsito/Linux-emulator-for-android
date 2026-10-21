@@ -2137,29 +2137,42 @@ class BootstrapManager(private val ctx: Context) {
      * the app side BEFORE the X session starts makes the cascade's apt install
      * of Xvfb & friends actually succeed.
      */
-    fun desktopPreRepair() {
+    fun desktopPreRepair(): String? {
         // v0.1.58: wait (bounded) for any IN-PROCESS apt run (the app-start gap
         // install of the desktop stack) to finish before judging dpkg state -
         // apt reports "dpkg was interrupted" for a journal that is merely IN
         // USE, and the desktop cascade then raced the multi-minute install
         // (field pane: "E: dpkg was interrupted ... apt install failed").
+        var note: String? = null
         val got = runCatching {
             Companion.aptLock().tryLock(90, java.util.concurrent.TimeUnit.SECONDS)
         }.getOrDefault(true)
         try {
         runCatching {
             val spec = DistroCatalog.requested(ctx)
-            if (spec.pkg != PkgManager.APT) return
+            if (spec.pkg != PkgManager.APT) return null
             val dest = FsLayout.linuxRoot(ctx)
-            if (!File(dest, "etc").isDirectory) return
+            if (!File(dest, "etc").isDirectory) return null
             val proot = FsLayout.prootBin(ctx)
-            if (!proot.isFile) return
-            if (!aptJournalDirty(dest) && File(dest, "var/lib/emux-repair.stamp").isFile) return
+            if (!proot.isFile) return null
+            if (!aptJournalDirty(dest) && File(dest, "var/lib/emux-repair.stamp").isFile) return null
             installLinkFixShim(dest)
             val r = runRepairProot(proot, dest)
             com.emux.EmuXLog.i("desktopPreRepair: ok=${r.ok} tail=${r.tail.take(200)}")
+            note = "dpkg repair ok=${r.ok}: " + r.tail.take(180)
+            // v0.1.65: install the X-server CORE from the app side (LD_PRELOAD
+            // belt + aptLock + settle pass) instead of leaving it to the
+            // in-guest cascade - by the time the X session starts, Xvfb is
+            // either present or the pane history says exactly why not.
+            if (!File(dest, "usr/bin/Xvfb").isFile) {
+                val core = listOf("xvfb", "x11-xkb-utils", "xkb-data", "xfonts-base")
+                val rc = runAptProot(proot, dest, core, "Installing X server core") { _, _ -> }
+                com.emux.EmuXLog.i("desktopPreRepair core install: ok=${rc.ok} tail=${rc.tail.take(200)}")
+                note = (note ?: "") + " | core install ok=${rc.ok}: " + rc.tail.take(180)
+            }
         }.onFailure { com.emux.EmuXLog.e("desktopPreRepair failed (non-fatal)", it) }
         } finally { if (got) runCatching { Companion.aptLock().unlock() } }
+        return note
     }
 
     fun startupRepairAsync(force: Boolean = false) {

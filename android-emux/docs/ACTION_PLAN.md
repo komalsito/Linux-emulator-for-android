@@ -596,3 +596,21 @@ paints the condensed selfcheck into the pane error history + desktop.log at
 every desktop start, so the next field screenshot identifies the broken leg
 in one shot instead of three rounds of inference.
 ENV_VERSION 31, versionCode 63.
+
+## 19. v0.1.65 field round — no red flash, diagnostics while waiting, app-side X core install
+
+- Removed the v0.1.25 debugFlashRed() paint on Desktop-tab selection (user
+  request: the red flash on every tab open looked broken).
+- The waiting pane (CONNECTED but frameId==0) now shows the diagnostic
+  HISTORY instead of only the newest transient line, and the frameless
+  watcher snapshots xvfb.log + emux_selfcheck + session tails into that
+  history at 20/40/60 s - a screenshot taken while waiting now carries the
+  evidence (v0.1.64 hid it behind the ERROR state, so the field screenshot
+  showed only the transient touch-input line).
+- desktopPreRepair() now installs the X-server CORE (xvfb x11-xkb-utils
+  xkb-data xfonts-base) from the APP side when missing - with the LD_PRELOAD
+  belt, the aptLock and the settle pass - before the X session starts, and
+  returns a one-line summary that the pane history shows. The in-guest
+  cascade becomes a fallback instead of the only path.
+- desktopPreRepair returns String? (bare returns needed nulls - Kotlin).
+versionCode 65.

@@ -334,7 +334,6 @@ class MainActivity : AppCompatActivity() {
         // background does not appear, the problem is layout/z-order/size —
         // NOT the X pipeline. If it appears then turns dark, frames are
         // simply never arriving (check the status line error text).
-        b.desktopView.debugFlashRed()
         // v0.1.54: a FAILED desktop (State.ERROR) must retry when the user comes
         // back to the tab - previously only IDLE started, so one bad attempt
         // (e.g. the apt-lock race with the startup repair pass) left the pane
@@ -358,13 +357,17 @@ class MainActivity : AppCompatActivity() {
                         DesktopService.State.IDLE -> ""
                         DesktopService.State.STARTING_X -> getString(R.string.x_starting)
                         DesktopService.State.CONNECTED ->
-                            getString(R.string.x_connected, desktop.x11?.screenWidth ?: 0, desktop.x11?.screenHeight ?: 0) +
-                                // v0.1.41 BUGFIX: the no-frames / input-disabled
-                                // diagnostics live in errorText, but this
-                                // collector only rendered it in ERROR state —
-                                // the desktop status never showed WHY frames
-                                // were missing ("waiting for X frames" forever).
-                                (desktop.errorText.value?.let { "\n" + it } ?: "")
+                            // v0.1.65: while NOT A SINGLE frame has arrived the
+                            // status line shows the diagnostic HISTORY
+                            // (selfcheck / xvfb.log / cascade progress), not
+                            // just the newest transient line - a waiting pane
+                            // used to hide exactly the info a field screenshot
+                            // needs.
+                            if (desktop.frameId == 0)
+                                getString(R.string.x_connected, 0, 0) + "\n" + desktop.errorHistoryText()
+                            else
+                                getString(R.string.x_connected, desktop.x11?.screenWidth ?: 0, desktop.x11?.screenHeight ?: 0) +
+                                    (desktop.errorText.value?.let { "\n" + it } ?: "")
                         DesktopService.State.ERROR ->
                             // v0.1.55: show the LAST FEW failures, not just the
                             // newest - the pane used to overwrite each error, so
