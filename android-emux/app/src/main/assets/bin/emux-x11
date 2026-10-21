@@ -111,10 +111,10 @@ else
         emux-apt-repair >&2 || true
       fi
       TRIES=0
-      while [ "$TRIES" -lt 12 ]; do
+      while [ "$TRIES" -lt 30 ]; do
         if apt_busy; then
           TRIES=$((TRIES + 1))
-          echo "emux-x11: another apt/dpkg transaction is running - waiting ($TRIES/12)" >&2
+          echo "emux-x11: another apt/dpkg transaction is running - waiting ($TRIES/30)" >&2
           sleep 10
           continue
         fi

@@ -486,3 +486,25 @@ Fixes:
 - Settings WM summary now explains Openbox is the preinstalled session and
   Xfce4/LXDE/i3 need their packages installed inside the distro first.
 ENV_VERSION 26, versionCode 58.
+
+## 14. v0.1.59 field round — "input disabled: X server did not come up within 25s"
+
+Verified in sandbox first: Xvfb 21.1.x (same generation as Ubuntu noble)
+DOES honor `-listen tcp` (TCP connect to 6000+display OK), so the option was
+not the culprit - TIMING was: when the desktop cascade has to install Xvfb
+first (minutes on slow links), the control plane's single 25 s attempt plus
+single 30 s background retry both expire while apt is still running, and
+touch input then stays dead for the whole session even after X comes up.
+emux-capture's 30 s wait for /tmp/.X11-unix/X0 expired the same way, leaving
+the pane at "waiting for X frames" with a dead capture.
+
+Fixes:
+- connectControlPlane(timeout) + an endless 10 s-cadence background retry
+  until connected or desktop stop; transient pane wording
+  ("touch input: X TCP not up yet - retrying in background"), cleared on
+  success.
+- capture respawn watcher: while frameId==0 and <3 respawns, a dead
+  emux-capture is restarted automatically.
+- emux-capture X0 wait 30 s -> 180 s; emux-x11 foreign-apt wait 12 -> 30
+  rounds (5 min) for very slow first-run installs.
+ENV_VERSION 27, versionCode 59.

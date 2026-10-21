@@ -104,7 +104,10 @@ musl-loader exec (terminal only), then plain Android sh (CMD honored).
 
 ## Status / caveats
 
-- v0.1.58 debug build — not yet release-signed or R8-minified.
+- v0.1.59 debug build — not yet release-signed or R8-minified.
+  v0.1.59: control plane keeps retrying until X is up (no more permanent
+  "input disabled"), capture auto-respawns until first frame, longer
+  guest-side waits for slow first-run installs.
   v0.1.58: desktop no longer races the background desktop-stack install
   (waits for foreign apt/dpkg, heals between retries); v0.1.57 applied
   Install immediately to live sessions and added the capture-toolchain
