@@ -2060,6 +2060,50 @@ class BootstrapManager(private val ctx: Context) {
      * per process start, in a daemon thread, and no-ops on healthy systems
      * (three cheap File stats: dirty journal? shim present? stamp present?).
      */
+    /**
+     * v0.1.56 FIELD FIX: helper scripts (emux-x11 / emux-apt-repair / probe)
+     * were ONLY re-seeded inside bootstrap passes - which never run again on a
+     * stamped rootfs. A device updated from an old APK therefore kept running
+     * OLD in-guest helpers forever: the field device still executed the
+     * pre-repair emux-x11 (no journal quarantine, no apt retries), which is
+     * why the desktop cascade kept dying with "E: dpkg was interrupted" even
+     * though v0.1.53+ shipped the cure. Re-seed whenever the completion
+     * marker's ENV stamp is older than this APK's.
+     */
+    private fun reseedHelpersIfNeeded(dest: File) {
+        runCatching {
+            val marker = runCatching { FsLayout.prefixFile(ctx).readText().trim() }.getOrDefault("")
+            val env = marker.substringBefore(':').toIntOrNull() ?: 0
+            if (env >= FsLayout.ENV_VERSION) return
+            com.emux.EmuXLog.i("helper re-seed: marker env $env < ${FsLayout.ENV_VERSION} - refreshing in-rootfs helpers")
+            val staged = stageHelperAssets()
+            installHelperScripts(dest, staged) { _, _ -> }
+            FsLayout.markBootstrapped(ctx, FsLayout.installedDistroId(ctx))
+        }.onFailure { com.emux.EmuXLog.e("helper re-seed failed (non-fatal)", it) }
+    }
+
+    /**
+     * v0.1.56: synchronous dpkg/apt heal for the desktop path. The desktop
+     * cascade in emux-x11 cannot heal a dirty journal on devices whose
+     * in-rootfs helper copy predates emux-apt-repair; running the repair from
+     * the app side BEFORE the X session starts makes the cascade's apt install
+     * of Xvfb & friends actually succeed.
+     */
+    fun desktopPreRepair() {
+        runCatching {
+            val spec = DistroCatalog.requested(ctx)
+            if (spec.pkg != PkgManager.APT) return
+            val dest = FsLayout.linuxRoot(ctx)
+            if (!File(dest, "etc").isDirectory) return
+            val proot = FsLayout.prootBin(ctx)
+            if (!proot.isFile) return
+            if (!aptJournalDirty(dest) && File(dest, "var/lib/emux-repair.stamp").isFile) return
+            installLinkFixShim(dest)
+            val r = runRepairProot(proot, dest)
+            com.emux.EmuXLog.i("desktopPreRepair: ok=${r.ok} tail=${r.tail.take(200)}")
+        }.onFailure { com.emux.EmuXLog.e("desktopPreRepair failed (non-fatal)", it) }
+    }
+
     fun startupRepairAsync(force: Boolean = false) {
         synchronized(Companion) {
             if (startupRepairStarted && !force) return
@@ -2073,6 +2117,7 @@ class BootstrapManager(private val ctx: Context) {
                 if (!File(dest, "etc").isDirectory) return@runCatching
                 val proot = FsLayout.prootBin(ctx)
                 if (!proot.isFile) return@runCatching
+                reseedHelpersIfNeeded(dest)   // v0.1.56: refresh OLD in-rootfs helpers
                 val shim = File(dest, "usr/local/lib/emux/libemux-linkfix.so")
                 val stamp = File(dest, "var/lib/emux-repair.stamp")
                 // v0.1.55: ALSO heal missing base/desktop packages. The field

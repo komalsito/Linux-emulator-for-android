@@ -108,9 +108,12 @@ class VtTerminalView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attr
 
     /** Scroll the viewport by [deltaRows] towards history (+) / live (-). */
     fun scrollViewportBy(deltaRows: Int) {
-        if (history.isEmpty()) return
-        val nv = (scrollOffset + deltaRows).coerceIn(0, history.size)
-        if (nv != scrollOffset) { scrollOffset = nv; markAllDirty(); invalidate() }
+        synchronized(modelLock) {
+            if (history.isEmpty()) return
+            val nv = (scrollOffset + deltaRows).coerceIn(0, history.size)
+            if (nv != scrollOffset) { scrollOffset = nv; markAllDirty() }
+        }
+        invalidate()
     }
 
     /** Page through scrollback: +1 page up (older), -1 page down (towards live). */
@@ -118,7 +121,10 @@ class VtTerminalView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attr
 
     /** Jump back to the live edge. */
     fun scrollToEnd() {
-        if (scrollOffset != 0) { scrollOffset = 0; markAllDirty(); invalidate() }
+        synchronized(modelLock) {
+            if (scrollOffset != 0) { scrollOffset = 0; markAllDirty() }
+        }
+        invalidate()
     }
 
     // ------------------------------------------------------------------ paint
@@ -153,6 +159,26 @@ class VtTerminalView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attr
 
     override fun onAttachedToWindow() {
         super.onAttachedToWindow()
+        // v0.1.56: start the parser thread (see feed())
+        if (parserThread == null) {
+            parserThread = Thread({
+                while (!Thread.currentThread().isInterrupted) {
+                    val first = runCatching { feedQueue.poll(300, java.util.concurrent.TimeUnit.MILLISECONDS) }.getOrNull()
+                        ?: continue
+                    synchronized(modelLock) {
+                        parseChunk(first)
+                        // drain the whole burst under one lock hold: one
+                        // coherent repaint instead of N partial ones
+                        while (true) {
+                            val nxt = feedQueue.poll() ?: break
+                            parseChunk(nxt)
+                        }
+                        markRowDirty(curY)
+                    }
+                    scheduleInvalidate()
+                }
+            }, "emux-vt-parser").apply { isDaemon = true; start() }
+        }
         if (tag == null) tag = "term"
         // v0.1.25 BUGFIX: request focus as soon as the view enters the window.
         // Previously focus only came from MainActivity.onResume's tag lookup or
@@ -192,7 +218,7 @@ class VtTerminalView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attr
         scheduleBlink()
     }
 
-    private fun resize(newRows: Int, newCols: Int) {
+    private fun resize(newRows: Int, newCols: Int) = synchronized(modelLock) {
         val old = screen
         val ns = buildScreen(newRows, newCols)
         for (y in 0 until minOf(old.size, newRows)) {
@@ -227,9 +253,12 @@ class VtTerminalView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attr
         }
 
     fun resetToDefaults() {
-        screen = buildScreen(rows, cols); curX = 0; curY = 0; pen = Style(); penIdx = 0
-        history.clear(); scrollOffset = 0   // v0.1.54: fresh session = fresh scrollback
-        markAllDirty()
+        synchronized(modelLock) {
+            screen = buildScreen(rows, cols); curX = 0; curY = 0; pen = Style(); penIdx = 0
+            history.clear(); scrollOffset = 0   // v0.1.54: fresh session = fresh scrollback
+            markAllDirty()
+        }
+        invalidate()
     }
 
     @Volatile var fedBytes: Long = 0L
@@ -249,8 +278,32 @@ class VtTerminalView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attr
     private var utf8Left = 0
     private var utf8Cp = 0
 
+    /**
+     * v0.1.56 ANR FIX ("app not responding" during `apt list`): feed() used to
+     * parse every chunk AND invalidate ON THE UI THREAD. A burst of a few
+     * thousand lines (apt list, log tails, cat of a big file) saturated the
+     * main looper with parse+full-repaint work until input dispatch timed
+     * out. Now feed() only enqueues; a dedicated parser thread mutates the
+     * model under [modelLock] and the UI thread repaints at a 30 fps cap.
+     */
+    private val feedQueue = java.util.concurrent.LinkedBlockingQueue<ByteArray>()
+    private val modelLock = Any()
+    @Volatile private var invalidatePending = false
+    private val invalidateRunnable = Runnable { invalidatePending = false; invalidate() }
+    private var parserThread: Thread? = null
+
+    private fun scheduleInvalidate() {
+        if (invalidatePending) return
+        invalidatePending = true
+        postDelayed(invalidateRunnable, 33)   // ~30 fps cap, coalesces bursts
+    }
+
     fun feed(bytes: ByteArray) {
         fedBytes += bytes.size          // v0.1.45 diag counter
+        feedQueue.add(bytes)
+    }
+
+    private fun parseChunk(bytes: ByteArray) {
         for (b in bytes) {
             val v = b.toInt() and 0xFF
             if (utf8Left == 0) {
@@ -272,8 +325,6 @@ class VtTerminalView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attr
                 }
             }
         }
-        markRowDirty(curY)
-        invalidate()
     }
 
     // ANSI state machine
@@ -553,6 +604,10 @@ class VtTerminalView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attr
     // ------------------------------------------------------------------ draw
     override fun onDraw(canvas: Canvas) {
         super.onDraw(canvas)
+        synchronized(modelLock) { drawLocked(canvas) }
+    }
+
+    private fun drawLocked(canvas: Canvas) {
         canvas.drawColor(BG_COLOR)
         val fm = textPaint.fontMetrics
         // v0.1.54: render the scrollback window (history + live grid) instead of
@@ -658,6 +713,12 @@ class VtTerminalView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attr
      * keyboard on every window-focus gain so typing is never silently dead.
      * (Merged into the pre-existing focus override that drives cursor blink.)
      */
+    override fun onDetachedFromWindow() {
+        super.onDetachedFromWindow()
+        runCatching { parserThread?.interrupt() }; parserThread = null
+        removeCallbacks(invalidateRunnable)
+    }
+
     override fun onWindowFocusChanged(hasFocus: Boolean) {
         super.onWindowFocusChanged(hasFocus)
         if (hasFocus) { scheduleBlink(); post { showKeyboard() } }

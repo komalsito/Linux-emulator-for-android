@@ -420,3 +420,21 @@ Root causes & fixes:
 5. ROTATING DESKTOP ERRORS UNCAPTURABLE: pane overwrote errorText on every
    transition. Fix: DesktopService.setError() keeps a 5-entry timestamped
    ring shown in the pane AND appended to files/logs/desktop.log.
+
+## 12. v0.1.56 field round — apt-list ANR, stale in-rootfs helpers
+
+1. ANR ("app not responding") during `apt list`: feed() parsed every chunk
+   and invalidated ON THE UI THREAD; a multi-thousand-line burst saturated
+   the main looper (parse + full repaint per chunk) until input dispatch
+   timed out. Fix: feed() enqueues; a dedicated parser thread mutates the
+   model under a lock (burst drained per lock hold) and the UI repaints at a
+   30 fps coalesced cap. All UI-thread model mutators (resize, reset,
+   scroll) now take the same lock.
+2. Desktop still "E: dpkg was interrupted / unable to locate packages":
+   helper scripts were re-seeded ONLY inside bootstrap passes, which never
+   run on a stamped rootfs - updated devices kept executing their OLD
+   in-rootfs emux-x11 (pre-repair, pre-retry) forever. Fix:
+   reseedHelpersIfNeeded() at app start (marker ENV stamp < ENV_VERSION ->
+   stageHelperAssets + installHelperScripts + re-stamp), and
+   DesktopService.startDesktop() now runs BootstrapManager.desktopPreRepair()
+   (journal heal + shim) BEFORE launching the X session cascade.

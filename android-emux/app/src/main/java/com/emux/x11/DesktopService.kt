@@ -207,6 +207,12 @@ class DesktopService(
                 // (black desktop forever). The helper dir is already prepended to
                 // PATH by FsLayout.sessionEnv + exported as EMUX_BIN, so plain
                 // `emux-x11 <wm>` resolves without any inline quoting at all.
+                // v0.1.56: heal dpkg BEFORE the cascade runs - on devices whose
+                // in-rootfs helpers predate emux-apt-repair the cascade itself
+                // cannot recover from a dirty journal ("E: dpkg was
+                // interrupted" -> no Xvfb -> exit 1 -> rotating pane errors).
+                com.emux.core.BootstrapManager(ctx).desktopPreRepair()
+
                 val cmd = "emux-x11 $wmCommand"
                 xSession = TerminalSession(9001, ctx, root, cmd).also { it.start() }
 

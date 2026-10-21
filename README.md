@@ -104,7 +104,9 @@ musl-loader exec (terminal only), then plain Android sh (CMD honored).
 
 ## Status / caveats
 
-- v0.1.55 debug build — not yet release-signed or R8-minified.
+- v0.1.56 debug build — not yet release-signed or R8-minified.
+  v0.1.56: off-UI-thread VT parsing (fixes apt-list ANR), helper re-seed on
+  upgraded devices, dpkg pre-heal before the desktop cascade.
   v0.1.55: guest-PTY upgrade on seccomp-strict ROMs (real PTY instead of raw
   pipes), UTF-8 rendering + ONLCR emulation, startup gap-healing of missing
   base/desktop packages, desktop error history in pane + files/logs/desktop.log.
