@@ -650,8 +650,13 @@ class BootstrapManager(private val ctx: Context) {
             // v0.1.10: use BootstrapDiagnostics so linkage errors show WHICH class
             // is missing instead of a bare "NoClassDefFoundError".
             com.emux.core.BootstrapDiagnostics.dumpFull(ctx, e)
+            // v0.1.50: embed the RUNNING app version in every failure banner —
+            // field screenshots otherwise cannot prove which build produced
+            // them (the v0.1.48/49 round turned out to be a device still on
+            // 0.1.47; only the error string gave it away).
             BootstrapReporter.publishError(
-                ctx, com.emux.core.BootstrapDiagnostics.describe(e))
+                ctx, "v${com.emux.EmuXLog.appVersion(ctx)} · " +
+                    com.emux.core.BootstrapDiagnostics.describe(e))
             slot.finish(Result.failure(e))
         }
     }

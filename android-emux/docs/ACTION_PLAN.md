@@ -237,6 +237,16 @@ Pitfalls checklist (each caused a real crash/bug once):
   and every message named the dead legacy path ("rootfs missing at
   …/files/linuxroot", PROBE_NOROOTFS) even though a distro WAS on disk.
   Fix: scan "$(dirname "$HOME")/distros"/* FIRST, before legacy fallbacks.
+- v0.1.50: (a) bootstrap failure banners now embed the RUNNING app version
+  ("v0.1.50 · RuntimeException: …") — the 0.1.48/49 field round was actually a
+  device still executing 0.1.47 (banner string provenance + the process-scoped
+  BootstrapReporter LiveData prove it), so ALWAYS read the version prefix
+  before diagnosing; the top bar also shows v<name> · root status.
+  (b) LIVE distro switching: SharedPreferences listener in MainActivity —
+  selecting an installed distro re-stamps + restarts bound sessions + hides
+  the pane immediately; selecting an uninstalled one shows the Install pane
+  at once. (Listener MUST stay a field: SharedPreferences keeps listeners by
+  weak reference.)
 - Keystore: NOW COMMITTED (`android-emux/debug-keystore/emux-debug.jks`,
   pass `emuxdebug`, alias `emux`) — signatures are stable across sandboxes;
   no more uninstall churn after the one-time pre-0.1.47 migration.
@@ -271,7 +281,8 @@ v0.1.48 extraction correctness: wrapper-dir unwrap + PAX/GNU-long-header
 handling + absolute/forward hardlink resolution (field bug: v0.1.47 Ubuntu
 install aborted post-extract); all five images verified byte-faithful vs
 system tar in sandbox · v0.1.49 launcher/probe distro-fallback scan order
-(scan files/distros before legacy linuxroot fallbacks).
+(scan files/distros before legacy linuxroot fallbacks) · v0.1.50 version-
+tagged failure banners + live distro switching (pref listener).
 
 ## 9. Field-report protocol (keep using it)
 Every failure banner embeds: android/model/targetSdk/selinux, exec(loader),

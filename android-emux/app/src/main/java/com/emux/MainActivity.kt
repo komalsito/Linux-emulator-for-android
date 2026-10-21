@@ -49,6 +49,33 @@ class MainActivity : AppCompatActivity() {
     private val notifPermission =
         registerForActivityResult(ActivityResultContracts.RequestPermission()) { /* fine if denied */ }
 
+    /**
+     * v0.1.50 LIVE DISTRO SWITCH (field complaint: "only switches when the
+     * app is closed and reopened"). SharedPreferences listeners are held by
+     * WEAK reference, so this must be a field, not a lambda passed inline.
+     * Selecting an already-installed distro re-stamps the marker, restarts
+     * sessions bound to the old rootfs and hides the Install pane immediately;
+     * selecting a distro that is not on disk shows the Install pane at once.
+     */
+    private val distroPrefListener =
+        android.content.SharedPreferences.OnSharedPreferenceChangeListener { _, key ->
+            if (key == com.emux.core.DistroCatalog.PREF_KEY) {
+                b.root.post {
+                    try {
+                        if (com.emux.core.FsLayout.ensureMarkerForExistingRootfs(this)) {
+                            restartStaleDistroSessions()
+                            hideBootstrapUi()
+                            ensureSessionAttached()
+                        } else {
+                            showBootstrapUiOnly()
+                        }
+                    } catch (e: Throwable) {
+                        com.emux.EmuXLog.e("distro pref change handling failed", e)
+                    }
+                }
+            }
+        }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         // v0.1.3 CRASH FIX: wrap the ENTIRE startup path. Any exception thrown
         // here (missing resource, OEM view-inflation quirk, corrupt prefs…) used
@@ -84,6 +111,8 @@ class MainActivity : AppCompatActivity() {
 
         wireTabs()
         wireExtraKeys()
+        androidx.preference.PreferenceManager.getDefaultSharedPreferences(this)
+            .registerOnSharedPreferenceChangeListener(distroPrefListener)
         requestNotificationIfNeeded()
         observeSessions()
         // v0.1.3: session attach + root detection are deferred until AFTER the
@@ -158,6 +187,14 @@ class MainActivity : AppCompatActivity() {
                 }
             }
         }
+    }
+
+    override fun onDestroy() {
+        runCatching {
+            androidx.preference.PreferenceManager.getDefaultSharedPreferences(this)
+                .unregisterOnSharedPreferenceChangeListener(distroPrefListener)
+        }
+        super.onDestroy()
     }
 
     /**
