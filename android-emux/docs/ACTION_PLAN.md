@@ -614,3 +614,21 @@ ENV_VERSION 31, versionCode 63.
   cascade becomes a fallback instead of the only path.
 - desktopPreRepair returns String? (bare returns needed nulls - Kotlin).
 versionCode 65.
+
+## 20. v0.1.67 — shim v2: copy-fallback hardlink (the device-proof fix)
+
+v0.1.66 field result: status-old EACCES persisted even with the shim loaded
+AND LD_PRELOAD set AND the seccomp probe. Root insight: on arm64 glibc
+implements link() AS linkat(), so the v0.1.53 link->linkat rewrite was a
+no-op there - the broken syscall on this kernel/proot combo is the one
+dpkg actually calls, and no amount of rerouting helps.
+Shim v2 therefore intercepts link() AND linkat() and, when the real syscall
+fails with EACCES/EEXIST/EPERM/ENOSYS, FALLS BACK TO COPYING the file
+contents to the new name and reports success. dpkg's status->status-old
+backup only needs the contents at the new name; legitimate failures
+(missing source, unwritable directory) reproduce through the copy and keep
+their errno. Verified in sandbox: passthrough keeps true hardlinks + true
+errnos; forced/cross-device cases produce byte-identical copies; the
+dpkg-style unlink+link backup loop succeeds repeatedly.
+EMUX_LINKFIX_FORCE=1 forces the copy path (self-test hook).
+All four ABI assets rebuilt; versionCode 67.
