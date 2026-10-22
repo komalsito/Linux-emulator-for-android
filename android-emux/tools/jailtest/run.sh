@@ -1,0 +1,65 @@
+#!/bin/sh
+# run.sh - regression-test the REAL desktop cascade scripts in the jail.
+#
+#   sh tools/jailtest/run.sh [x11-script] [repair-script]
+#
+# Defaults to the scripts in this tree. Scenarios (field state = ghost xvfb /
+# x11 stack in the dpkg db, see mkjail.sh):
+#   NEW    : run the given emux-x11 -> MUST purge the ghosts, install the
+#            stack, launch the stub Xvfb (X0 socket + xvfb.log) and exit 0.
+#   REPAIR : ghost coreutils (marker deleted) -> emux-apt-repair MUST purge
+#            the db entry, reinstall the base packages and refresh
+#            /tmp/emux_selfcheck (LINK_OK on a healthy fs).
+#   OLD    : if git history is available, the v0.1.77 emux-x11 (bd48cb8) is
+#            run against the same state and MUST fail with "no X server
+#            available" - proving the harness reproduces the field pane.
+# Exit code 0 = all scenarios behaved as expected.
+T="${JAILTEST_TMP:-/tmp/emux-jailtest}"
+FR=$T/jail
+HERE=$(cd "$(dirname "$0")" && pwd)
+X11=${1:-$HERE/../../app/src/main/assets/bin/emux-x11}
+REPAIR=${2:-$HERE/../../app/src/main/assets/bin/emux-apt-repair}
+FAIL=0
+expect() { # $1 label, $2 0/1 wanted, $3 0/1 actual
+  if [ "$2" = "$3" ]; then echo "PASS $1"; else echo "FAIL $1"; FAIL=1; fi
+}
+runjail() { # $1 script $2 jailpath
+  cp "$1" "$FR$2" 2>/dev/null || { echo "cannot stage $1"; FAIL=1; return 1; }
+  chmod +x "$FR$2"
+  rm -f "$FR/actions.log"
+  chroot "$FR" /bin/sh -c "PATH=/usr/local/bin:/usr/bin:/bin; export PATH; exec $2 openbox"
+}
+
+echo "=== NEW: $(basename "$X11") against ghost-xvfb db ==="
+sh "$HERE/mkjail.sh" || exit 1
+runjail "$X11" /usr/local/bin/emux-x11 > "$T/new.log" 2>&1
+rc=$?
+[ -e "$FR/tmp/.X11-unix/X0" ]; expect "NEW: X0 socket created" 0 $?
+[ -e "$FR/tmp/xvfb.log" ]; expect "NEW: xvfb.log written" 0 $?
+[ "$rc" = "0" ]; expect "NEW: clean exit (rc=0, was: no X server available)" 0 $?
+grep -q "ghost package xvfb" "$T/new.log"; expect "NEW: ghost xvfb purged" 0 $?
+grep -q "apt-stub: installed xvfb" "$FR/actions.log" 2>/dev/null; expect "NEW: xvfb really installed" 0 $?
+
+echo "=== REPAIR: $(basename "$REPAIR") against ghost coreutils ==="
+sh "$HERE/mkjail.sh" || exit 1
+rm -f "$FR/usr/bin/id"
+runjail "$REPAIR" /usr/local/bin/emux-apt-repair > "$T/repair.log" 2>&1
+grep -q "ghost package coreutils" "$T/repair.log"; expect "REPAIR: ghost coreutils purged" 0 $?
+[ -e "$FR/usr/bin/id" ]; expect "REPAIR: coreutils marker restored" 0 $?
+grep -q "LINK_OK" "$FR/tmp/emux_selfcheck" 2>/dev/null; expect "REPAIR: selfcheck LINK_OK" 0 $?
+
+echo "=== OLD: v0.1.77 emux-x11 must STILL fail on the ghost db ==="
+if git -C "$HERE" rev-parse -q --verify bd48cb8 >/dev/null 2>&1; then
+  sh "$HERE/mkjail.sh" || exit 1
+  git -C "$HERE" show bd48cb8:android-emux/app/src/main/assets/bin/emux-x11 > "$T/x11-old.sh"
+  runjail "$T/x11-old.sh" /usr/local/bin/emux-x11 > "$T/old.log" 2>&1
+  rc=$?
+  [ ! -e "$FR/tmp/.X11-unix/X0" ]; expect "OLD: no X0 (field failure reproduced)" 0 $?
+  [ "$rc" != "0" ]; expect "OLD: non-zero exit" 0 $?
+  grep -q "no X server available" "$T/old.log"; expect "OLD: 'no X server available'" 0 $?
+else
+  echo "SKIP (git history unavailable)"
+fi
+
+[ "$FAIL" = "0" ] && echo "ALL SCENARIOS PASSED" || echo "REGRESSIONS DETECTED"
+exit $FAIL

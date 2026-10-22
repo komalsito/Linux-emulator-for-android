@@ -739,3 +739,16 @@ Changes:
   reinstalls the base packages; native shim tests: same-fs links stay true
   hardlinks, vanished source => success, copy fallback byte-identical.
 versionCode 78, rebuilt emux-debug.apk (same keystore).
+
+### 24.1 Tooling landed with v0.1.78 (reuse, do not re-invent)
+- `android-emux/tools/jailtest/` - the chroot-jail regression harness
+  (`mkjail.sh` builds a minimal jail with stub dpkg/apt-get that model apt's
+  no-op-on-installed semantics; `run.sh` runs the REAL emux-x11 /
+  emux-apt-repair unmodified against the ghost-db field state and asserts
+  purge/install/launch/selfcheck, plus re-runs v0.1.77 from git to prove the
+  harness still reproduces the field failure). 11 assertions, ~6 s, needs
+  root for chroot. RUN IT before shipping any edit to the cascade scripts.
+- `android-emux/tools/build-apk/manual-build.sh` - the executable form of
+  the §6 recipe that produced the v0.1.78 APK (gradle warm-up for classpaths
+  + resources, kotlinc outside the gradle JVM, javac binding, D8, package,
+  zipalign, apksigner with the committed keystore).
