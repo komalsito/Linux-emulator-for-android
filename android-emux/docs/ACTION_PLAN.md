@@ -673,3 +673,28 @@ genuinely missing source or unwritable directory still fails with its real
 errno (sandbox-verified: EXDEV auto-copies, ENOENT preserved, same-fs links
 stay true hardlinks).
 versionCode 75.
+
+## 23. v0.1.76 — root cause closed: the bundled proot itself was too old
+
+The v0.1.75 pane showed shim v4 LOADED and its copy fallback STILL failing
+with ENOENT: on this kernel every syscall touching the poisoned path leaf
+fails (link, openat, ...). That is exactly termux/proot#377 - the bundled
+proot (5.1.107.x, pre-July-2026) probes the FULL path including the
+nonexistent leaf during syscall translation, poisoning the dentry on
+certain Android kernels; upstream fixed it with parent-only probes (#378)
+and the outer-SIGSYS swallow (6b2b7cc). No guest-side shim can undo a
+poisoned dentry; the engine had to be upgraded.
+
+- assets/proot/<abi>/{proot,loader,loader32} = Termux proot 5.1.107.98 for
+  all four ABIs (verified: bionic interp /system/bin/linker64, PROOT_LOADER
+  and PROOT_TMP_DIR overrides present, version string 5.1.107.98). Stale
+  loader32 dropped on 32-bit ABIs (new package ships none; code checks
+  isFile before setting PROOT_LOADER_32).
+- startupRepair re-seeds files/native-bridge on existing devices - without
+  that, the old proot would survive every update because bootstrap never
+  re-runs on a stamped rootfs (same trap as the helper scripts in v0.1.56).
+- libtalloc/libandroid-shmem unchanged; linkfix shim kept as a belt (its
+  copy fallback now also covers ENOENT, v0.1.75).
+Expectation on the field device: dpkg's status-old backup works natively,
+the coreutils/xvfb core install completes, Xvfb starts, frames stream.
+versionCode 76.
