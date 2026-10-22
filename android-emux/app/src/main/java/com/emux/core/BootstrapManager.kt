@@ -60,6 +60,8 @@ class BootstrapManager(private val ctx: Context) {
             "id -u; } > /tmp/emux_selfcheck 2>&1; cat /tmp/emux_selfcheck >&2"
 
                 private const val APT_REPAIR_PAYLOAD =
+            // v0.1.70: belt INSIDE the guest shell (the path exists only there).
+            "[ -f /usr/local/lib/emux/libemux-linkfix.so ] && export LD_PRELOAD=/usr/local/lib/emux/libemux-linkfix.so; " +
             "export DEBIAN_FRONTEND=noninteractive; " +
             "SHIM=/usr/local/lib/emux/libemux-linkfix.so; " +
             "if [ -f \"\$SHIM\" ]; then grep -qsx \"\$SHIM\" /etc/ld.so.preload || echo \"\$SHIM\" >> /etc/ld.so.preload; fi; " +
@@ -1719,9 +1721,11 @@ class BootstrapManager(private val ctx: Context) {
             "LANG" to "C",
             "PROOT_LOADER" to File(nb, "loader").absolutePath,
         )
-        // v0.1.63: explicit shim preload - do not rely on /etc/ld.so.preload alone
-        if (File(dest, "usr/local/lib/emux/libemux-linkfix.so").isFile)
-            env["LD_PRELOAD"] = "/usr/local/lib/emux/libemux-linkfix.so"
+        // v0.1.70 CRITICAL: the v0.1.63 "belt" set LD_PRELOAD on the HOST proot
+        // process with a GUEST path - Android's linker then refused to start
+        // proot at all ("CANNOT LINK EXECUTABLE ... libemux-linkfix.so not
+        // found"), killing every repair/apt proot run for seven versions.
+        // The belt now lives INSIDE the guest payload (APT_REPAIR_PAYLOAD).
         // v0.1.66: adaptive PROOT_NO_SECCOMP (see runRepairProot)
         if (FsLayout.prootNoSeccompFlag(ctx).isFile)
             env["PROOT_NO_SECCOMP"] = "1"
@@ -2137,8 +2141,8 @@ class BootstrapManager(private val ctx: Context) {
         )
         val l32 = File(nb, "loader32")
         if (l32.isFile) env["PROOT_LOADER_32"] = l32.absolutePath
-        if (File(dest, "usr/local/lib/emux/libemux-linkfix.so").isFile)
-            env["LD_PRELOAD"] = "/usr/local/lib/emux/libemux-linkfix.so"
+        // v0.1.70: guest-side belt only (see APT_REPAIR_PAYLOAD); host env
+        // must NEVER carry the guest preload path (see runAptProot).
         // v0.1.66: adaptive - once the selfcheck proves the seccomp avoider is
         // the link(2) breaker on this kernel, every proot run disables it.
         if (noSeccomp || FsLayout.prootNoSeccompFlag(ctx).isFile)
@@ -2238,6 +2242,12 @@ class BootstrapManager(private val ctx: Context) {
                 val proot = FsLayout.prootBin(ctx)
                 if (!proot.isFile) return@runCatching
                 reseedHelpersIfNeeded(dest)   // v0.1.56: refresh OLD in-rootfs helpers
+                // v0.1.70: ALWAYS refresh the shim - the healthy-skip below
+                // kept the v1 shim (which only overrode link(), a no-op on
+                // arm64 where glibc builds link() on linkat()) on the field
+                // device forever; v2 (link+linkat, copy fallback) never
+                // arrived. ~13-67 KB copy, cheap every startup.
+                installLinkFixShim(dest)
                 // v0.1.68: foreign-uid dpkg db rebuild (real-DAC EACCES path)
                 val sw = hostDpkgDbSwap(dest)
                 com.emux.EmuXLog.i("startupRepair: $sw")

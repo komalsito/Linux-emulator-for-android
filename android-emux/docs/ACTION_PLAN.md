@@ -632,3 +632,28 @@ errnos; forced/cross-device cases produce byte-identical copies; the
 dpkg-style unlink+link backup loop succeeds repeatedly.
 EMUX_LINKFIX_FORCE=1 forces the copy path (self-test hook).
 All four ABI assets rebuilt; versionCode 67.
+
+## 21. v0.1.70 — THE field pane finally talked: three stacked bugs, all now fixed
+
+Pane (v0.1.69) printed:
+  start: shim=true preload=true journalDirty=false prev=- xvfb=-
+  dpkg repair ok=false: CANNOT LINK EXECUTABLE ".../native-bridge/proot":
+  library "/usr/local/lib/emux/libemux-linkfix.so" not found: needed by
+  main executable
+
+1. HOST-SIDE LD_PRELOAD WITH A GUEST PATH (v0.1.63-0.1.69): the "belt" made
+   Android's linker refuse to start proot itself - every repair/apt proot
+   run died instantly for seven versions. Removed from both host envs; the
+   belt now lives inside the GUEST payload
+   ([ -f shim ] && export LD_PRELOAD=shim) where the path exists.
+2. SHIM v1 WAS AN ARM64 NO-OP: it overrode link(), but arm64 glibc
+   implements link() via linkat() internally - never interposable. v2
+   (v0.1.67) intercepts link AND linkat with a copy fallback, but...
+3. ...v2 NEVER REACHED THE DEVICE: startupRepair/desktopPreRepair skipped
+   installLinkFixShim when "healthy" (old v1 file present). Shim install is
+   now unconditional at startup repair (13-67 KB copy).
+With all three fixed the chain is: proot starts -> guest dpkg gets the v2
+shim via preload file + guest LD_PRELOAD -> linkat EACCES falls back to a
+content copy -> status-old backup succeeds -> coreutils/xkb/Xvfb install ->
+X starts -> frames stream.
+versionCode 70.
