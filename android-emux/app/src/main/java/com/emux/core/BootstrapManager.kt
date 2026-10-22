@@ -2257,6 +2257,12 @@ class BootstrapManager(private val ctx: Context) {
                 if (!File(dest, "etc").isDirectory) return@runCatching
                 val proot = FsLayout.prootBin(ctx)
                 if (!proot.isFile) return@runCatching
+                // v0.1.76: the bundled proot is now the current Termux build
+                // (5.1.107.98, carries the termux/proot#377/#378 link-translation
+                // fixes). Existing devices keep files/native-bridge from THEIR
+                // install time unless we re-seed it here - bootstrap never
+                // re-runs on a stamped rootfs.
+                installNativeBridge()
                 reseedHelpersIfNeeded(dest)   // v0.1.56: refresh OLD in-rootfs helpers
                 // v0.1.70: ALWAYS refresh the shim - the healthy-skip below
                 // kept the v1 shim (which only overrode link(), a no-op on
