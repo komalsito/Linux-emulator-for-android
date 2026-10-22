@@ -73,13 +73,19 @@ class DesktopView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attrs) 
             // field-visible proof of WHY X/capture died (Xvfb log, apk, nc…).
             // v0.1.45: while waiting, also show the live capture/X log tail so
             // the pane is never silent (errorText only lands on terminal events).
-            val err = desktop?.errorText?.value
+            // v0.1.69 FIELD FIX: the pane canvas - the ONLY surface users
+            // actually screenshot - painted errorText, i.e. the single newest
+            // line. Every history/selfcheck/diagnostic improvement since
+            // v0.1.55 landed in the status TextView or the history ring and
+            // never appeared here. Paint the FULL history (start note,
+            // selfcheck, DBSWAP, xvfb.log tails, errors) plus the live line.
+            val err = desktop?.errorHistoryText()?.takeIf { it != "?" && it.isNotBlank() }
                 ?: desktop?.diagTail()?.takeIf { it.isNotBlank() }
             if (!err.isNullOrBlank()) {
                 val pe = Paint().apply { color = Color.argb(0xD0, 0xFF, 0x8A, 0x65); textSize = 18f }
                 var y = height / 2f + 36f
-                for (line in err.lineSequence().filter { it.isNotBlank() }.take(10)) {
-                    canvas.drawText(line.take(150), 24f, y, pe)
+                for (line in err.lineSequence().filter { it.isNotBlank() }.take(16)) {
+                    canvas.drawText(line.take(190), 24f, y, pe)
                     y += 24f
                 }
             }
