@@ -26,9 +26,15 @@
 
 #define AT_FDCWD (-100)
 #define EPERM 1
+#define ENOENT 2
+#define EIO 5
 #define EACCES 13
 #define EEXIST 17
+#define EINVAL 22
+#define EMLINK 31
 #define ENOSYS 38
+#define EXDEV 18
+#define EDQUOT 122
 
 #define O_RDONLY 0
 #define O_WRONLY 1
@@ -252,8 +258,16 @@ static int linkat_emux(int dfd1, const char *oldpath, int dfd2, const char *newp
 {
     long r = linkat_sc(dfd1, (long)oldpath, dfd2, (long)newpath, 0);
     if (r == 0) return 0;
+    /* v0.1.75: the field device's bogus errno turned out to be ENOENT
+     * (proot dentry poisoning answers the hardlink syscall with "No such
+     * file" for paths that exist), on top of EACCES/EEXIST elsewhere. The
+     * set is safe to widen because the copy re-derives the TRUE error:
+     * a genuinely missing source or unwritable directory fails inside
+     * copy_file with its real errno. */
     if (!getenv("EMUX_LINKFIX_FORCE") &&
-        !(r == -EACCES || r == -EEXIST || r == -EPERM || r == -ENOSYS)) {
+        !(r == -EACCES || r == -EEXIST || r == -EPERM || r == -ENOSYS ||
+          r == -ENOENT || r == -EXDEV || r == -EIO || r == -EMLINK ||
+          r == -EDQUOT || r == -EINVAL)) {
         *__errno_location() = (int)-r;
         return -1;
     }

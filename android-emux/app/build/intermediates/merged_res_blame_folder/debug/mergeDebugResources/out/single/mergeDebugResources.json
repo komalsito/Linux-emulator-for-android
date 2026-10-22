@@ -1,38 +1,34 @@
 [
     {
+        "merged": "com.emux.app-debug-49:/xml_backup_rules.xml.flat",
+        "source": "com.emux.app-main-51:/xml/backup_rules.xml"
+    },
+    {
         "merged": "com.emux.app-debug-49:/xml_preferences.xml.flat",
         "source": "com.emux.app-main-51:/xml/preferences.xml"
     },
     {
-        "merged": "/opt/gradle-home/daemon/8.7/com.emux.app-debug-49:/xml_data_extraction_rules.xml.flat",
-        "source": "/opt/gradle-home/daemon/8.7/com.emux.app-main-51:/xml/data_extraction_rules.xml"
+        "merged": "com.emux.app-debug-49:/color_tab_text.xml.flat",
+        "source": "com.emux.app-main-51:/color/tab_text.xml"
     },
     {
-        "merged": "/opt/gradle-home/daemon/8.7/com.emux.app-debug-49:/xml_backup_rules.xml.flat",
-        "source": "/opt/gradle-home/daemon/8.7/com.emux.app-main-51:/xml/backup_rules.xml"
+        "merged": "com.emux.app-debug-49:/drawable_ic_emux_notif.xml.flat",
+        "source": "com.emux.app-main-51:/drawable/ic_emux_notif.xml"
     },
     {
-        "merged": "/opt/gradle-home/daemon/8.7/com.emux.app-debug-49:/mipmap-anydpi-v26_ic_launcher.xml.flat",
-        "source": "/opt/gradle-home/daemon/8.7/com.emux.app-main-51:/mipmap-anydpi-v26/ic_launcher.xml"
+        "merged": "com.emux.app-debug-49:/mipmap-anydpi-v26_ic_launcher.xml.flat",
+        "source": "com.emux.app-main-51:/mipmap-anydpi-v26/ic_launcher.xml"
     },
     {
-        "merged": "/opt/gradle-home/daemon/8.7/com.emux.app-debug-49:/color_tab_text.xml.flat",
-        "source": "/opt/gradle-home/daemon/8.7/com.emux.app-main-51:/color/tab_text.xml"
+        "merged": "com.emux.app-debug-49:/xml_usb_device_filter.xml.flat",
+        "source": "com.emux.app-main-51:/xml/usb_device_filter.xml"
     },
     {
-        "merged": "/opt/gradle-home/daemon/8.7/com.emux.app-debug-49:/xml_preferences.xml.flat",
-        "source": "/opt/gradle-home/daemon/8.7/com.emux.app-main-51:/xml/preferences.xml"
+        "merged": "com.emux.app-debug-49:/layout_activity_main.xml.flat",
+        "source": "com.emux.app-main-51:/layout/activity_main.xml"
     },
     {
-        "merged": "/opt/gradle-home/daemon/8.7/com.emux.app-debug-49:/layout_activity_main.xml.flat",
-        "source": "/opt/gradle-home/daemon/8.7/com.emux.app-main-51:/layout/activity_main.xml"
-    },
-    {
-        "merged": "/opt/gradle-home/daemon/8.7/com.emux.app-debug-49:/drawable_ic_emux_notif.xml.flat",
-        "source": "/opt/gradle-home/daemon/8.7/com.emux.app-main-51:/drawable/ic_emux_notif.xml"
-    },
-    {
-        "merged": "/opt/gradle-home/daemon/8.7/com.emux.app-debug-49:/xml_usb_device_filter.xml.flat",
-        "source": "/opt/gradle-home/daemon/8.7/com.emux.app-main-51:/xml/usb_device_filter.xml"
+        "merged": "com.emux.app-debug-49:/xml_data_extraction_rules.xml.flat",
+        "source": "com.emux.app-main-51:/xml/data_extraction_rules.xml"
     }
 ]

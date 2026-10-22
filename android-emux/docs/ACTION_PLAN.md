@@ -657,3 +657,19 @@ shim via preload file + guest LD_PRELOAD -> linkat EACCES falls back to a
 content copy -> status-old backup succeeds -> coreutils/xkb/Xvfb install ->
 X starts -> frames stream.
 versionCode 70.
+
+## 22. v0.1.75 — the device's bogus errno was ENOENT all along
+
+The v0.1.74 pane dumped the unfiltered selfcheck and finally showed the
+real errno: `ln: failed to create hard link ...: No such file or directory`
+- proot's dentry poisoning on this kernel answers the hardlink syscall with
+ENOENT for paths that exist (EACCES/EEXIST on other devices). The shim's
+fallback set did not include ENOENT, so every dpkg backup still failed, the
+coreutils install died 30/30 cascade retries, Xvfb stayed absent
+(`xvfb.log: <absent - Xvfb never launched>`).
+Shim v4 widens the fallback set to EACCES/EEXIST/EPERM/ENOSYS/ENOENT/EXDEV/
+EIO/EMLINK/EDQUOT/EINVAL. Safe: the copy re-derives the true error, so a
+genuinely missing source or unwritable directory still fails with its real
+errno (sandbox-verified: EXDEV auto-copies, ENOENT preserved, same-fs links
+stay true hardlinks).
+versionCode 75.
