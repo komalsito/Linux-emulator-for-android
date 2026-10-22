@@ -121,6 +121,12 @@ for p in $pkgs; do
 # noble-model Xvfb: -noshmem was REMOVED in xorg-server 21.1 -> fatal error;
 # /tmp/xvfb-slow (one shot) models a slow first start (font scan under proot).
 echo "args: $*" >> /tmp/xvfb-args
+if [ -e /tmp/.X11-unix/X0 ]; then
+  echo "saw-stale-socket" >> /tmp/xvfb-args
+  echo "(EE) Cannot establish any listening sockets - Make sure an X server isn't already running" > /tmp/xvfb.log
+  echo "(EE) Fatal server error: Cannot establish any listening sockets" >> /tmp/xvfb.log
+  exit 1
+fi
 for a in "$@"; do
   if [ "$a" = "-noshmem" ]; then
     echo "(EE) Unrecognized option: -noshmem" > /tmp/xvfb.log

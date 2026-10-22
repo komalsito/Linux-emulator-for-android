@@ -56,6 +56,20 @@ grep -q "alive but X0 not up in 45 s\|X0 never appeared" "$T/slow.log" && \
   expect "SLOW: no blind kill/flag-switch message" 1 0 || \
   expect "SLOW: no blind kill/flag-switch message" 0 0
 
+echo "=== STALE: leftover X0 socket + lock from a SIGKILLed server ==="
+sh "$HERE/mkjail.sh" || exit 1
+mkdir -p "$FR/tmp/.X11-unix"
+: > "$FR/tmp/.X11-unix/X0"; : > "$FR/tmp/.X0-lock"
+runjail "$X11" /usr/local/bin/emux-x11 > "$T/stale.log" 2>&1
+rc=$?
+[ "$rc" = "0" ]; expect "STALE: clean exit despite stale socket" 0 $?
+[ -e "$FR/tmp/.X11-unix/X0" ]; expect "STALE: X0 recreated" 0 $?
+if [ -e "$FR/tmp/xvfb-args" ] && grep -q "saw-stale-socket" "$FR/tmp/xvfb-args"; then
+  expect "STALE: sweep dropped socket before launch" 1 0
+else
+  expect "STALE: sweep dropped socket before launch" 0 0
+fi
+
 echo "=== REPAIR: $(basename "$REPAIR") against ghost coreutils ==="
 sh "$HERE/mkjail.sh" || exit 1
 rm -f "$FR/usr/bin/id"

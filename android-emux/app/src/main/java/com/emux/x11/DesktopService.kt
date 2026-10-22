@@ -90,11 +90,22 @@ class DesktopService(
         val line = "[${java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.US).format(java.util.Date())}] $msg"
         synchronized(errHistory) {
             errHistory.addLast(line)
-            while (errHistory.size > 6) errHistory.removeFirst()
+            // v0.1.80: 6 lines rotated away faster than the user could read
+            // the pane ("auto scrolls and only leaves a couple lines"); the
+            // pane keeps a longer window now, and the full log lives in the
+            // two mirror files below.
+            while (errHistory.size > 24) errHistory.removeFirst()
         }
         runCatching {
             val f = java.io.File(ctx.filesDir, "logs").apply { mkdirs() }
             java.io.File(f, "desktop.log").appendText(line + "\n")
+        }
+        // v0.1.80: guest-visible mirror - `cat /tmp/emux_desktop_diag.log` in
+        // the Terminal tab shows the WHOLE desktop session story without adb
+        // (the pane only ever shows a window; this never rotates away).
+        runCatching {
+            java.io.File(com.emux.core.FsLayout.linuxRoot(ctx), "tmp/emux_desktop_diag.log")
+                .appendText(line + "\n")
         }
         com.emux.EmuXLog.i("desktop: $msg")
     }
@@ -294,6 +305,9 @@ class DesktopService(
 
                 val cmd = "emux-x11 $wmCommand"
                 xRespawns = 0
+                // v0.1.80: tell the user WHERE the full log lives - the pane
+                // only shows a scrolling window; the diag file never rotates.
+                noteInfo("full desktop log: Terminal tab -> cat /tmp/emux_desktop_diag.log (or adb pull files/logs/desktop.log)")
                 xSession = TerminalSession(9001, ctx, root, cmd).also { it.start() }
 
                 // v0.1.18 BUGFIX #6: if the X server session dies (launcher exec
@@ -315,6 +329,12 @@ class DesktopService(
                                 com.emux.EmuXLog.i("desktop: x11 session died before first frame - respawning (#$xRespawns)")
                                 noteInfo("x11 session died pre-frames - respawning (#$xRespawns)")
                                 kotlinx.coroutines.delay(2_000)
+                                // v0.1.80: host-authoritative cleanup BEFORE the
+                                // new session: proot tracees (a half-alive Xvfb
+                                // holding :0/tcp-6000) survive guest-side kills,
+                                // and a retry into them dies with "Cannot
+                                // establish any listening sockets" (field pane).
+                                runCatching { killDesktopGuests() }
                                 xSession = TerminalSession(9001 + xRespawns, ctx, root, cmd).also { it.start() }
                                 pumpDiag("x11", xSession!!)
                                 return@collect
@@ -417,8 +437,14 @@ class DesktopService(
                         runCatching {
                             val xl = java.io.File(rootfs, "tmp/xvfb.log")
                             noteInfo("xvfb.log: " + (if (xl.isFile) xl.readText().lineSequence()
-                                .filter { it.isNotBlank() }.toList().takeLast(3).joinToString(" | ").take(350)
+                                .filter { it.isNotBlank() }.toList().takeLast(6).joinToString(" | ").take(600)
                             else "<absent - Xvfb never launched>"))
+                            // v0.1.80: the PREVIOUS attempt's log too - the
+                            // field needs the first death reason, not only
+                            // the last relaunch's.
+                            val xl1 = java.io.File(rootfs, "tmp/xvfb.log.1")
+                            if (xl1.isFile) noteInfo("xvfb.log.1: " + xl1.readText().lineSequence()
+                                .filter { it.isNotBlank() }.toList().takeLast(4).joinToString(" | ").take(400))
                             val sc = java.io.File(rootfs, "tmp/emux_selfcheck")
                             if (sc.isFile) noteInfo("selfcheck: " + sc.readText().take(350))
                             // v0.1.77: dpkg's OWN log - names the exact package
@@ -451,8 +477,12 @@ class DesktopService(
                         val xl = java.io.File(rootfs, "tmp/xvfb.log")
                         noteInfo("ctrl-wait expired. x11: " + xt.take(250) +
                             " | xvfb.log: " + (if (xl.isFile) xl.readText().lineSequence()
-                                .filter { it.isNotBlank() }.toList().takeLast(2).joinToString(" | ").take(250)
-                            else "<absent>"))
+                                .filter { it.isNotBlank() }.toList().takeLast(4).joinToString(" | ").take(400)
+                            else "<absent>") +
+                            (if (java.io.File(rootfs, "tmp/xvfb.log.1").isFile)
+                                " | xvfb.log.1: " + java.io.File(rootfs, "tmp/xvfb.log.1").readText()
+                                    .lineSequence().filter { it.isNotBlank() }.toList().takeLast(3)
+                                    .joinToString(" | ").take(300) else ""))
                     }
                     errorText.value = "touch input: X TCP not up yet - retrying in background"
                     scope.launch {

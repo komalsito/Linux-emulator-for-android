@@ -45,15 +45,23 @@ export PATH
 # survive session stops and app deaths (proot tracees are detached, not
 # killed) and keep tcp/7001 + X connections open, which made the NEXT desktop
 # start die with "bind failed: EADDRINUSE" on the Android side.
-for CMDF in /proc/[0-9]*/cmdline; do
-  if tr "\0" " " < "$CMDF" 2>/dev/null | grep -qE "Xvfb :0|Xorg :0|emux-capture|xwd"; then
-    K=${CMDF#/proc/}; K=${K%/cmdline}
-    [ "$K" != "$$" ] && kill "$K" 2>/dev/null
-  fi
-done
-sleep 0.3
-mkdir -p /tmp/.X11-unix
-rm -f /tmp/.X0-lock /tmp/.X11-unix/X0 /tmp/emux_wm_launched /tmp/emux_xvfb_restarted 2>/dev/null
+# v0.1.80: factored into kill_stale_x() so EVERY launch attempt (first,
+# retry, death-restart) re-sweeps and drops stale sockets - the v0.1.79
+# field pane died with "Cannot establish any listening sockets" on a retry
+# that only removed the lock file, not the stale X0 socket.
+kill_stale_x() {
+  for CMDF in /proc/[0-9]*/cmdline; do
+    if tr "\0" " " < "$CMDF" 2>/dev/null | grep -qE "Xvfb :0|Xorg :0|emux-capture|xwd"; then
+      K=${CMDF#/proc/}; K=${K%/cmdline}
+      [ "$K" != "$" ] && kill "$K" 2>/dev/null
+    fi
+  done
+  sleep 0.3
+  mkdir -p /tmp/.X11-unix
+  rm -f /tmp/.X0-lock /tmp/.X11-unix/X0 2>/dev/null
+}
+kill_stale_x
+rm -f /tmp/emux_wm_launched /tmp/emux_xvfb_restarted 2>/dev/null
 
 # v0.1.78: xkbcomp preflight. The X server execs /usr/bin/xkbcomp BY ABSOLUTE
 # PATH through /bin/sh while compiling its keymap; a ghost x11-xkb-utils (db
@@ -255,9 +263,15 @@ else
   # the server's own fallback (which is why upstream dropped the flag).
   NOSHEM=""
   if "$XVFB" -noshmem -version >/dev/null 2>&1; then NOSHEM="-noshmem"; fi
+  XTRY=0
   start_xvfb() { # rc: 0 socket up, 1 server died, 2 alive but no socket yet
     [ -f /tmp/xvfb.log ] && mv -f /tmp/xvfb.log /tmp/xvfb.log.1 2>/dev/null
-    rm -f /tmp/.X0-lock 2>/dev/null
+    # v0.1.80: sweep + drop stale sockets on EVERY attempt (not just script
+    # start): a retry into a stale X0/tcp-6000 holder is exactly the v0.1.79
+    # field fatal ("Cannot establish any listening sockets").
+    kill_stale_x
+    XTRY=$((XTRY + 1))
+    echo "emux-x11: Xvfb attempt $XTRY:$*" >&2
     "$XVFB" :0 -screen 0 "$RES" -listen tcp -ac "$@" >/tmp/xvfb.log 2>&1 &
     XPID=$!
     i=0
@@ -284,6 +298,13 @@ else
       start_xvfb $NOSHEM || rc=$?
     else
       echo "emux-x11: retrying once with the same flags" >&2
+      start_xvfb || rc=$?
+    fi
+    # v0.1.80: if THAT also died on a socket clash, an unmatched holder is
+    # alive (foreign proot instance): sweep once more and take a 3rd shot.
+    if [ "$rc" = 1 ] && grep -qi "listening sockets" /tmp/xvfb.log 2>/dev/null; then
+      echo "emux-x11: socket clash persists - sweeping again, 3rd attempt" >&2
+      kill_stale_x
       start_xvfb || rc=$?
     fi
   fi
@@ -348,7 +369,7 @@ if [ "$RC" != 0 ] && [ ! -e /tmp/emux_xvfb_restarted ]; then
   touch /tmp/emux_xvfb_restarted
   echo "emux-x11: Xvfb died rc=$RC - restarting once${NOSHEM:+ with $NOSHEM}" >&2
   [ -f /tmp/xvfb.log ] && mv -f /tmp/xvfb.log /tmp/xvfb.log.1 2>/dev/null
-  rm -f /tmp/.X0-lock /tmp/.X11-unix/X0 2>/dev/null
+  kill_stale_x
   "$XVFB" :0 -screen 0 "$RES" -listen tcp -ac $NOSHEM >/tmp/xvfb.log 2>&1 &
   XPID=$!
   i=0

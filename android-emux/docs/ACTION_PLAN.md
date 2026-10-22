@@ -789,3 +789,52 @@ Fixes:
   argv) plus a /tmp/xvfb-slow one-shot 20 s start; run.sh asserts no LAUNCH
   ever passes -noshmem and that a slow server is waited out, not killed.
 versionCode 79, rebuilt emux-debug.apk (same keystore).
+
+## 26. v0.1.80 - stale-socket-proof launches + a log the user can actually read
+
+v0.1.79 field pane: "(EE) Cannot establish any listening sockets - Make sure
+an X server isn't already running". A retry/respawn launched Xvfb onto a
+socket still held (or a stale X0 left by a SIGKILLed server): the v0.1.79
+retry path removed /tmp/.X0-lock but NOT /tmp/.X11-unix/X0, and a respawned
+session could race a half-alive Xvfb from the previous session (proot
+tracees are detached, guest-side kills do not reach foreign instances).
+Also: the user could not read the pane - notes rotate/scroll away faster
+than a screenshot.
+
+- emux-x11: kill_stale_x() (proc sweep + mkdir .X11-unix + drop lock AND X0)
+  now runs before EVERY launch attempt (first, shm/same-flag retry, new
+  socket-clash 3rd attempt, death-restart); attempts are echoed
+  ("Xvfb attempt N: <flags>") so the pane names each try.
+- DesktopService: killDesktopGuests() (host-authoritative) before a
+  pre-frame x11 respawn; noteInfo history 6 -> 24 lines; xvfb.log tails
+  widened (6 lines) PLUS xvfb.log.1 (previous attempt) in watcher and
+  ctrl-wait notes; every note mirrored to guest /tmp/emux_desktop_diag.log
+  (Terminal tab: cat it - no adb needed) on top of files/logs/desktop.log;
+  one pointer note at session start.
+- jailtest: stub Xvfb now models EADDRINUSE (fatal if X0 exists at launch,
+  logs "saw-stale-socket"); new STALE scenario pre-creates X0+lock and
+  asserts the sweep drops them before the first launch. 18 assertions.
+versionCode 80, rebuilt emux-debug.apk (same keystore).
+
+### 26.1 Keyboard layout (DIAGNOSED, deliberately NOT changed - user asked)
+Symptom: physical Spanish keyboard; terminal only produces English; layout
+shortcuts do nothing. Findings:
+ 1. Terminal path honours ANDROID's per-device physical-keyboard layout
+    (VtTerminalView sends event.unicodeChar as UTF-8). The app has no
+    layout of its own - "English only" means Android is handing US chars:
+    the per-DEVICE layout (Settings > System > Languages & input > Physical
+    keyboard > <device> > Keyboard layouts > enable Espanol) is separate
+    from the system language list, and ROM-level switch shortcuts (Huawei
+    class) often cycle only the on-screen IME, not external layouts.
+ 2. REAL app-side gap: dead keys. ES layouts emit dead-key events
+    (unicodeChar==0) composed via KeyEvent.getDeadChar() on the NEXT event;
+    VtTerminalView drops unicodeChar==0 events, so acute/tilde composition
+    never reaches the guest - feels like "Spanish not working" even with
+    the correct Android layout. Proposed fix (on user go): keep dead-key
+    state, compose with getDeadChar(), fall back to literal chars.
+ 3. Desktop tab has NO keyboard injection wired (DesktopService.
+    injectKeycode has zero callers) and guest X runs a single us layout, so
+    no shortcut can switch there. Proposed (on go): wire KeyEvent -> X
+    keycode -> XTEST fakeKey, and start X with
+    `setxkbmap -layout us,es -option grp:alt_shift_toggle` so Alt+Shift
+    switches inside the guest.
