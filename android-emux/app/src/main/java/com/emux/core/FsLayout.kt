@@ -110,6 +110,10 @@ object FsLayout {
     } catch (_: Throwable) { File(root(ctx), "tmp") }.apply { runCatching { mkdirs() } }
 
     fun tmp(ctx: Context): File = safeTmp(ctx)
+
+    /** v0.1.66: set by BootstrapManager when the selfcheck proves the seccomp
+     *  avoider is the link(2) breaker on this device. */
+    fun prootNoSeccompFlag(ctx: Context): File = File(root(ctx), ".proot-no-seccomp")
     fun prefixFile(ctx: Context): File = File(root(ctx), ".env_version")
 
     /**
@@ -396,6 +400,13 @@ object FsLayout {
         "SHELL" to "/system/bin/sh",
         // v0.1.28: bundled proot + its bionic libs (see nativeBridgeDir).
         "EMUX_NATIVE_BRIDGE" to nativeBridgeDir(ctx).absolutePath,
+    ).let { env ->
+        // v0.1.66: adaptive fallback - if the device selfcheck proved that
+        // proot's seccomp avoider is what breaks link(2) (status-old EACCES
+        // even with the shim loaded), the flag file makes EVERY proot run
+        // (sessions included) use PROOT_NO_SECCOMP=1.
+        if (prootNoSeccompFlag(ctx).isFile) env + ("PROOT_NO_SECCOMP" to "1") else env
+    } + mapOf(
         // X11: westwayland/xserver will listen here; display number fixed at :0
         "DISPLAY" to ":0",
         // tell programs we're an emoji-capable mobile terminal like Termux does

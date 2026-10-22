@@ -1722,6 +1722,9 @@ class BootstrapManager(private val ctx: Context) {
         // v0.1.63: explicit shim preload - do not rely on /etc/ld.so.preload alone
         if (File(dest, "usr/local/lib/emux/libemux-linkfix.so").isFile)
             env["LD_PRELOAD"] = "/usr/local/lib/emux/libemux-linkfix.so"
+        // v0.1.66: adaptive PROOT_NO_SECCOMP (see runRepairProot)
+        if (FsLayout.prootNoSeccompFlag(ctx).isFile)
+            env["PROOT_NO_SECCOMP"] = "1"
         val l32 = File(nb, "loader32")
         if (l32.isFile) env["PROOT_LOADER_32"] = l32.absolutePath
         return runApkProcess(argv, env, pkgs, phase, report)
@@ -2076,13 +2079,17 @@ class BootstrapManager(private val ctx: Context) {
      * assets/bin/emux-apt-repair (inlined so it also works on rootfs trees
      * seeded by older APKs that lack the helper script).
      */
-    private fun runRepairProot(proot: File, dest: File): ApkRun = withAptLock {
+    private fun runRepairProot(
+        proot: File, dest: File,
+        payload: String = APT_REPAIR_PAYLOAD,
+        noSeccomp: Boolean = false,
+    ): ApkRun = withAptLock {
         val hostTmp = prootTmp(ctx)
         val nb = FsLayout.nativeBridgeDir(ctx)
         val argv = listOf(
             proot.absolutePath, "-0", "-r", dest.absolutePath,
             "-b", "/dev", "-b", "/proc", "-b", "/sys", "-w", "/",
-            "/bin/sh", "-c", APT_REPAIR_PAYLOAD,
+            "/bin/sh", "-c", payload,
         )
         val env = mutableMapOf(
             "LD_LIBRARY_PATH" to nb.absolutePath,
@@ -2097,6 +2104,10 @@ class BootstrapManager(private val ctx: Context) {
         if (l32.isFile) env["PROOT_LOADER_32"] = l32.absolutePath
         if (File(dest, "usr/local/lib/emux/libemux-linkfix.so").isFile)
             env["LD_PRELOAD"] = "/usr/local/lib/emux/libemux-linkfix.so"
+        // v0.1.66: adaptive - once the selfcheck proves the seccomp avoider is
+        // the link(2) breaker on this kernel, every proot run disables it.
+        if (noSeccomp || FsLayout.prootNoSeccompFlag(ctx).isFile)
+            env["PROOT_NO_SECCOMP"] = "1"
         runApkProcess(argv, env, listOf("dpkg-repair"), "Repairing package manager", { _, _ -> })
     }
 
@@ -2165,7 +2176,10 @@ class BootstrapManager(private val ctx: Context) {
             // in-guest cascade - by the time the X session starts, Xvfb is
             // either present or the pane history says exactly why not.
             if (!File(dest, "usr/bin/Xvfb").isFile) {
-                val core = listOf("xvfb", "x11-xkb-utils", "xkb-data", "xfonts-base")
+                // coreutils first: without /usr/bin/id and /usr/bin/tr the
+                // maintainer scripts of EVERY later package fail ("/bin/sh:
+                // 12: id: not found" on the field device).
+                val core = listOf("coreutils", "xvfb", "x11-xkb-utils", "xkb-data", "xfonts-base")
                 val rc = runAptProot(proot, dest, core, "Installing X server core") { _, _ -> }
                 com.emux.EmuXLog.i("desktopPreRepair core install: ok=${rc.ok} tail=${rc.tail.take(200)}")
                 note = (note ?: "") + " | core install ok=${rc.ok}: " + rc.tail.take(180)
@@ -2220,6 +2234,26 @@ class BootstrapManager(private val ctx: Context) {
                 if (dirty || force || !stamp.isFile) {
                     val r = runRepairProot(proot, dest)
                     com.emux.EmuXLog.i("startupRepair: ok=${r.ok} tail=${r.tail.take(200)}")
+                }
+                // v0.1.66 ADAPTIVE SECCOMP PROBE: the field device kept hitting
+                // status-old EACCES even with the shim loaded and LD_PRELOAD
+                // set - consistent with proot's seccomp avoider mangling the
+                // link/linkat fallback on this kernel. Ask the device itself:
+                // selfcheck once normally, once with PROOT_NO_SECCOMP=1; if
+                // only the latter links OK, persist the flag so EVERY proot
+                // run (terminal + desktop sessions included) uses it.
+                runCatching {
+                    val sc = File(dest, "tmp/emux_selfcheck")
+                    val t1 = runCatching { sc.readText() }.getOrDefault("")
+                    if (t1.contains("LINK_FAIL") && !FsLayout.prootNoSeccompFlag(ctx).isFile) {
+                        runRepairProot(proot, dest, APT_SELFCHECK_PAYLOAD, noSeccomp = true)
+                        val t2 = runCatching { sc.readText() }.getOrDefault("")
+                        com.emux.EmuXLog.i("seccomp probe: plain=${t1.lineSequence().firstOrNull { it.startsWith("LINK_") }} noseccomp=${t2.lineSequence().firstOrNull { it.startsWith("LINK_") }}")
+                        if (t2.contains("LINK_OK")) {
+                            FsLayout.prootNoSeccompFlag(ctx).writeText("1")
+                            com.emux.EmuXLog.i("PROOT_NO_SECCOMP enabled for this device")
+                        }
+                    }
                 }
                 if (gaps.isNotEmpty()) {
                     val pkgs = gaps.distinct()

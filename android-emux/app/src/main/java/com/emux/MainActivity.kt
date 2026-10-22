@@ -352,31 +352,32 @@ class MainActivity : AppCompatActivity() {
         b.desktopView.desktop = desktop
         lifecycleScope.launch {
             repeatOnLifecycle(Lifecycle.State.STARTED) {
-                desktop.state.collect { s ->
-                    b.desktopStatus.text = when (s) {
-                        DesktopService.State.IDLE -> ""
-                        DesktopService.State.STARTING_X -> getString(R.string.x_starting)
-                        DesktopService.State.CONNECTED ->
-                            // v0.1.65: while NOT A SINGLE frame has arrived the
-                            // status line shows the diagnostic HISTORY
-                            // (selfcheck / xvfb.log / cascade progress), not
-                            // just the newest transient line - a waiting pane
-                            // used to hide exactly the info a field screenshot
-                            // needs.
-                            if (desktop.frameId == 0)
-                                getString(R.string.x_connected, 0, 0) + "\n" + desktop.errorHistoryText()
-                            else
-                                getString(R.string.x_connected, desktop.x11?.screenWidth ?: 0, desktop.x11?.screenHeight ?: 0) +
-                                    (desktop.errorText.value?.let { "\n" + it } ?: "")
-                        DesktopService.State.ERROR ->
-                            // v0.1.55: show the LAST FEW failures, not just the
-                            // newest - the pane used to overwrite each error, so
-                            // a rotating failure sequence could never be caught
-                            // in one screenshot.
-                            getString(R.string.x_error, desktop.errorHistoryText())
-                    }
-                }
+                desktop.state.collect { _ -> updateDesktopStatus() }
+                // v0.1.66: the status line must ALSO refresh on errorText /
+                // history changes - the state collector alone left the pane
+                // showing a stale single line while diagnostics accumulated
+                // (field screenshots proved the history never rendered).
+                launch { desktop.errorText.collect { updateDesktopStatus() } }
             }
+        }
+    }
+
+    /** v0.1.66: single renderer for the desktop status line; while not one
+     *  frame has arrived it shows the diagnostic HISTORY (selfcheck,
+     *  xvfb.log, repair/core-install results, session tails). */
+    private fun updateDesktopStatus() {
+        val d = desktop
+        b.desktopStatus.text = when (d.state.value) {
+            com.emux.x11.DesktopService.State.IDLE -> ""
+            com.emux.x11.DesktopService.State.STARTING_X -> getString(R.string.x_starting)
+            com.emux.x11.DesktopService.State.CONNECTED ->
+                if (d.frameId == 0)
+                    getString(R.string.x_connected, 0, 0) + "\n" + d.errorHistoryText()
+                else
+                    getString(R.string.x_connected, d.x11?.screenWidth ?: 0, d.x11?.screenHeight ?: 0) +
+                        (d.errorText.value?.let { "\n" + it } ?: "")
+            com.emux.x11.DesktopService.State.ERROR ->
+                getString(R.string.x_error, d.errorHistoryText())
         }
     }
 

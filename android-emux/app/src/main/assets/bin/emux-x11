@@ -118,7 +118,7 @@ else
       # control-plane wait expired ("touch input: X TCP not up yet").
       # v0.1.60 CRITICAL: "xkbcomp" is NOT a Debian/Ubuntu package name
       # (x11-xkb-utils is) - apt aborts the WHOLE transaction on one bad name.
-      CORE="xvfb x11-xkb-utils xkb-data xfonts-base"
+      CORE="coreutils xvfb x11-xkb-utils xkb-data xfonts-base"
       REST="x11-xserver-utils x11-apps netpbm netcat-openbsd openbox xterm"
       TRIES=0
       while [ "$TRIES" -lt 30 ]; do
