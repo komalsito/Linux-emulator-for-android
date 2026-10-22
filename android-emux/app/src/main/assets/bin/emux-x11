@@ -32,6 +32,11 @@ fi
 export HOME="${HOME:-/root}"
 export DISPLAY=:0
 export TMPDIR=/tmp
+# v0.1.79: PATH sanity. A session that starts mid-dpkg-transaction sources
+# /etc/profile while coreutils files are being swapped ("id: not found" in
+# the v0.1.78 pane) and can inherit a garbled PATH; pin the distro dirs.
+PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$PATH"
+export PATH
 # v0.1.52 FIELD FIX: a leftover Xvfb/Xorg from an earlier desktop session
 # still holds :0 and tcp/6000 — a fresh Xvfb then dies with EADDRINUSE and
 # the Android pane waits for frames forever. Kill stale servers (proc scan:
@@ -61,7 +66,10 @@ if [ ! -x /usr/bin/xkbcomp ] && command -v apt-get >/dev/null 2>&1; then
     x11-xkb-utils >&2 || true
 fi
 
-if [ "$(id -u)" = "0" ] && [ -x /usr/bin/Xorg ] && [ -n "$EMUX_USE_XORG" ]; then
+# v0.1.79: id-independent guard - a session starting mid-transaction can hit
+# a half-swapped coreutils ("id: not found" pane noise); fake-root is the
+# normal case here, so default to 0 when id is momentarily unavailable.
+if [ "$(id -u 2>/dev/null || echo 0)" = "0" ] && [ -x /usr/bin/Xorg ] && [ -n "$EMUX_USE_XORG" ]; then
   Xorg :0 -config /etc/X11/emux-xorg.conf &
 else
   XVFB=""
@@ -209,30 +217,13 @@ else
           i=$((i + 1))
         done
       fi
-      # REST in background; when it lands, start the WM if none runs yet.
-      if [ -x /usr/bin/Xvfb ]; then
-        (
-          TRIES=0
-          while [ "$TRIES" -lt 30 ]; do
-            if apt_busy; then TRIES=$((TRIES + 1)); sleep 10; continue; fi
-            DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-              $REST >&2 && break
-            TRIES=$((TRIES + 1)); heal_dpkg; sleep 2
-          done
-          i=0
-          while [ "$i" -lt 2 ]; do dpkg --configure -a >&2 && break; i=$((i + 1)); done
-          sleep 1
-          if [ ! -e /tmp/emux_wm_launched ]; then
-            for c in "/usr/bin/$WM" /usr/bin/openbox; do
-              if [ -x "$c" ]; then
-                "$c" >/tmp/wm.log 2>&1 &
-                touch /tmp/emux_wm_launched
-                break
-              fi
-            done
-          fi
-        ) >/dev/null 2>&1 &
-      fi
+      # v0.1.79: the REST install (WM + capture toolchain) NO LONGER starts
+      # here - it moved to after the X server is up. A background dpkg
+      # transaction swapping libc-bin/fonts/coreutils under a STARTING Xvfb
+      # is exactly what killed the v0.1.78 field round (first launch landed
+      # on a half-configured libc-bin: no ld.so.cache, Xvfb could not exec,
+      # the 15 s window expired, and the retry died on -noshmem).
+      APT_BRANCH=1
     elif command -v pacman >/dev/null 2>&1; then
       pacman -Sy --noconfirm --needed xorg-server-xvfb xorg-xkbcomp xkeyboard-config xorg-xwd netpbm openbox xterm >&2
     elif command -v dnf >/dev/null 2>&1; then
@@ -248,30 +239,86 @@ else
   fi
   # -listen tcp : the Android-side X11Client talks X over loopback TCP :6000
   # -ac         : disable access control (loopback-only server)
-  "$XVFB" :0 -screen 0 "$RES" -listen tcp -ac >/tmp/xvfb.log 2>&1 &
-  XPID=$!
-  # wait for the server socket
+  # v0.1.79 SETTLE WAIT: never start Xvfb into a running dpkg/apt transaction.
+  # The v0.1.78 field pane proved the first launch landed mid-transaction
+  # (dpkg.log: libc-bin half-configured = ld.so.cache gone; /etc/profile even
+  # lost `id`): Xvfb could not exec, the old blind 15 s window expired, and
+  # the retry then died on a flag noble's Xvfb no longer knows.
   i=0
-  while [ ! -e /tmp/.X11-unix/X0 ] && [ "$i" -lt 150 ]; do sleep 0.1; i=$((i+1)); done
-  # v0.1.39 SHM FALLBACK: Android has no SysV shm; under proot, shmget can fail
-  # even with libandroid-shmem preloaded (ashmem is gone on Android 10+), which
-  # kills Xvfb at startup ("waiting for X frames" forever on the Android side).
-  # If the socket never appears, retry once with -noshmem before giving up.
-  if [ ! -e /tmp/.X11-unix/X0 ]; then
-    echo "emux-x11: X0 never appeared with shm - retrying with -noshmem" >&2
-    kill $XPID 2>/dev/null
+  while [ "$i" -lt 24 ] && command -v apt_busy >/dev/null 2>&1 && apt_busy; do
+    echo "emux-x11: dpkg/apt still running before X start - settling ($i/24)" >&2
+    sleep 5; i=$((i + 1))
+  done
+  # v0.1.79: -noshmem was REMOVED from Xvfb (xorg-server 21.1, Ubuntu noble):
+  # passing it = instant "Fatal server error: Unrecognized option". Probe the
+  # flag once; on noble NOSHEM stays empty and shm failures are handled by
+  # the server's own fallback (which is why upstream dropped the flag).
+  NOSHEM=""
+  if "$XVFB" -noshmem -version >/dev/null 2>&1; then NOSHEM="-noshmem"; fi
+  start_xvfb() { # rc: 0 socket up, 1 server died, 2 alive but no socket yet
+    [ -f /tmp/xvfb.log ] && mv -f /tmp/xvfb.log /tmp/xvfb.log.1 2>/dev/null
     rm -f /tmp/.X0-lock 2>/dev/null
-    "$XVFB" :0 -screen 0 "$RES" -listen tcp -ac -noshmem >/tmp/xvfb.log 2>&1 &
+    "$XVFB" :0 -screen 0 "$RES" -listen tcp -ac "$@" >/tmp/xvfb.log 2>&1 &
     XPID=$!
     i=0
-    while [ ! -e /tmp/.X11-unix/X0 ] && [ "$i" -lt 150 ]; do sleep 0.1; i=$((i+1)); done
+    while [ "$i" -lt 450 ]; do
+      [ -e /tmp/.X11-unix/X0 ] && return 0
+      kill -0 "$XPID" 2>/dev/null || return 1
+      sleep 0.1; i=$((i + 1))
+    done
+    return 2
+  }
+  rc=0
+  start_xvfb || rc=$?
+  if [ "$rc" = 2 ]; then
+    # server alive, socket slow (first-run font scan under proot): give it
+    # 60 s more INSTEAD of killing it - the v0.1.39 logic mistook slow for shm.
+    echo "emux-x11: Xvfb alive but X0 not up in 45 s - waiting 60 s more" >&2
+    i=0
+    while [ "$i" -lt 600 ] && [ ! -e /tmp/.X11-unix/X0 ]; do sleep 0.1; i=$((i + 1)); done
+  elif [ "$rc" = 1 ]; then
+    echo "emux-x11: Xvfb died on first start - previous log kept at /tmp/xvfb.log.1:" >&2
+    tail -5 /tmp/xvfb.log.1 >&2 2>/dev/null
+    if grep -qi "shm" /tmp/xvfb.log.1 2>/dev/null && [ -n "$NOSHEM" ]; then
+      echo "emux-x11: shm failure in log - retrying with $NOSHEM" >&2
+      start_xvfb $NOSHEM || rc=$?
+    else
+      echo "emux-x11: retrying once with the same flags" >&2
+      start_xvfb || rc=$?
+    fi
   fi
+fi
+# v0.1.79: REST (WM + capture toolchain) installs NOW that X is up - never
+# under a starting server (see APT_BRANCH note above). When it lands, start
+# the WM if none runs yet.
+if [ -e /tmp/.X11-unix/X0 ] && [ "$APT_BRANCH" = 1 ]; then
+  (
+    TRIES=0
+    while [ "$TRIES" -lt 30 ]; do
+      if apt_busy; then TRIES=$((TRIES + 1)); sleep 10; continue; fi
+      DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+        $REST >&2 && break
+      TRIES=$((TRIES + 1)); heal_dpkg; sleep 2
+    done
+    i=0
+    while [ "$i" -lt 2 ]; do dpkg --configure -a >&2 && break; i=$((i + 1)); done
+    sleep 1
+    if [ ! -e /tmp/emux_wm_launched ]; then
+      for c in "/usr/bin/$WM" /usr/bin/openbox; do
+        if [ -x "$c" ]; then
+          "$c" >/tmp/wm.log 2>&1 &
+          touch /tmp/emux_wm_launched
+          break
+        fi
+      done
+    fi
+  ) >/dev/null 2>&1 &
 fi
 [ -n "$XPID" ] || XPID=$!
 
 # fail loudly with the captured log
 if [ ! -e /tmp/.X11-unix/X0 ]; then
-  echo "emux-x11: X server did not create /tmp/.X11-unix/X0 within 15s - log follows:" >&2
+  echo "emux-x11: X server did not create /tmp/.X11-unix/X0 in time - log follows (previous attempt: /tmp/xvfb.log.1):" >&2
   tail -20 /tmp/xvfb.log >&2
   exit 1
 fi
@@ -299,9 +346,10 @@ RC=$?
 # -noshmem instead of ending the session and orphaning the pane.
 if [ "$RC" != 0 ] && [ ! -e /tmp/emux_xvfb_restarted ]; then
   touch /tmp/emux_xvfb_restarted
-  echo "emux-x11: Xvfb died rc=$RC - restarting once with -noshmem" >&2
+  echo "emux-x11: Xvfb died rc=$RC - restarting once${NOSHEM:+ with $NOSHEM}" >&2
+  [ -f /tmp/xvfb.log ] && mv -f /tmp/xvfb.log /tmp/xvfb.log.1 2>/dev/null
   rm -f /tmp/.X0-lock /tmp/.X11-unix/X0 2>/dev/null
-  "$XVFB" :0 -screen 0 "$RES" -listen tcp -ac -noshmem >/tmp/xvfb.log 2>&1 &
+  "$XVFB" :0 -screen 0 "$RES" -listen tcp -ac $NOSHEM >/tmp/xvfb.log 2>&1 &
   XPID=$!
   i=0
   while [ ! -e /tmp/.X11-unix/X0 ] && [ "$i" -lt 150 ]; do sleep 0.1; i=$((i+1)); done

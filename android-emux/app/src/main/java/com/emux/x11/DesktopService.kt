@@ -126,6 +126,9 @@ class DesktopService(
      *  live same-tuple socket). Closing it from stop() unblocks the reader. */
     @Volatile private var activeSock: Socket? = null
     private var captureRespawns = 0
+    // v0.1.79: bounded respawn for the X session when it dies before the
+    // first frame (transient mid-transaction deaths, see emux-x11 v0.1.79).
+    private var xRespawns = 0
 
     /** Latest decoded frame; the View reads this under lock during draw. */
     @Volatile var currentFrame: Bitmap? = null
@@ -290,6 +293,7 @@ class DesktopService(
                 }
 
                 val cmd = "emux-x11 $wmCommand"
+                xRespawns = 0
                 xSession = TerminalSession(9001, ctx, root, cmd).also { it.start() }
 
                 // v0.1.18 BUGFIX #6: if the X server session dies (launcher exec
@@ -298,6 +302,23 @@ class DesktopService(
                 scope.launch {
                     xSession?.state?.collect { st ->
                         if (st == TerminalSession.State.DEAD && state.value != State.ERROR) {
+                            // v0.1.79: a PRE-FRAME death is often transient - the
+                            // v0.1.78 field round died on a first launch that
+                            // landed inside our own background dpkg transaction
+                            // and a retry on a flag noble's Xvfb no longer has.
+                            // emux-x11 now settles/probes; belt-and-braces we
+                            // respawn the whole session twice before painting
+                            // ERROR, so a single bad window cannot black-screen
+                            // the tab for the whole visit.
+                            if (frameId == 0 && xRespawns < 2 && state.value != State.IDLE) {
+                                xRespawns++
+                                com.emux.EmuXLog.i("desktop: x11 session died before first frame - respawning (#$xRespawns)")
+                                noteInfo("x11 session died pre-frames - respawning (#$xRespawns)")
+                                kotlinx.coroutines.delay(2_000)
+                                xSession = TerminalSession(9001 + xRespawns, ctx, root, cmd).also { it.start() }
+                                pumpDiag("x11", xSession!!)
+                                return@collect
+                            }
                             // v0.1.43: include the captured session output tails
                             // (painted on the pane) — "exited code 0" alone gave
                             // the field no actionable information.

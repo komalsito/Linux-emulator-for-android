@@ -116,7 +116,25 @@ for p in $pkgs; do
     coreutils) : > /usr/bin/id; chmod +x /usr/bin/id ;;
     util-linux) : > /usr/bin/script; chmod +x /usr/bin/script ;;
     bash) : > /bin/bash; chmod +x /bin/bash ;;
-    xvfb) printf '#!/bin/sh\necho "stub Xvfb up" > /tmp/xvfb.log\nmkdir -p /tmp/.X11-unix\n: > /tmp/.X11-unix/X0\nsleep 4\n' > /usr/bin/Xvfb; chmod +x /usr/bin/Xvfb ;;
+    xvfb) cat > /usr/bin/Xvfb <<'XEOF'
+#!/bin/sh
+# noble-model Xvfb: -noshmem was REMOVED in xorg-server 21.1 -> fatal error;
+# /tmp/xvfb-slow (one shot) models a slow first start (font scan under proot).
+echo "args: $*" >> /tmp/xvfb-args
+for a in "$@"; do
+  if [ "$a" = "-noshmem" ]; then
+    echo "(EE) Unrecognized option: -noshmem" > /tmp/xvfb.log
+    echo "(EE) Fatal server error: Unrecognized option: -noshmem" >> /tmp/xvfb.log
+    exit 1
+  fi
+done
+if [ -f /tmp/xvfb-slow ]; then rm -f /tmp/xvfb-slow; sleep 20; fi
+echo "stub Xvfb up" > /tmp/xvfb.log
+mkdir -p /tmp/.X11-unix
+: > /tmp/.X11-unix/X0
+sleep 4
+XEOF
+ chmod +x /usr/bin/Xvfb ;;
     x11-xkb-utils) : > /usr/bin/xkbcomp; chmod +x /usr/bin/xkbcomp ;;
     xserver-common) mkdir -p /etc/X11; : > /etc/X11/Xsession ;;
     xfonts-base) mkdir -p /usr/share/fonts/X11/misc ;;

@@ -30,14 +30,18 @@ OUT=${2:-$A/../emux-debug.apk}
 B=${BUILD_TMP:-/tmp/emux-apkbuild}
 LOG=${LOG:-/tmp/gradle-warm.log}
 BT=/opt/android-sdk/build-tools/34.0.0
-rm -rf "$B"; mkdir -p "$B/aarx" "$B/dex" "$B/in"
+if [ "$SKIP_STAGE" = 1 ]; then rm -rf "$B/dex" "$B/kclasses" "$B/jclasses"; else rm -rf "$B"; fi
+mkdir -p "$B/aarx" "$B/dex" "$B/in"
 
 # stage the gradle outputs we consume (copy FIRST: some sandbox filesystems
-# are flaky about long-lived reads out of app/build/)
+# are flaky about long-lived reads out of app/build/; SKIP_STAGE=1 if you
+# pre-staged them into $B/in yourself)
+if [ "$SKIP_STAGE" = 1 ]; then echo "using pre-staged inputs"; else
 cp "$A/app/build/intermediates/compile_and_runtime_not_namespaced_r_class_jar/debug/processDebugResources/R.jar" "$B/in/R.jar"
 cp "$A/app/build/generated/data_binding_base_class_source_out/debug/out/com/emux/databinding/ActivityMainBinding.java" "$B/in/ActivityMainBinding.java"
 cp "$A/app/build/intermediates/processed_res/debug/processDebugResources/out/resources-debug.ap_" "$B/in/resources-debug.ap_"
 cp "$A/debug-keystore/emux-debug.jks" "$B/in/emux-debug.jks"
+fi
 [ -f "$B/in/R.jar" ] || { echo "gradle artifacts missing - run the warm-up first"; exit 1; }
 
 CP=$(grep -a '^CP_START:' "$LOG" | head -1 | sed 's/^CP_START://; s/:CP_END$//')

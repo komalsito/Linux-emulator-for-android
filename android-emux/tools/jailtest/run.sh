@@ -39,6 +39,22 @@ rc=$?
 [ "$rc" = "0" ]; expect "NEW: clean exit (rc=0, was: no X server available)" 0 $?
 grep -q "ghost package xvfb" "$T/new.log"; expect "NEW: ghost xvfb purged" 0 $?
 grep -q "apt-stub: installed xvfb" "$FR/actions.log" 2>/dev/null; expect "NEW: xvfb really installed" 0 $?
+if [ -e "$FR/tmp/xvfb-args" ] && grep "noshmem" "$FR/tmp/xvfb-args" | grep -v -- "-version" | grep -q .; then
+  expect "NEW: no LAUNCH passes -noshmem (noble Xvfb rejects it)" 1 0
+else
+  expect "NEW: no LAUNCH passes -noshmem (noble Xvfb rejects it)" 0 0
+fi
+
+echo "=== SLOW: first start takes 20 s (must wait, not kill+flag-switch) ==="
+sh "$HERE/mkjail.sh" || exit 1
+touch "$FR/tmp/xvfb-slow"
+runjail "$X11" /usr/local/bin/emux-x11 > "$T/slow.log" 2>&1
+rc=$?
+[ -e "$FR/tmp/.X11-unix/X0" ]; expect "SLOW: X0 created despite 20 s start" 0 $?
+[ "$rc" = "0" ]; expect "SLOW: clean exit" 0 $?
+grep -q "alive but X0 not up in 45 s\|X0 never appeared" "$T/slow.log" && \
+  expect "SLOW: no blind kill/flag-switch message" 1 0 || \
+  expect "SLOW: no blind kill/flag-switch message" 0 0
 
 echo "=== REPAIR: $(basename "$REPAIR") against ghost coreutils ==="
 sh "$HERE/mkjail.sh" || exit 1

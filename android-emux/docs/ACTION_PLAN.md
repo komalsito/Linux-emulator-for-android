@@ -752,3 +752,40 @@ versionCode 78, rebuilt emux-debug.apk (same keystore).
   the §6 recipe that produced the v0.1.78 APK (gradle warm-up for classpaths
   + resources, kotlinc outside the gradle JVM, javac binding, D8, package,
   zipalign, apksigner with the committed keystore).
+
+## 25. v0.1.79 — the -noshmem trap + never start Xvfb into a live transaction
+
+The v0.1.78 field pane (two rounds) showed the hardlink bug CLOSED
+(SHIM_LOADED / LINK_OK / emux-linkfix-v6) and apt completing - then a NEW
+two-part death:
+  1. "emux-x11: X0 never appeared with shm - retrying with -noshmem": the
+     first Xvfb launch landed INSIDE our own background dpkg transaction
+     (dpkg.log: "status half-configured libc-bin" = ld.so.cache gone at that
+     instant; even /etc/profile's `id -u` failed: "/bin/sh: 12: id: not
+     found"). Xvfb could not exec, the blind 15 s window expired on a server
+     that was never merely slow.
+  2. "(EE) Unrecognized option: -noshmem": xorg-server 21.1 (Ubuntu noble)
+     REMOVED -noshmem from Xvfb - so the v0.1.39 shm retry AND the v0.1.62
+     death-restart both died instantly, the session ended, frames never came.
+
+Fixes:
+- emux-x11 settles: bounded wait for apt/dpkg to go idle BEFORE the first
+  Xvfb start; the REST (WM+capture) background install moved to AFTER the X
+  socket is up so no transaction ever swaps libs under a starting server.
+- -noshmem is now PROBED once ("Xvfb -noshmem -version"); empty on noble.
+  The shm retry uses it only when the probe passes AND the previous log
+  actually mentions shm; same for the death-restart.
+- start_xvfb() distinguishes DIED (rc 1) from SLOW (rc 2, liveness check via
+  kill -0): slow gets +60 s instead of a kill; died gets one same-flag retry
+  (or a shm retry when warranted). 45 s first window instead of 15 s.
+- /tmp/xvfb.log is rotated to .1 before every relaunch and the failure tail
+  prints both - the field pane can now see the FIRST attempt's death reason.
+- PATH pinned + id-independent root guard (mid-transaction coreutils swaps
+  cannot derail the script anymore).
+- DesktopService: bounded x11-session respawn (2x) when it dies pre-frames,
+  mirroring the capture respawn - one bad window no longer black-screens
+  the whole tab visit.
+- jailtest harness: the stub Xvfb now models noble (fatal on -noshmem, logs
+  argv) plus a /tmp/xvfb-slow one-shot 20 s start; run.sh asserts no LAUNCH
+  ever passes -noshmem and that a slow server is waited out, not killed.
+versionCode 79, rebuilt emux-debug.apk (same keystore).
