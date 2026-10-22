@@ -196,13 +196,18 @@ class DesktopService(
                     val dirty = com.emux.core.BootstrapManager(ctx).aptJournalDirty(rootfs)
                     val prev = runCatching {
                         java.io.File(rootfs, "tmp/emux_selfcheck").readText().lineSequence()
-                            .firstOrNull { it.startsWith("LINK_") || it.startsWith("SHIM_") || it.startsWith("DBSWAP") }
+                            .firstOrNull { it.startsWith("LINK_") || it.startsWith("SHIM_") || it.startsWith("DBSWAP") || it.startsWith("SHIMTEST") }
                     }.getOrNull()
                     val xl = runCatching {
                         java.io.File(rootfs, "tmp/xvfb.log").readText().lineSequence()
                             .filter { it.isNotBlank() }.toList().takeLast(1).firstOrNull()
                     }.getOrNull()
+                    // v0.1.72: host-readable verdicts the guest payload may
+                    // not have refreshed yet.
+                    val dbw = runCatching { java.io.File(rootfs, "tmp/emux_dbswap").readText().trim() }.getOrNull()
+                    val sht = runCatching { java.io.File(rootfs, "tmp/emux_shimtest").readText().trim() }.getOrNull()
                     noteInfo("start: shim=$shim preload=$preload journalDirty=$dirty prev=${prev ?: "-"} xvfb=${xl ?: "-"}")
+                    noteInfo("verdicts: shimtest=${sht ?: "-"} dbswap=${dbw ?: "-"}")
                 }
                 if (!java.io.File(rootfs, "etc").isDirectory) {
                     setError("rootfs not installed — tap Install to bootstrap")

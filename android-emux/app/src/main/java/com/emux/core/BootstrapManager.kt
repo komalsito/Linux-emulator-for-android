@@ -48,6 +48,11 @@ class BootstrapManager(private val ctx: Context) {
          * succeed as fake root, and who owns /var/lib/dpkg.
          */
         private const val APT_SELFCHECK_PAYLOAD =
+            // v0.1.72: load-time shim self-test first - independent of ANY
+            // distro package (the old ln-based probe measured the missing
+            // coreutils, not the syscall): REAL_OK / COPY_OK / FAIL_<errno>.
+            "EMUX_LINKFIX_SELFTEST=1 LD_PRELOAD=/usr/local/lib/emux/libemux-linkfix.so /bin/true 2>/dev/null; " +
+            "cat /tmp/emux_shimtest 2>/dev/null; " +
             "{ echo \"== emux dpkg selfcheck ==\"; " +
             "ls -l /usr/local/lib/emux/ 2>&1; " +
             "cat /etc/ld.so.preload 2>&1; " +
@@ -2211,16 +2216,21 @@ class BootstrapManager(private val ctx: Context) {
             if (!File(dest, "etc").isDirectory) return null
             val proot = FsLayout.prootBin(ctx)
             if (!proot.isFile) return null
-            if (!aptJournalDirty(dest) && File(dest, "var/lib/emux-repair.stamp").isFile) return null
+            // v0.1.72: the core install used to sit BEHIND the dirty-journal
+            // gate - on a clean-but-incomplete device (journal healed, Xvfb
+            // still missing) it never ran and the desktop kept waiting. Gate
+            // only the journal repair; always heal missing CORE packages.
             installLinkFixShim(dest)
-            val r = runRepairProot(proot, dest)
-            com.emux.EmuXLog.i("desktopPreRepair: ok=${r.ok} tail=${r.tail.take(200)}")
-            note = "dpkg repair ok=${r.ok}: " + r.tail.take(180)
+            if (aptJournalDirty(dest) || !File(dest, "var/lib/emux-repair.stamp").isFile) {
+                val r = runRepairProot(proot, dest)
+                com.emux.EmuXLog.i("desktopPreRepair: ok=${r.ok} tail=${r.tail.take(200)}")
+                note = "dpkg repair ok=${r.ok}: " + r.tail.take(180)
+            }
             // v0.1.65: install the X-server CORE from the app side (LD_PRELOAD
             // belt + aptLock + settle pass) instead of leaving it to the
             // in-guest cascade - by the time the X session starts, Xvfb is
             // either present or the pane history says exactly why not.
-            if (!File(dest, "usr/bin/Xvfb").isFile) {
+            if (!File(dest, "usr/bin/Xvfb").isFile || !File(dest, "usr/bin/id").isFile) {
                 // coreutils first: without /usr/bin/id and /usr/bin/tr the
                 // maintainer scripts of EVERY later package fail ("/bin/sh:
                 // 12: id: not found" on the field device).
@@ -2264,6 +2274,11 @@ class BootstrapManager(private val ctx: Context) {
                     File(dest, "tmp").mkdirs()
                     File(dest, "tmp/emux_dbswap").writeText(sw + "\n")
                 }
+                // v0.1.72: run the selfcheck EVERY launch (1 s proot shell) so
+                // the pane always carries a FRESH shim verdict - previously
+                // the file could be days old and every screenshot read stale
+                // evidence.
+                runCatching { runRepairProot(proot, dest, APT_SELFCHECK_PAYLOAD) }
                 val shim = File(dest, "usr/local/lib/emux/libemux-linkfix.so")
                 val stamp = File(dest, "var/lib/emux-repair.stamp")
                 // v0.1.55: ALSO heal missing base/desktop packages. The field
