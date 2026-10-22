@@ -2069,6 +2069,41 @@ class BootstrapManager(private val ctx: Context) {
         }.onFailure { com.emux.EmuXLog.e("linkfix shim install failed (non-fatal)", it) }
     }
 
+    /**
+     * v0.1.68: the ONE EACCES path no shim can touch - real DAC. If
+     * /var/lib/dpkg is owned by a FOREIGN uid (left over by whatever wrote
+     * this rootfs before), fake-root dpkg gets EACCES from the real kernel on
+     * every create/link inside it, preload or not. We cannot chown without
+     * root, but we CAN rebuild the directory app-owned: copy the tree (reads
+     * only) into dpkg.emux, rename the foreign one aside, rename ours in -
+     * renames need write on var/lib only, proven by a probe file first.
+     */
+    internal fun hostDpkgDbSwap(dest: File): String = runCatching {
+        val db = File(dest, "var/lib/dpkg")
+        if (!db.isDirectory) return@runCatching "DBSWAP: no-dbdir"
+        val st = runCatching { android.system.Os.stat(db.absolutePath) }.getOrNull()
+        val mine = android.os.Process.myUid()
+        if (st != null && st.st_uid == mine) return@runCatching "DBSWAP: owner-ok(${st.st_uid})"
+        val parent = db.parentFile ?: return@runCatching "DBSWAP: no-parent"
+        val probe = File(parent, ".emuxwtest")
+        if (!runCatching { probe.createNewFile() }.getOrDefault(false))
+            return@runCatching "DBSWAP: parent-readonly(uid=${st?.st_uid})"
+        probe.delete()
+        val nu = File(parent, "dpkg.emux")
+        runCatching { nu.deleteRecursively() }
+        nu.mkdirs()
+        db.walkTopDown().forEach { f ->
+            val rel = f.relativeTo(db).path
+            if (rel.isEmpty()) return@forEach
+            val t = File(nu, rel)
+            if (f.isDirectory) t.mkdirs() else runCatching { f.copyTo(t, true) }
+        }
+        val old = File(parent, "dpkg.foreign-uid")
+        runCatching { old.deleteRecursively() }
+        if (db.renameTo(old) && nu.renameTo(db)) "DBSWAP: swapped(uid=${st?.st_uid}->mine)"
+        else "DBSWAP: rename-failed(uid=${st?.st_uid})"
+    }.getOrElse { "DBSWAP: err ${it.message?.take(60)}" }
+
     /** Host-visible, allocation-cheap check: dpkg journal left dirty? */
     internal fun aptJournalDirty(dest: File): Boolean = runCatching {
         File(dest, "var/lib/dpkg/updates").listFiles()?.any { it.isFile } == true
@@ -2203,6 +2238,15 @@ class BootstrapManager(private val ctx: Context) {
                 val proot = FsLayout.prootBin(ctx)
                 if (!proot.isFile) return@runCatching
                 reseedHelpersIfNeeded(dest)   // v0.1.56: refresh OLD in-rootfs helpers
+                // v0.1.68: foreign-uid dpkg db rebuild (real-DAC EACCES path)
+                val sw = hostDpkgDbSwap(dest)
+                com.emux.EmuXLog.i("startupRepair: $sw")
+                runCatching {
+                    File(dest, "tmp").mkdirs()
+                    val scf = File(dest, "tmp/emux_selfcheck")
+                    val cur = runCatching { scf.readText() }.getOrDefault("")
+                    scf.writeText(cur + sw + "\n")
+                }
                 val shim = File(dest, "usr/local/lib/emux/libemux-linkfix.so")
                 val stamp = File(dest, "var/lib/emux-repair.stamp")
                 // v0.1.55: ALSO heal missing base/desktop packages. The field

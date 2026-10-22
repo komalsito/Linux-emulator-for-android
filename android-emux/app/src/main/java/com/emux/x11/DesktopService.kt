@@ -104,7 +104,13 @@ class DesktopService(
         errorText.value = msg
     }
     fun errorHistoryText(): String = synchronized(errHistory) {
-        if (errHistory.isEmpty()) errorText.value ?: "?" else errHistory.joinToString("\n")
+        // v0.1.68: always include the LIVE error line - transient messages
+        // set via errorText.value directly never entered the history, so a
+        // screenshot taken between notes showed a single unexplained line.
+        val live = errorText.value
+        val base = if (errHistory.isEmpty()) mutableListOf() else errHistory.toMutableList()
+        if (live != null && base.none { it.endsWith(live) }) base.add(live)
+        if (base.isEmpty()) "?" else base.joinToString("\n")
     }
 
     var x11: X11Client? = null; private set
@@ -176,6 +182,28 @@ class DesktopService(
                 // absolute path down through EMUX_INIT env so the scripts never
                 // have to guess.
                 val rootfs = com.emux.core.FsLayout.linuxRoot(ctx)
+                // v0.1.68: UNCONDITIONAL start note with the host-side facts
+                // (shim file? preload line? journal dirty? previous selfcheck
+                // verdict? previous xvfb fatal line?) so ANY screenshot taken
+                // during this session carries the diagnosis - the conditional
+                // notes of v0.1.63-67 left the history empty exactly when the
+                // files didn't exist yet.
+                runCatching {
+                    val shim = java.io.File(rootfs, "usr/local/lib/emux/libemux-linkfix.so").isFile
+                    val preload = runCatching {
+                        java.io.File(rootfs, "etc/ld.so.preload").readText().contains("linkfix")
+                    }.getOrDefault(false)
+                    val dirty = com.emux.core.BootstrapManager(ctx).aptJournalDirty(rootfs)
+                    val prev = runCatching {
+                        java.io.File(rootfs, "tmp/emux_selfcheck").readText().lineSequence()
+                            .firstOrNull { it.startsWith("LINK_") || it.startsWith("SHIM_") || it.startsWith("DBSWAP") }
+                    }.getOrNull()
+                    val xl = runCatching {
+                        java.io.File(rootfs, "tmp/xvfb.log").readText().lineSequence()
+                            .filter { it.isNotBlank() }.toList().takeLast(1).firstOrNull()
+                    }.getOrNull()
+                    noteInfo("start: shim=$shim preload=$preload journalDirty=$dirty prev=${prev ?: "-"} xvfb=${xl ?: "-"}")
+                }
                 if (!java.io.File(rootfs, "etc").isDirectory) {
                     setError("rootfs not installed — tap Install to bootstrap")
                     state.value = State.ERROR
@@ -240,7 +268,7 @@ class DesktopService(
                     val sc = java.io.File(rootfs, "tmp/emux_selfcheck")
                     if (sc.isFile) {
                         val sum = sc.readText().lineSequence()
-                            .filter { it.startsWith("SHIM_") || it.startsWith("LINK_") || it.startsWith("dpkgdir") || it.startsWith("status u=") }
+                            .filter { it.startsWith("SHIM_") || it.startsWith("LINK_") || it.startsWith("dpkgdir") || it.startsWith("status u=") || it.startsWith("DBSWAP") }
                             .joinToString(" ").take(300)
                         if (sum.isNotBlank()) noteInfo("selfcheck: $sum")
                     }
@@ -361,7 +389,7 @@ class DesktopService(
                                 .filter { it.isNotBlank() }.toList().takeLast(2).joinToString(" | ").take(300))
                             val sc = java.io.File(rootfs, "tmp/emux_selfcheck")
                             if (sc.isFile) noteInfo("selfcheck: " + sc.readText().lineSequence()
-                                .filter { it.startsWith("SHIM_") || it.startsWith("LINK_") || it.startsWith("dpkgdir") }
+                                .filter { it.startsWith("SHIM_") || it.startsWith("LINK_") || it.startsWith("dpkgdir") || it.startsWith("DBSWAP") }
                                 .joinToString(" ").take(300))
                         }
                     }
