@@ -838,3 +838,33 @@ shortcuts do nothing. Findings:
     keycode -> XTEST fakeKey, and start X with
     `setxkbmap -layout us,es -option grp:alt_shift_toggle` so Alt+Shift
     switches inside the guest.
+
+## 27. v0.1.81 - the orphan Xvfb only the HOST can kill
+
+v0.1.80 field pane, now with the exact X internals visible:
+"_XSERVTransSocketUNIXCreateListener: ...SocketCreateListener() failed /
+_XSERVTransMakeAllCOTSServerListeners: server already running". An Xvfb
+orphaned by an EARLIER desktop session (proot tracees are detached when a
+session/app dies) still holds :0 - including the ABSTRACT unix socket, which
+deleting /tmp/.X11-unix/X0 does NOT free. Guest-side sweeps cannot kill it:
+proot only translates/signals pids of its OWN tracees, so a kill aimed at a
+foreign instance's tracee goes nowhere (sandbox-verified: sweep matches the
+pid, kill -9 "succeeds", holder lives). Only the app process (same uid, real
+host /proc) can.
+
+- DesktopService.killDesktopGuests(): NEW host-side pass FIRST - scan
+  /proc/*/cmdline for Xvfb|Xorg|emux-capture|/xwd|emux-x11, verify the pid
+  runs under our uid, Process.killProcess it. Runs at desktop start and
+  (via the respawn path) before every pre-frame respawn, so an orphan
+  self-heals within one respawn cycle.
+- emux-x11 kill_stale_x(): TERM then KILL -9 (a half-dead Xvfb in the shm
+  SIGBUS path ignores TERM); also fixes a collapsed "$$" self-pid guard
+  that shipped in v0.1.80 (compared against a literal "$").
+- emux-capture: PATH pin (same mid-transaction /etc/profile lesson; kills
+  the "/bin/sh: 12: id: not found" noise in capture sessions).
+- jailtest: ORPHAN scenario - a live holder process (fabricated /proc entry
+  in the mount-less jail) must be killed by the sweep before X starts;
+  wrapper now reaps so kill -0 sees real death. 23 assertions.
+Reminder (v0.1.80): the FULL desktop log lives at guest
+/tmp/emux_desktop_diag.log - cat it in the Terminal tab when a round fails.
+versionCode 81, rebuilt emux-debug.apk (same keystore).

@@ -568,6 +568,37 @@ class DesktopService(
      * whole desktop guest family and drops the X locks.
      */
     private fun killDesktopGuests() {
+        // v0.1.81 FIRST: host-authoritative orphan kill. Guest-side sweeps
+        // (including the proot sweep below) CANNOT signal tracees of OTHER
+        // proot instances - proot only translates pids of its own tracees -
+        // so an Xvfb orphaned by a previous desktop visit keeps holding :0
+        // (including the ABSTRACT unix socket, which deleting the X0 file
+        // does not free) and every new Xvfb dies with "_XSERVTrans...
+        // server already running / Cannot establish any listening sockets"
+        // (v0.1.79+80 field panes). From the app process /proc is the real
+        // host proc and orphans run under our uid: kill them directly.
+        runCatching {
+            val me = android.os.Process.myPid()
+            val myUid = android.os.Process.myUid()
+            val pat = Regex("Xvfb|Xorg|emux-capture|/xwd|emux-x11")
+            val proc = java.io.File("/proc")
+            proc.listFiles()?.forEach { d ->
+                val pid = d.name.toIntOrNull() ?: return@forEach
+                if (pid == me || !d.isDirectory) return@forEach
+                val cmd = runCatching {
+                    java.io.File(d, "cmdline").readBytes().decodeToString().replace('\u0000', ' ')
+                }.getOrDefault("")
+                if (cmd.isEmpty() || !pat.containsMatchIn(cmd)) return@forEach
+                val uidLine = runCatching {
+                    java.io.File(d, "status").readLines().firstOrNull { it.startsWith("Uid:") } ?: ""
+                }.getOrDefault("")
+                val uids = uidLine.split(Regex("\\s+"))
+                if (uids.getOrNull(1) == myUid.toString()) {
+                    com.emux.EmuXLog.i("desktop: host-killing orphan guest pid $pid: ${cmd.take(70)}")
+                    android.os.Process.killProcess(pid)
+                }
+            }
+        }
         runCatching {
             val proot = com.emux.core.FsLayout.prootBin(ctx)
             val rootfs = com.emux.core.FsLayout.linuxRoot(ctx)

@@ -53,7 +53,11 @@ kill_stale_x() {
   for CMDF in /proc/[0-9]*/cmdline; do
     if tr "\0" " " < "$CMDF" 2>/dev/null | grep -qE "Xvfb :0|Xorg :0|emux-capture|xwd"; then
       K=${CMDF#/proc/}; K=${K%/cmdline}
-      [ "$K" != "$" ] && kill "$K" 2>/dev/null
+      # v0.1.81: TERM then KILL - a half-dead Xvfb stuck in the shm/SIGBUS
+      # path ignores TERM and keeps holding :0 until the watchdog fires.
+      # (also restores the self-pid guard: the shipped line had a collapsed
+      #  "$$" -> "$" which made the guard compare against a literal dollar)
+      if [ "$K" != "$$" ]; then kill "$K" 2>/dev/null; kill -9 "$K" 2>/dev/null; fi
     fi
   done
   sleep 0.3

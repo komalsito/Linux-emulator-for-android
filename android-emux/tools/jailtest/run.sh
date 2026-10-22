@@ -27,7 +27,7 @@ runjail() { # $1 script $2 jailpath
   cp "$1" "$FR$2" 2>/dev/null || { echo "cannot stage $1"; FAIL=1; return 1; }
   chmod +x "$FR$2"
   rm -f "$FR/actions.log"
-  chroot "$FR" /bin/sh -c "PATH=/usr/local/bin:/usr/bin:/bin; export PATH; exec $2 openbox"
+  timeout 150 chroot "$FR" /bin/sh -c "PATH=/usr/local/bin:/usr/bin:/bin; export PATH; exec $2 openbox"
 }
 
 echo "=== NEW: $(basename "$X11") against ghost-xvfb db ==="
@@ -69,6 +69,29 @@ if [ -e "$FR/tmp/xvfb-args" ] && grep -q "saw-stale-socket" "$FR/tmp/xvfb-args";
 else
   expect "STALE: sweep dropped socket before launch" 0 0
 fi
+
+echo "=== ORPHAN: live foreign Xvfb holder (pid visible in /proc) ==="
+sh "$HERE/mkjail.sh" || exit 1
+printf '#!/bin/sh\n/usr/bin/sleep 999\n' > "$FR/usr/local/bin/Xvfb"
+chmod +x "$FR/usr/local/bin/Xvfb"
+# wrapper stays alive so the holder is reaped properly when killed
+( chroot "$FR" /bin/sh -c '/usr/local/bin/Xvfb :0 & echo $! > /tmp/holder.pid; wait' ) >/dev/null 2>&1 &
+WRAP=$!
+i=0; while [ ! -f "$FR/tmp/holder.pid" ] && [ "$i" -lt 20 ]; do sleep 0.1; i=$((i+1)); done
+HP=$(cat "$FR/tmp/holder.pid")
+mkdir -p "$FR/proc/$HP"
+printf 'Xvfb\000:0\000-screen\000' > "$FR/proc/$HP/cmdline"
+kill -0 "$HP" 2>/dev/null; expect "ORPHAN: holder alive before run" 0 $?
+runjail "$X11" /usr/local/bin/emux-x11 > "$T/orphan.log" 2>&1
+rc=$?
+[ "$rc" = "0" ]; expect "ORPHAN: clean exit despite live holder" 0 $?
+kill -0 "$HP" 2>/dev/null; expect "ORPHAN: sweep killed the holder" 1 $?
+if [ -e "$FR/tmp/xvfb-args" ] && grep -q "saw-holder" "$FR/tmp/xvfb-args"; then
+  expect "ORPHAN: Xvfb never launched against live holder" 1 0
+else
+  expect "ORPHAN: Xvfb never launched against live holder" 0 0
+fi
+kill "$WRAP" 2>/dev/null; wait "$WRAP" 2>/dev/null
 
 echo "=== REPAIR: $(basename "$REPAIR") against ghost coreutils ==="
 sh "$HERE/mkjail.sh" || exit 1

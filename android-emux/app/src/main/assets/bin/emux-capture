@@ -26,6 +26,12 @@
 #
 # Runs INSIDE the distro (proot/chroot). Host-mode invocation re-execs via the
 # bundled proot, exactly like emux-x11.
+# v0.1.81: PATH sanity (same lesson as emux-x11): a capture session that
+# starts mid-dpkg-transaction sources /etc/profile while coreutils files
+# are being swapped ("/bin/sh: 12: id: not found" pane noise) and can
+# inherit a garbled PATH; pin the distro dirs so xwd/pnm/nc always resolve.
+PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$PATH"
+export PATH
 TARGET="${1:-127.0.0.1:7001}"
 HOST="${TARGET%%:*}"; PORT="${TARGET##*:}"
 
