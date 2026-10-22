@@ -400,6 +400,12 @@ class DesktopService(
                             else "<absent - Xvfb never launched>"))
                             val sc = java.io.File(rootfs, "tmp/emux_selfcheck")
                             if (sc.isFile) noteInfo("selfcheck: " + sc.readText().take(350))
+                            // v0.1.77: dpkg's OWN log - names the exact package
+                            // and step when a transaction fails.
+                            val dl = java.io.File(rootfs, "var/log/dpkg.log")
+                            if (dl.isFile) noteInfo("dpkg.log: " + dl.readText().lineSequence()
+                                .filter { it.contains("error") || it.contains("status half") || it.contains("configure ") }
+                                .toList().takeLast(2).joinToString(" | ").take(300))
                         }
                     }
                 }

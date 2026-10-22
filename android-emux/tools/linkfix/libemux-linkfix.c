@@ -272,6 +272,14 @@ static int linkat_emux(int dfd1, const char *oldpath, int dfd2, const char *newp
         return -1;
     }
     r = copy_file(oldpath, newpath);
+    /* v0.1.77: a vanished source means "nothing to back up". dpkg creates a
+     * backup hardlink for EVERY file it replaces; packages left half-installed
+     * by the original interrupted transaction (coreutils on the field device:
+     * db says installed, files gone) make those links fail with a LEGITIMATE
+     * ENOENT and abort the whole upgrade ("Sub-process /usr/bin/dpkg returned
+     * an error code (1)" on coreutils_9.4-3ubuntu6.3_arm64.deb). Reporting
+     * success for a missing source is exactly dpkg's desired semantics. */
+    if (r == -ENOENT) return 0;
     if (r < 0) { *__errno_location() = (int)-r; return -1; }
     return 0;
 }

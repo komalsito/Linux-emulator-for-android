@@ -81,6 +81,17 @@ class BootstrapManager(private val ctx: Context) {
             "mkdir -p /var/lib/dpkg/updates.emux-broken 2>/dev/null; " +
             "for f in /var/lib/dpkg/updates/*; do [ -e \"\$f\" ] && mv \"\$f\" /var/lib/dpkg/updates.emux-broken/ 2>/dev/null; done; " +
             "rm -f /var/lib/dpkg/status-old; dpkg --configure -a >&2 || true; fi; " +
+            // v0.1.77: ghost-package purge. The original interrupted
+            // transaction left coreutils/util-linux "installed" in the dpkg
+            // db with their files GONE; every later upgrade then dies making
+            // backup links of nonexistent files. If the marker binaries are
+            // missing while dpkg claims installed, force the db entry out so
+            // the next install is clean. (Shim v5 additionally treats a
+            // vanished backup source as success.)
+            "if [ ! -e /usr/bin/id ] && dpkg -s coreutils >/dev/null 2>&1; then " +
+            "dpkg --remove --force-all coreutils >&2 || true; fi; " +
+            "if [ ! -e /usr/bin/script ] && dpkg -s util-linux >/dev/null 2>&1; then " +
+            "dpkg --remove --force-all util-linux >&2 || true; fi; " +
             "apt-get install -y -f --no-install-recommends >&2 || true; " +
             "date +%s > /var/lib/emux-repair.stamp 2>/dev/null || true; " +
             APT_SELFCHECK_PAYLOAD
