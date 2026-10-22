@@ -375,27 +375,31 @@ class DesktopService(
                 }
                 scope.launch {
                     val startFrames = frameId
-                    // v0.1.65: while frameless, periodically snapshot the guest
-                    // logs into the pane history so ANY screenshot taken while
-                    // waiting carries the evidence (xvfb fatal line, cascade
-                    // progress, selfcheck), not just a transient status line.
-                    for (wait in listOf(20_000L, 40_000L, 60_000L)) {
-                        kotlinx.coroutines.delay(wait)
-                        if (frameId != startFrames || state.value != State.CONNECTED) return@launch
+                    // v0.1.73/74: the v0.1.65 watcher RETURNED while state was
+                    // still STARTING_X (the 60 s control wait sets CONNECTED
+                    // later), so on slow first runs it died before noting
+                    // anything - the pane stayed blind exactly during the
+                    // install window. Now it notes every 15 s until frames
+                    // arrive or a terminal state (5 min cap), and dumps the
+                    // guest logs UNFILTERED (earlier filters hid the ln errno).
+                    var elapsed = 0L
+                    while (frameId == startFrames &&
+                        state.value != State.IDLE && state.value != State.ERROR && elapsed < 300_000L) {
+                        kotlinx.coroutines.delay(15_000)
+                        elapsed += 15_000
+                        if (frameId != startFrames) return@launch
                         val tails = listOf("x11", "capture").mapNotNull { t ->
                             diag[t]?.toString()?.lineSequence()
                                 ?.filter { it.isNotBlank() }?.toList()?.takeLast(3)?.joinToString(" | ")
                         }.joinToString(" /// ")
-                        if (wait == 20_000L) setError(("no X frames in 20s. " + tails).take(400))
-                        else noteInfo("still no frames @${wait / 1000}s. " + tails.take(300))
+                        noteInfo("t+${elapsed / 1000}s no frames yet. " + tails.take(350))
                         runCatching {
                             val xl = java.io.File(rootfs, "tmp/xvfb.log")
-                            if (xl.isFile) noteInfo("xvfb.log: " + xl.readText().lineSequence()
-                                .filter { it.isNotBlank() }.toList().takeLast(2).joinToString(" | ").take(300))
+                            noteInfo("xvfb.log: " + (if (xl.isFile) xl.readText().lineSequence()
+                                .filter { it.isNotBlank() }.toList().takeLast(3).joinToString(" | ").take(350)
+                            else "<absent - Xvfb never launched>"))
                             val sc = java.io.File(rootfs, "tmp/emux_selfcheck")
-                            if (sc.isFile) noteInfo("selfcheck: " + sc.readText().lineSequence()
-                                .filter { it.startsWith("SHIM_") || it.startsWith("LINK_") || it.startsWith("dpkgdir") || it.startsWith("DBSWAP") }
-                                .joinToString(" ").take(300))
+                            if (sc.isFile) noteInfo("selfcheck: " + sc.readText().take(350))
                         }
                     }
                 }
@@ -413,6 +417,16 @@ class DesktopService(
                 // until connected or the desktop is stopped.
                 var ctrlOk = connectControlPlane(60_000)
                 if (!ctrlOk) {
+                    // v0.1.74: snapshot WHY immediately, not only via watcher
+                    runCatching {
+                        val xt = diag["x11"]?.toString()?.lineSequence()
+                            ?.filter { it.isNotBlank() }?.toList()?.takeLast(3)?.joinToString(" | ") ?: ""
+                        val xl = java.io.File(rootfs, "tmp/xvfb.log")
+                        noteInfo("ctrl-wait expired. x11: " + xt.take(250) +
+                            " | xvfb.log: " + (if (xl.isFile) xl.readText().lineSequence()
+                                .filter { it.isNotBlank() }.toList().takeLast(2).joinToString(" | ").take(250)
+                            else "<absent>"))
+                    }
                     errorText.value = "touch input: X TCP not up yet - retrying in background"
                     scope.launch {
                         while (isActive && x11 == null && state.value != State.IDLE) {
