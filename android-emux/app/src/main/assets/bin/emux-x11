@@ -50,6 +50,17 @@ sleep 0.3
 mkdir -p /tmp/.X11-unix
 rm -f /tmp/.X0-lock /tmp/.X11-unix/X0 /tmp/emux_wm_launched /tmp/emux_xvfb_restarted 2>/dev/null
 
+# v0.1.78: xkbcomp preflight. The X server execs /usr/bin/xkbcomp BY ABSOLUTE
+# PATH through /bin/sh while compiling its keymap; a ghost x11-xkb-utils (db
+# installed, binary gone) makes Xvfb die with "Failed to activate virtual core
+# keyboard" before any client connects - xvfb.log then names it, but the
+# session is already dead. One [ -x ] test on a healthy system; a cheap cached
+# install when the ghost struck.
+if [ ! -x /usr/bin/xkbcomp ] && command -v apt-get >/dev/null 2>&1; then
+  DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+    x11-xkb-utils >&2 || true
+fi
+
 if [ "$(id -u)" = "0" ] && [ -x /usr/bin/Xorg ] && [ -n "$EMUX_USE_XORG" ]; then
   Xorg :0 -config /etc/X11/emux-xorg.conf &
 else
@@ -106,10 +117,45 @@ else
           rm -f /var/lib/dpkg/updates/* 2>/dev/null
           dpkg --configure -a >&2 || true
         fi
+        # v0.1.78: purge ghost db entries between retries too - a retry loop
+        # against a ghost (db installed, files gone) spins all 30 tries.
+        ghost_purge
+      }
+      # v0.1.78: GHOST-PACKAGE PURGE. An interrupted transaction (or a killed
+      # extraction) can leave a package "install ok installed" in the dpkg db
+      # while its files are GONE. apt-get install then NO-OPs on it ("already
+      # the newest version") and the cascade spins its retries against a
+      # binary that can never appear - the v0.1.76/77 field pane showed exactly
+      # that: the whole xvfb transaction aborted on the coreutils upgrade, so
+      # /usr/bin/Xvfb never landed and the pane waited for frames forever.
+      # Purging the db entry makes the next install really unpack the files.
+      # KEEP IN SYNC with assets/bin/emux-apt-repair and
+      # BootstrapManager.GHOST_PURGE_PAYLOAD (inlined twin).
+      ghost_purge() {
+        for pair in \
+          "coreutils:/usr/bin/id" \
+          "util-linux:/usr/bin/script" \
+          "bash:/bin/bash" \
+          "xvfb:/usr/bin/Xvfb" \
+          "xserver-common:/etc/X11/Xsession" \
+          "x11-xkb-utils:/usr/bin/xkbcomp" \
+          "xfonts-base:/usr/share/fonts/X11/misc" \
+          "x11-apps:/usr/bin/xwd" \
+          "netpbm:/usr/bin/pnmtoplainpnm" \
+          "netcat-openbsd:/bin/nc.openbsd" \
+          "openbox:/usr/bin/openbox" \
+          "xterm:/usr/bin/xterm" ; do
+          gp=${pair%%:*}; gm=${pair#*:}
+          if [ ! -e "$gm" ] && dpkg -s "$gp" 2>/dev/null | grep -q "install ok installed"; then
+            echo "emux-x11: ghost package $gp (db says installed, $gm missing) - purging db entry" >&2
+            dpkg --remove --force-all "$gp" >&2 || true
+          fi
+        done
       }
       if ! apt_busy && [ -x /usr/local/bin/emux-apt-repair ]; then
         emux-apt-repair >&2 || true
       fi
+      ghost_purge
       # v0.1.62: SPLIT the cascade. CORE is what the X server itself needs;
       # everything else (WM + capture toolchain: xwd from x11-apps,
       # pnmtoplainpnm from netpbm, nc from netcat-openbsd) installs in the
@@ -143,6 +189,26 @@ else
         dpkg --configure -a >&2 && break
         i=$((i + 1))
       done
+      # v0.1.78 LAST RESORT: if the X server binary STILL is not on disk after
+      # the retry loop (ghost db entry that survived healing, stale mirror
+      # cache, ...), force the db entry out and reinstall exactly what the
+      # server needs. Before this, a ghost xvfb meant "apt-get install xvfb"
+      # no-opped forever and the session died with "no X server available".
+      if [ ! -x /usr/bin/Xvfb ] && [ ! -x /usr/bin/Xephyr ]; then
+        echo "emux-x11: X server still absent after retries - forced reinstall" >&2
+        ghost_purge
+        DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+          xvfb x11-xkb-utils xserver-common xfonts-base >&2 || true
+        if [ ! -x /usr/bin/Xvfb ]; then
+          DEBIAN_FRONTEND=noninteractive apt-get install -y --reinstall \
+            --no-install-recommends xvfb x11-xkb-utils xserver-common xfonts-base >&2 || true
+        fi
+        i=0
+        while [ "$i" -lt 2 ]; do
+          dpkg --configure -a >&2 && break
+          i=$((i + 1))
+        done
+      fi
       # REST in background; when it lands, start the WM if none runs yet.
       if [ -x /usr/bin/Xvfb ]; then
         (

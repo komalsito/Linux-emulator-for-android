@@ -56,6 +56,37 @@ fi
 
 # half-installed packages (interrupted transactions / partial extraction)
 apt-get install -y -f --no-install-recommends >&2 || true
+
+# v0.1.78: GHOST-PACKAGE PURGE (keep in sync with emux-x11 ghost_purge() and
+# BootstrapManager.GHOST_PURGE_PAYLOAD). An interrupted transaction can leave
+# a package "install ok installed" in the dpkg db while its files are GONE;
+# apt-get install then no-ops on it ("already the newest version") and the
+# desktop cascade waits forever for a binary that can never appear (the
+# v0.1.76/77 field pane: xvfb transaction aborted, /usr/bin/Xvfb absent).
+# Purging the db entry makes the next install really unpack the files.
+# NOTE: v0.1.77 shipped this purge ONLY in the app-start inline payload; the
+# desktop cascade calls THIS helper, so ghosts survived exactly where the
+# desktop needed them gone.
+for pair in \
+    "coreutils:/usr/bin/id" \
+    "util-linux:/usr/bin/script" \
+    "bash:/bin/bash" \
+    "xvfb:/usr/bin/Xvfb" \
+    "xserver-common:/etc/X11/Xsession" \
+    "x11-xkb-utils:/usr/bin/xkbcomp" \
+    "xfonts-base:/usr/share/fonts/X11/misc" \
+    "x11-apps:/usr/bin/xwd" \
+    "netpbm:/usr/bin/pnmtoplainpnm" \
+    "netcat-openbsd:/bin/nc.openbsd" \
+    "openbox:/usr/bin/openbox" \
+    "xterm:/usr/bin/xterm" ; do
+    gp=${pair%%:*}; gm=${pair#*:}
+    if [ ! -e "$gm" ] && dpkg -s "$gp" 2>/dev/null | grep -q "install ok installed"; then
+        echo "emux-apt-repair: ghost package $gp (db says installed, $gm missing) - purging db entry" >&2
+        dpkg --remove --force-all "$gp" >&2 || true
+    fi
+done
+
 apt-get install -y --no-install-recommends coreutils util-linux bash >&2 || true
 
 # v0.1.61: settle pass - a first-pass postinst can fail under proot's statx
@@ -65,6 +96,27 @@ while [ "$i" -lt 2 ]; do
     dpkg --configure -a >&2 && break
     i=$((i + 1))
 done
+
+# v0.1.78: twin of the inline payload's selfcheck (kept identical to
+# BootstrapManager.APT_SELFCHECK_PAYLOAD) so a repair run launched from the
+# desktop cascade refreshes /tmp/emux_selfcheck too - the pane paints it.
+EMUX_LINKFIX_SELFTEST=1 LD_PRELOAD=/usr/local/lib/emux/libemux-linkfix.so /bin/true 2>/dev/null
+cat /tmp/emux_shimtest 2>/dev/null
+{ echo "== emux dpkg selfcheck ==";
+  ls -l /usr/local/lib/emux/ 2>&1;
+  cat /etc/ld.so.preload 2>&1;
+  if grep -q libemux-linkfix /proc/self/maps; then echo SHIM_LOADED; else echo SHIM_NOT_LOADED; fi;
+  grep -a -o 'emux-linkfix-v[0-9]*' /usr/local/lib/emux/libemux-linkfix.so 2>/dev/null | head -1;
+  rm -f /var/lib/dpkg/status-old;
+  if ! command -v ln >/dev/null 2>&1; then echo LINK_UNTESTED_NO_LN;
+  elif ln /var/lib/dpkg/status /var/lib/dpkg/status-old 2>/tmp/link_err; then echo LINK_OK;
+  else echo LINK_FAIL:; echo LINKERR:; cat /tmp/link_err; fi;
+  rm -f /var/lib/dpkg/status-old;
+  stat -c 'dpkgdir u=%u m=%a' /var/lib/dpkg 2>&1;
+  stat -c 'status u=%u m=%a' /var/lib/dpkg/status 2>&1;
+  cat /tmp/emux_dbswap 2>/dev/null;
+  id -u; } > /tmp/emux_selfcheck 2>&1
+cat /tmp/emux_selfcheck >&2
 
 mkdir -p /var/lib 2>/dev/null
 date +%s >/var/lib/emux-repair.stamp 2>/dev/null

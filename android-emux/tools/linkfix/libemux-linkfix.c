@@ -1,6 +1,7 @@
 /*
  * libemux-linkfix — LD_PRELOAD shim for the proot/Android-kernel hardlink
- * bug, v3 (v0.1.72).
+ * bug, v6 (v0.1.78: version marker greppable from the .so; behaviour = v5:
+ * a backup link whose source vanished reports success, "nothing to back up").
  *
  * WHY: dpkg backs up its db with unlink(status-old)+link(status,status-old).
  * Under the bundled proot several Android kernels answer the hardlink
@@ -44,6 +45,13 @@
 
 extern int *__errno_location(void);
 extern char *getenv(const char *);
+
+/* v0.1.78: version marker the guest selfcheck greps OUT OF THE .so on disk
+ * (pane shows it next to SHIM_LOADED), so a field round can prove which shim
+ * generation the device actually carries - several rounds were already lost
+ * to stale builds. Exported so the linker keeps it in .rodata/.dynsym. */
+const char emux_linkfix_version_tag[] = "emux-linkfix-v6";
+const char *emux_linkfix_version(void) { return emux_linkfix_version_tag; }
 
 /* ---- syscall numbers per arch ---- */
 #if defined(__aarch64__)

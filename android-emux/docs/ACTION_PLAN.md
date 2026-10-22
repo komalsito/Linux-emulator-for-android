@@ -698,3 +698,44 @@ poisoned dentry; the engine had to be upgraded.
 Expectation on the field device: dpkg's status-old backup works natively,
 the coreutils/xvfb core install completes, Xvfb starts, frames stream.
 versionCode 76.
+
+## 24. v0.1.78 — ghost-package purge everywhere + field-provable shim version
+
+The v0.1.76 pane (this round's screenshot) shows the WHOLE X transaction
+(coreutils upgrade + xvfb/xserver-common/x11-xkb-utils/xfonts-base as NEW
+packages) aborting inside dpkg - the status-old backup hardlink dies with
+ENOENT on this kernel even under proot 5.1.107.98 + shim v4 - so
+/usr/bin/Xvfb never lands and the pane waits for frames forever
+("xvfb.log: <absent - Xvfb never launched>", "emux-x11: apt install failed -
+healing" x30). Shim v5 (v0.1.77) makes the backup link survive; the v0.1.78
+review then found two residual gaps that could still black-screen the desktop:
+
+1. The ghost purge (db says "install ok installed", files GONE -> apt-get
+   install NO-OPs forever) existed only in the app-start inline payload and
+   only for coreutils/util-linux. The desktop cascade calls the in-rootfs
+   emux-apt-repair helper, which had NO purge (the twins had drifted), and a
+   ghost xvfb/x11-xkb-utils/xfonts-base is exactly what keeps /usr/bin/Xvfb
+   absent after an aborted transaction.
+2. The pane could not prove which shim generation sits on disk.
+
+Changes:
+- Generic GHOST_PURGE table (12 pkg:marker pairs incl. the desktop stack) in
+  ALL THREE twins: BootstrapManager.GHOST_PURGE_PAYLOAD, assets/bin/
+  emux-apt-repair, and emux-x11 ghost_purge() (run before the CORE loop and
+  inside heal_dpkg between cascade retries). Keep the table identical.
+- emux-x11: last-resort forced reinstall when the X server binary is still
+  absent after the 30-try loop; xkbcomp preflight before launching Xvfb (a
+  ghost x11-xkb-utils otherwise kills the server with "Failed to activate
+  virtual core keyboard" before any client connects).
+- Inline repair payload gained the base-package reinstall + settle pass so it
+  matches the asset helper again.
+- Shim v6: exported `emux-linkfix-v6` marker; the guest selfcheck greps it out
+  of the .so on disk so the next field pane proves the shim generation.
+  Behaviour identical to v5 (vanished backup source = success).
+- Sandbox regression harness (minimal chroot jail + stub dpkg/apt-get that
+  models apt's no-op-on-installed): v0.1.77 emux-x11 on a ghost-xvfb db dies
+  with "no X server available" (field pane reproduced); v0.1.78 emux-x11
+  purges, installs, launches Xvfb, exits 0; emux-apt-repair purges ghosts and
+  reinstalls the base packages; native shim tests: same-fs links stay true
+  hardlinks, vanished source => success, copy fallback byte-identical.
+versionCode 78, rebuilt emux-debug.apk (same keystore).

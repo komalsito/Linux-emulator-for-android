@@ -43,10 +43,10 @@ com.emux.app-appcompat-resources-1.7.0-41 /opt/gradle-home/caches/transforms-4/e
 com.emux.app-transition-1.5.0-42 /opt/gradle-home/caches/transforms-4/eb07a0b9af61cd6747df6be18d6086c6/transformed/transition-1.5.0/res
 com.emux.app-core-ktx-1.13.1-43 /opt/gradle-home/caches/transforms-4/ee0481a11330c26fe06a00831ef0481b/transformed/core-ktx-1.13.1/res
 com.emux.app-lifecycle-viewmodel-savedstate-2.8.6-44 /opt/gradle-home/caches/transforms-4/f48c0caa7d8e409f0d62a3c8451e7572/transformed/lifecycle-viewmodel-savedstate-2.8.6/res
-com.emux.app-pngs-45 /tmp/arena/tenants/d8b9a623-bc90-47f0-aab5-5ffb7e4b25fe/sessions/84bb8c76-3443-40ef-9d86-1509dce6be0e/workspace/Termux2/android-emux/app/build/generated/res/pngs/debug
-com.emux.app-resValues-46 /tmp/arena/tenants/d8b9a623-bc90-47f0-aab5-5ffb7e4b25fe/sessions/84bb8c76-3443-40ef-9d86-1509dce6be0e/workspace/Termux2/android-emux/app/build/generated/res/resValues/debug
-com.emux.app-packageDebugResources-47 /tmp/arena/tenants/d8b9a623-bc90-47f0-aab5-5ffb7e4b25fe/sessions/84bb8c76-3443-40ef-9d86-1509dce6be0e/workspace/Termux2/android-emux/app/build/intermediates/incremental/debug/packageDebugResources/merged.dir
-com.emux.app-packageDebugResources-48 /tmp/arena/tenants/d8b9a623-bc90-47f0-aab5-5ffb7e4b25fe/sessions/84bb8c76-3443-40ef-9d86-1509dce6be0e/workspace/Termux2/android-emux/app/build/intermediates/incremental/debug/packageDebugResources/stripped.dir
-com.emux.app-debug-49 /tmp/arena/tenants/d8b9a623-bc90-47f0-aab5-5ffb7e4b25fe/sessions/84bb8c76-3443-40ef-9d86-1509dce6be0e/workspace/Termux2/android-emux/app/build/intermediates/merged_res/debug/mergeDebugResources
-com.emux.app-debug-50 /tmp/arena/tenants/d8b9a623-bc90-47f0-aab5-5ffb7e4b25fe/sessions/84bb8c76-3443-40ef-9d86-1509dce6be0e/workspace/Termux2/android-emux/app/src/debug/res
-com.emux.app-main-51 /tmp/arena/tenants/d8b9a623-bc90-47f0-aab5-5ffb7e4b25fe/sessions/84bb8c76-3443-40ef-9d86-1509dce6be0e/workspace/Termux2/android-emux/app/src/main/res
+com.emux.app-pngs-45 /tmp/arena/tenants/d8b9a623-bc90-47f0-aab5-5ffb7e4b25fe/sessions/7855514c-b8c9-4c3e-a1f6-4ed98e13e25f/workspace/termux2/android-emux/app/build/generated/res/pngs/debug
+com.emux.app-resValues-46 /tmp/arena/tenants/d8b9a623-bc90-47f0-aab5-5ffb7e4b25fe/sessions/7855514c-b8c9-4c3e-a1f6-4ed98e13e25f/workspace/termux2/android-emux/app/build/generated/res/resValues/debug
+com.emux.app-packageDebugResources-47 /tmp/arena/tenants/d8b9a623-bc90-47f0-aab5-5ffb7e4b25fe/sessions/7855514c-b8c9-4c3e-a1f6-4ed98e13e25f/workspace/termux2/android-emux/app/build/intermediates/incremental/debug/packageDebugResources/merged.dir
+com.emux.app-packageDebugResources-48 /tmp/arena/tenants/d8b9a623-bc90-47f0-aab5-5ffb7e4b25fe/sessions/7855514c-b8c9-4c3e-a1f6-4ed98e13e25f/workspace/termux2/android-emux/app/build/intermediates/incremental/debug/packageDebugResources/stripped.dir
+com.emux.app-debug-49 /tmp/arena/tenants/d8b9a623-bc90-47f0-aab5-5ffb7e4b25fe/sessions/7855514c-b8c9-4c3e-a1f6-4ed98e13e25f/workspace/termux2/android-emux/app/build/intermediates/merged_res/debug/mergeDebugResources
+com.emux.app-debug-50 /tmp/arena/tenants/d8b9a623-bc90-47f0-aab5-5ffb7e4b25fe/sessions/7855514c-b8c9-4c3e-a1f6-4ed98e13e25f/workspace/termux2/android-emux/app/src/debug/res
+com.emux.app-main-51 /tmp/arena/tenants/d8b9a623-bc90-47f0-aab5-5ffb7e4b25fe/sessions/7855514c-b8c9-4c3e-a1f6-4ed98e13e25f/workspace/termux2/android-emux/app/src/main/res

@@ -56,6 +56,9 @@ class BootstrapManager(private val ctx: Context) {
             "{ echo \"== emux dpkg selfcheck ==\"; " +
             "ls -l /usr/local/lib/emux/ 2>&1; " +
             "cat /etc/ld.so.preload 2>&1; " +
+            // v0.1.78: which shim generation is ON DISK (grepped from the .so)
+            // - proves the device carries the v6 blob, not a stale one.
+            "grep -a -o 'emux-linkfix-v[0-9]*' /usr/local/lib/emux/libemux-linkfix.so 2>/dev/null | head -1; " +
             "if grep -q libemux-linkfix /proc/self/maps; then echo SHIM_LOADED; else echo SHIM_NOT_LOADED; fi; " +
             "rm -f /var/lib/dpkg/status-old; " +
             // v0.1.71: the ln-based probe needs coreutils... which is what we
@@ -70,7 +73,33 @@ class BootstrapManager(private val ctx: Context) {
             "cat /tmp/emux_dbswap 2>/dev/null; " +
             "id -u; } > /tmp/emux_selfcheck 2>&1; cat /tmp/emux_selfcheck >&2"
 
-                private const val APT_REPAIR_PAYLOAD =
+                /**
+         * v0.1.78: generic GHOST-PACKAGE purge. An interrupted transaction (or
+         * a killed extraction) leaves a package "install ok installed" in the
+         * dpkg db while its files are GONE; apt-get install then NO-OPs on it
+         * ("already the newest version") and every cascade/retry loop waits
+         * for a binary that can never appear - the v0.1.76/77 field pane
+         * (xvfb transaction aborted on the coreutils upgrade, /usr/bin/Xvfb
+         * absent forever). Purging the db entry makes the next install really
+         * unpack. v0.1.77 only purged coreutils/util-linux here, and nothing
+         * in the desktop cascade - this table covers the desktop-critical
+         * packages too. Shell twin lives in assets/bin/emux-apt-repair and
+         * emux-x11 ghost_purge(): keep the package:marker table identical.
+         */
+        private const val GHOST_PURGE_PAYLOAD =
+            "for pair in " +
+            "\"coreutils:/usr/bin/id\" \"util-linux:/usr/bin/script\" \"bash:/bin/bash\" " +
+            "\"xvfb:/usr/bin/Xvfb\" \"xserver-common:/etc/X11/Xsession\" " +
+            "\"x11-xkb-utils:/usr/bin/xkbcomp\" \"xfonts-base:/usr/share/fonts/X11/misc\" " +
+            "\"x11-apps:/usr/bin/xwd\" \"netpbm:/usr/bin/pnmtoplainpnm\" " +
+            "\"netcat-openbsd:/bin/nc.openbsd\" \"openbox:/usr/bin/openbox\" " +
+            "\"xterm:/usr/bin/xterm\" ; do " +
+            "gp=\${pair%%:*}; gm=\${pair#*:}; " +
+            "if [ ! -e \"\$gm\" ] && dpkg -s \"\$gp\" 2>/dev/null | grep -q \"install ok installed\"; then " +
+            "echo \"emux-repair: ghost package \$gp (db installed, \$gm missing) - purging\" >&2; " +
+            "dpkg --remove --force-all \"\$gp\" >&2 || true; fi; done; "
+
+        private const val APT_REPAIR_PAYLOAD =
             // v0.1.70: belt INSIDE the guest shell (the path exists only there).
             "[ -f /usr/local/lib/emux/libemux-linkfix.so ] && export LD_PRELOAD=/usr/local/lib/emux/libemux-linkfix.so; " +
             "export DEBIAN_FRONTEND=noninteractive; " +
@@ -81,18 +110,15 @@ class BootstrapManager(private val ctx: Context) {
             "mkdir -p /var/lib/dpkg/updates.emux-broken 2>/dev/null; " +
             "for f in /var/lib/dpkg/updates/*; do [ -e \"\$f\" ] && mv \"\$f\" /var/lib/dpkg/updates.emux-broken/ 2>/dev/null; done; " +
             "rm -f /var/lib/dpkg/status-old; dpkg --configure -a >&2 || true; fi; " +
-            // v0.1.77: ghost-package purge. The original interrupted
-            // transaction left coreutils/util-linux "installed" in the dpkg
-            // db with their files GONE; every later upgrade then dies making
-            // backup links of nonexistent files. If the marker binaries are
-            // missing while dpkg claims installed, force the db entry out so
-            // the next install is clean. (Shim v5 additionally treats a
-            // vanished backup source as success.)
-            "if [ ! -e /usr/bin/id ] && dpkg -s coreutils >/dev/null 2>&1; then " +
-            "dpkg --remove --force-all coreutils >&2 || true; fi; " +
-            "if [ ! -e /usr/bin/script ] && dpkg -s util-linux >/dev/null 2>&1; then " +
-            "dpkg --remove --force-all util-linux >&2 || true; fi; " +
+            // v0.1.78: generic ghost purge (was: two hardcoded coreutils/
+            // util-linux checks in v0.1.77) + base-package reinstall so a
+            // purged coreutils/util-linux/bash lands again right away (the
+            // terminal needs them before any desktop cascade runs), + settle
+            // pass - all in parity with assets/bin/emux-apt-repair.
+            GHOST_PURGE_PAYLOAD +
             "apt-get install -y -f --no-install-recommends >&2 || true; " +
+            "apt-get install -y --no-install-recommends coreutils util-linux bash >&2 || true; " +
+            "i=0; while [ \$i -lt 2 ]; do dpkg --configure -a >&2 && break; i=\$((i+1)); done; " +
             "date +%s > /var/lib/emux-repair.stamp 2>/dev/null || true; " +
             APT_SELFCHECK_PAYLOAD
 
