@@ -53,10 +53,16 @@ class BootstrapManager(private val ctx: Context) {
             "cat /etc/ld.so.preload 2>&1; " +
             "if grep -q libemux-linkfix /proc/self/maps; then echo SHIM_LOADED; else echo SHIM_NOT_LOADED; fi; " +
             "rm -f /var/lib/dpkg/status-old; " +
-            "if ln /var/lib/dpkg/status /var/lib/dpkg/status-old 2>/tmp/link_err; then echo LINK_OK; else echo LINK_FAIL:; cat /tmp/link_err; fi; " +
+            // v0.1.71: the ln-based probe needs coreutils... which is what we
+            // are trying to install; report its absence instead of a bogus
+            // LINK_FAIL, and keep the errno text marked so the pane shows it.
+            "if ! command -v ln >/dev/null 2>&1; then echo LINK_UNTESTED_NO_LN; " +
+            "elif ln /var/lib/dpkg/status /var/lib/dpkg/status-old 2>/tmp/link_err; then echo LINK_OK; " +
+            "else echo LINK_FAIL:; echo LINKERR:; cat /tmp/link_err; fi; " +
             "rm -f /var/lib/dpkg/status-old; " +
             "stat -c 'dpkgdir u=%u m=%a' /var/lib/dpkg 2>&1; " +
             "stat -c 'status u=%u m=%a' /var/lib/dpkg/status 2>&1; " +
+            "cat /tmp/emux_dbswap 2>/dev/null; " +
             "id -u; } > /tmp/emux_selfcheck 2>&1; cat /tmp/emux_selfcheck >&2"
 
                 private const val APT_REPAIR_PAYLOAD =
@@ -2251,11 +2257,12 @@ class BootstrapManager(private val ctx: Context) {
                 // v0.1.68: foreign-uid dpkg db rebuild (real-DAC EACCES path)
                 val sw = hostDpkgDbSwap(dest)
                 com.emux.EmuXLog.i("startupRepair: $sw")
+                // v0.1.71: own file - the repair payload REWRITES
+                // emux_selfcheck, which used to erase the DBSWAP line before
+                // the pane could read it.
                 runCatching {
                     File(dest, "tmp").mkdirs()
-                    val scf = File(dest, "tmp/emux_selfcheck")
-                    val cur = runCatching { scf.readText() }.getOrDefault("")
-                    scf.writeText(cur + sw + "\n")
+                    File(dest, "tmp/emux_dbswap").writeText(sw + "\n")
                 }
                 val shim = File(dest, "usr/local/lib/emux/libemux-linkfix.so")
                 val stamp = File(dest, "var/lib/emux-repair.stamp")

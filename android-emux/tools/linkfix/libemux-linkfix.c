@@ -124,6 +124,16 @@ static long sys3(long n, long a, long b, long c)
     __asm__ volatile("svc 0" : "+r"(x0) : "r"(x8), "r"(x1), "r"(x2) : "memory");
     return x0;
 }
+static long sys4(long n, long a, long b, long c, long d)
+{
+    register long x8 __asm__("x8") = n;
+    register long x0 __asm__("x0") = a;
+    register long x1 __asm__("x1") = b;
+    register long x2 __asm__("x2") = c;
+    register long x3 __asm__("x3") = d;
+    __asm__ volatile("svc 0" : "+r"(x0) : "r"(x8), "r"(x1), "r"(x2), "r"(x3) : "memory");
+    return x0;
+}
 #elif defined(__arm__)
 static long sys3(long n, long a, long b, long c)
 {
@@ -132,6 +142,16 @@ static long sys3(long n, long a, long b, long c)
     register long r1 __asm__("r1") = b;
     register long r2 __asm__("r2") = c;
     __asm__ volatile("svc 0" : "+r"(r0) : "r"(r7), "r"(r1), "r"(r2) : "memory");
+    return r0;
+}
+static long sys4(long n, long a, long b, long c, long d)
+{
+    register long r7 __asm__("r7") = n;
+    register long r0 __asm__("r0") = a;
+    register long r1 __asm__("r1") = b;
+    register long r2 __asm__("r2") = c;
+    register long r3 __asm__("r3") = d;
+    __asm__ volatile("svc 0" : "+r"(r0) : "r"(r7), "r"(r1), "r"(r2), "r"(r3) : "memory");
     return r0;
 }
 #elif defined(__x86_64__)
@@ -145,6 +165,17 @@ static long sys3(long n, long a, long b, long c)
                      : "rcx", "r11", "memory");
     return rax;
 }
+static long sys4(long n, long a, long b, long c, long d)
+{
+    register long rax __asm__("rax") = n;
+    register long rdi __asm__("rdi") = a;
+    register long rsi __asm__("rsi") = b;
+    register long rdx __asm__("rdx") = c;
+    register long r10 __asm__("r10") = d;
+    __asm__ volatile("syscall" : "+r"(rax) : "r"(rdi), "r"(rsi), "r"(rdx), "r"(r10)
+                     : "rcx", "r11", "memory");
+    return rax;
+}
 #else /* i386 */
 static long sys3(long n, long a, long b, long c)
 {
@@ -155,6 +186,18 @@ static long sys3(long n, long a, long b, long c)
                      "popl %%ebx\n\t"
                      : "=a"(r)
                      : "g"(a), "a"(n), "c"(b), "d"(c)
+                     : "memory");
+    return r;
+}
+static long sys4(long n, long a, long b, long c, long d)
+{
+    long r;
+    __asm__ volatile("pushl %%ebx\n\t"
+                     "movl %1, %%ebx\n\t"
+                     "int $0x80\n\t"
+                     "popl %%ebx\n\t"
+                     : "=a"(r)
+                     : "g"(a), "a"(n), "c"(b), "d"(c), "S"(d)
                      : "memory");
     return r;
 }
@@ -184,7 +227,11 @@ static long sys3(long n, long a, long b, long c)
 #endif
 
 static long do_open_rd(const char *p) { return sys3(N_OPENAT, AT_FDCWD, (long)p, O_RDONLY); }
-static long do_open_wr(const char *p) { return sys3(N_OPENAT, AT_FDCWD, (long)p, O_WRONLY | O_CREAT | O_TRUNC); }
+/* v0.1.71: openat WITH the mode argument - the v0.1.67 copy fallback passed
+ * only 3 args, so the mode register was garbage; on the field device that
+ * made the fallback open fail and LINK_FAIL survived even with shim v2
+ * loaded (selfcheck proof: SHIM_LOADED LINK_FAIL). */
+static long do_open_wr(const char *p) { return sys4(N_OPENAT, AT_FDCWD, (long)p, O_WRONLY | O_CREAT | O_TRUNC, MODE); }
 static long do_read(long fd, void *b, long n) { return sys3(N_READ, fd, (long)b, n); }
 static long do_write(long fd, const void *b, long n) { return sys3(N_WRITE, fd, (long)b, n); }
 static long do_close(long fd) { return sys3(N_CLOSE, fd, 0, 0); }
