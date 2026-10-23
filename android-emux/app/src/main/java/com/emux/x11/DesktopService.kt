@@ -490,6 +490,16 @@ class DesktopService(
                             val xl1 = java.io.File(rootfs, "tmp/xvfb.log.1")
                             if (xl1.isFile) noteInfo("xvfb.log.1: " + xl1.readText().lineSequence()
                                 .filter { it.isNotBlank() }.toList().takeLast(4).joinToString(" | ").take(400))
+                            // v0.1.87: Xvfb's OWN bind() errnos (shim v8 log)
+                            // and the per-attempt flags/rc - the last missing
+                            // witnesses, painted every tick so screenshots
+                            // always carry them.
+                            val bl = java.io.File(rootfs, "tmp/emux_bindlog")
+                            if (bl.isFile) noteInfo("bindlog: " + bl.readText().lineSequence()
+                                .filter { it.isNotBlank() }.toList().takeLast(6).joinToString(" ").take(300))
+                            val at = java.io.File(rootfs, "tmp/emux_attempts")
+                            if (at.isFile) noteInfo("attempts: " + at.readText().lineSequence()
+                                .filter { it.isNotBlank() }.toList().takeLast(4).joinToString(" | ").take(300))
                             val sc = java.io.File(rootfs, "tmp/emux_selfcheck")
                             // v0.1.86: chunked so the WHOLE selfcheck (shim
                             // errnos + guest probes) is pane-visible, not a

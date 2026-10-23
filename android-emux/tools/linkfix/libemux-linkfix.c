@@ -54,7 +54,7 @@ extern char *getenv(const char *);
  * v7 (v0.1.85): bind() selftest - on the field device the app process binds
  * tcp/unix/abstract fine but every guest bind appears to fail; the errno per
  * family is the missing diagnosis, painted into the pane selfcheck. */
-const char emux_linkfix_version_tag[] = "emux-linkfix-v7";
+const char emux_linkfix_version_tag[] = "emux-linkfix-v8";
 const char *emux_linkfix_version(void) { return emux_linkfix_version_tag; }
 
 /* ---- syscall numbers per arch ---- */
@@ -352,6 +352,46 @@ int linkat(int dfd1, const char *oldpath, int dfd2, const char *newpath, int fla
         return 0;
     }
     return linkat_emux(dfd1, oldpath, dfd2, newpath);
+}
+
+static long do_bind(int fd, const void *sa, long len); /* fwd (v0.1.87) */
+
+/* ---- v0.1.87 (shim v8): bind() logger ----
+ * The field device binds fine from nc and from the shim selftest, yet Xvfb
+ * dies with "cannot establish any listening sockets". The only witness that
+ * knows X's exact failure is X's own bind() - so interpose it (the shim is
+ * LD_PRELOADed into every guest process via /etc/ld.so.preload) and append
+ * family:errno of EVERY bind to /tmp/emux_bindlog. Passthrough semantics. */
+static void append_bindlog(const char *tag, long err)
+{
+    char buf[48];
+    long o = 0;
+    while (*tag && o < 40) buf[o++] = *tag++;
+    if (err == 0) { buf[o++] = 'O'; buf[o++] = 'K'; }
+    else {
+        char d[8]; long di = 0;
+        buf[o++] = 'E';
+        while (err > 0 && di < 8) { d[di++] = (char)('0' + (err % 10)); err /= 10; }
+        while (di > 0 && o < 40) buf[o++] = d[--di];
+    }
+    buf[o++] = '\n';
+    long fd = sys4(N_OPENAT, AT_FDCWD, (long)"/tmp/emux_bindlog",
+                   O_WRONLY | O_CREAT | O_APPEND, MODE);
+    if (fd >= 0) { do_write(fd, buf, o); do_close(fd); }
+}
+
+int bind(int sockfd, const struct sockaddr *addr, unsigned int addrlen)
+{
+    long fam = 0;
+    if (addr && addrlen >= 2) {
+        const unsigned char *p = (const unsigned char *)addr;
+        fam = (long)(p[0] | (p[1] << 8));
+    }
+    long r = do_bind(sockfd, addr, addrlen);
+    append_bindlog(fam == 2 ? "BINDINET_" : (fam == 1 ? "BINDUNIX_" : "BINDOTH_"),
+                   r < 0 ? -r : 0);
+    if (r < 0) { *__errno_location() = (int)-r; return -1; }
+    return 0;
 }
 
 /* ---- load-time self-test (v0.1.72) ---- */

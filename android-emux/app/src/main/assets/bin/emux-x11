@@ -313,6 +313,7 @@ else
     kill_stale_x
     XTRY=$((XTRY + 1))
     echo "emux-x11: Xvfb attempt $XTRY:$*" >&2
+    ATTEMPT_FLAGS="$*"
     "$XVFB" :0 -screen 0 "$RES" -listen tcp -ac "$@" >/tmp/xvfb.log 2>&1 &
     XPID=$!
     i=0
@@ -324,6 +325,7 @@ else
     return 2
   }
   rc=0
+  : > /tmp/emux_attempts 2>/dev/null
   # v0.1.86: PURE IPv4 TCP first. The v0.1.85 shim selftest proved guest
   # binds work for IPv4/unix-path/abstract (all errno 0), so X's failure is
   # X-specific: its dual-stack tcp listener tries AF_INET6 first (the host
@@ -332,6 +334,7 @@ else
   # every client we run speaks IPv4 tcp (X11Client dials 127.0.0.1; Xlib
   # falls back from unix to tcp for DISPLAY=:0).
   start_xvfb -nolisten unix -nolisten inet6 || rc=$?
+  echo "attempt $XTRY rc=$rc flags=$ATTEMPT_FLAGS" >> /tmp/emux_attempts 2>/dev/null
   if [ "$rc" = 2 ]; then
     # server alive, socket slow (first-run font scan under proot): give it
     # 60 s more INSTEAD of killing it - the v0.1.39 logic mistook slow for shm.
@@ -344,9 +347,11 @@ else
     if grep -qi "shm" /tmp/xvfb.log.1 2>/dev/null && [ -n "$NOSHEM" ]; then
       echo "emux-x11: shm failure in log - retrying with $NOSHEM" >&2
       start_xvfb -nolisten unix $NOSHEM || rc=$?
+      echo "attempt $XTRY rc=$rc flags=$ATTEMPT_FLAGS" >> /tmp/emux_attempts 2>/dev/null
     else
       echo "emux-x11: retrying with tcp (all families, unix off)" >&2
       start_xvfb -nolisten unix || rc=$?
+      echo "attempt $XTRY rc=$rc flags=$ATTEMPT_FLAGS" >> /tmp/emux_attempts 2>/dev/null
     fi
     # v0.1.80: if THAT also died on a socket clash, sweep once more, 3rd shot
     if [ "$rc" = 1 ] && grep -qi "listening sockets" /tmp/xvfb.log 2>/dev/null; then
@@ -354,6 +359,7 @@ else
       probe_sockets
       kill_stale_x
       start_xvfb || rc=$?
+      echo "attempt $XTRY rc=$rc flags=$ATTEMPT_FLAGS" >> /tmp/emux_attempts 2>/dev/null
     fi
   fi
 fi

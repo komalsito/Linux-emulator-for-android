@@ -980,3 +980,20 @@ the selfcheck in 340-char chunks (3 notes) so shim errnos AND guest probes
 are pane-visible instead of a truncated 350-char prefix.
 jailtest: 25 assertions (first attempt must drop unix AND inet6).
 versionCode 86, rebuilt emux-debug.apk (same keystore).
+
+## 33. v0.1.87 - Xvfb's own bind() becomes the witness (shim v8 bind logger)
+
+v0.1.86 field: guest probes bind tcp 6000 (rc=0 - nc even accepted the
+Android control plane's connect!), tcp 6001 and unix path (124=ok), shim
+selftest BIND*_0 - sockets work perfectly in the guest, yet Xvfb still
+dies with the generic listen fatal. The only witness left is Xvfb's own
+bind() calls, so the shim (LD_PRELOADed into EVERY guest process via
+/etc/ld.so.preload) now interposes bind(): passthrough semantics, but
+every call appends family+errno (BINDINET_/BINDUNIX_/BINDOTH_ + OK/E<n>)
+to /tmp/emux_bindlog. emux-x11 records each launch attempt's flags+rc to
+/tmp/emux_attempts. The 15 s watcher paints both files every tick
+("bindlog: ...", "attempts: ..."), so the next screenshot carries X's
+exact per-bind errno and the flag sequence that produced it.
+Shim marker v8; sandbox-verified with a bind() test program (BINDINET_OK).
+No behaviour change otherwise; launch order stays v0.1.86's.
+versionCode 87, rebuilt emux-debug.apk (same keystore).
