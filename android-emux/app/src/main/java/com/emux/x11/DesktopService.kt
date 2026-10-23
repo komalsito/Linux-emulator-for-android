@@ -389,7 +389,8 @@ class DesktopService(
                             p.absolutePath, android.net.LocalSocketAddress.Namespace.FILESYSTEM))
                         s.close(); p.delete(); true
                     }.getOrElse { false }
-                    hostProbeNote = "hostbind tcp6000=$tcpOk abs=$absOk unixpath=$fsOk"
+                    // unixpath first: it is the discriminating value and the pane truncates
+                    hostProbeNote = "hostbind unixpath=$fsOk tcp6000=$tcpOk abs=$absOk"
                     noteInfo("host bind probe: $hostProbeNote")
                 }
                 killDesktopGuests()

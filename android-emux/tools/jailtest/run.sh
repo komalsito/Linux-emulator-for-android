@@ -39,6 +39,7 @@ rc=$?
 [ "$rc" = "0" ]; expect "NEW: clean exit (rc=0, was: no X server available)" 0 $?
 grep -q "ghost package xvfb" "$T/new.log"; expect "NEW: ghost xvfb purged" 0 $?
 grep -q "apt-stub: installed xvfb" "$FR/actions.log" 2>/dev/null; expect "NEW: xvfb really installed" 0 $?
+grep -v -- "-version" "$FR/tmp/xvfb-args" 2>/dev/null | head -1 | grep -q -- "-nolisten unix"; expect "NEW: first attempt is tcp-only (-nolisten unix)" 0 $?
 if [ -e "$FR/tmp/xvfb-args" ] && grep "noshmem" "$FR/tmp/xvfb-args" | grep -v -- "-version" | grep -q .; then
   expect "NEW: no LAUNCH passes -noshmem (noble Xvfb rejects it)" 1 0
 else

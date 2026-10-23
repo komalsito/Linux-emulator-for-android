@@ -804,6 +804,23 @@ class VtTerminalView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attr
 
     override fun onKeyDown(keyCode: Int, event: KeyEvent): Boolean {
         val s = session ?: return super.onKeyDown(keyCode, event)
+        // v0.1.84: IN-APP layout switch shortcut - the ROM's external-keyboard
+        // layout shortcut never reaches this app (field device), so Alt+Shift
+        // (either press order) toggles the terminal layout Auto<->Spanish and
+        // prints the new mode. Terminal-only; desktop untouched.
+        val isShiftKey = keyCode == KeyEvent.KEYCODE_SHIFT_LEFT || keyCode == KeyEvent.KEYCODE_SHIFT_RIGHT
+        val isAltKey = keyCode == KeyEvent.KEYCODE_ALT_LEFT || keyCode == KeyEvent.KEYCODE_ALT_RIGHT
+        if ((isShiftKey || isAltKey) && event.isAltPressed && event.isShiftPressed) {
+            val sp = androidx.preference.PreferenceManager.getDefaultSharedPreferences(context)
+            val cur = sp.getString("term_keylayout", "auto") ?: "auto"
+            val next = if (cur == "es") "auto" else "es"
+            sp.edit().putString("term_keylayout", next).apply()
+            val msg = "\r\n[emux] terminal keyboard layout: $next\r\n"
+            val mb = msg.toByteArray()
+            s.write(mb)
+            localEcho(mb)
+            return true
+        }
         // v0.1.83: optional in-app physical layout (TERMINAL ONLY; the user
         // asked for the desktop to stay untouched). ROM shortcuts that switch
         // an external keyboard's layout never reach this app on several

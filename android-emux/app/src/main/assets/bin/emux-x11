@@ -288,12 +288,24 @@ else
   # the server's own fallback (which is why upstream dropped the flag).
   NOSHEM=""
   if "$XVFB" -noshmem -version >/dev/null 2>&1; then NOSHEM="-noshmem"; fi
+  # v0.1.84: TCP-ONLY FIRST ATTEMPT. The v0.1.83 pinned probe settled it:
+  # hostbind tcp6000=true abs=true while the guest Xvfb dies with the generic
+  # "server already running" fatal => the failure is GUEST-INTERNAL (proot
+  # unix-socket translation / SELinux on the path+abstract binds), not an
+  # orphan holder. -nolisten unix drops the unix transport entirely; every
+  # client we run works over tcp (X11Client talks tcp:6000 by design; xwd /
+  // xterm / openbox use Xlib, which falls back to tcp for DISPLAY=:0 when
+  # the unix socket is unavailable).
+  tcp_open() {
+    if command -v nc >/dev/null 2>&1; then nc -z 127.0.0.1 6000 2>/dev/null; return $?; fi
+    if [ -x /bin/bash ]; then /bin/bash -c 'exec 3<>/dev/tcp/127.0.0.1/6000' 2>/dev/null; return $?; fi
+    return 1
+  }
+  x_up() { [ -e /tmp/.X11-unix/X0 ] || tcp_open; }
   XTRY=0
-  start_xvfb() { # rc: 0 socket up, 1 server died, 2 alive but no socket yet
+  start_xvfb() { # rc: 0 up, 1 server died, 2 alive but not up yet
     [ -f /tmp/xvfb.log ] && mv -f /tmp/xvfb.log /tmp/xvfb.log.1 2>/dev/null
-    # v0.1.80: sweep + drop stale sockets on EVERY attempt (not just script
-    # start): a retry into a stale X0/tcp-6000 holder is exactly the v0.1.79
-    # field fatal ("Cannot establish any listening sockets").
+    # v0.1.80/81: sweep + drop stale sockets on EVERY attempt
     kill_stale_x
     XTRY=$((XTRY + 1))
     echo "emux-x11: Xvfb attempt $XTRY:$*" >&2
@@ -301,44 +313,43 @@ else
     XPID=$!
     i=0
     while [ "$i" -lt 450 ]; do
-      [ -e /tmp/.X11-unix/X0 ] && return 0
+      x_up && return 0
       kill -0 "$XPID" 2>/dev/null || return 1
       sleep 0.1; i=$((i + 1))
     done
     return 2
   }
   rc=0
-  start_xvfb || rc=$?
+  start_xvfb -nolisten unix || rc=$?
   if [ "$rc" = 2 ]; then
     # server alive, socket slow (first-run font scan under proot): give it
     # 60 s more INSTEAD of killing it - the v0.1.39 logic mistook slow for shm.
-    echo "emux-x11: Xvfb alive but X0 not up in 45 s - waiting 60 s more" >&2
+    echo "emux-x11: Xvfb alive but not up in 45 s - waiting 60 s more" >&2
     i=0
-    while [ "$i" -lt 600 ] && [ ! -e /tmp/.X11-unix/X0 ]; do sleep 0.1; i=$((i + 1)); done
+    while [ "$i" -lt 600 ] && ! x_up; do sleep 0.1; i=$((i + 1)); done
   elif [ "$rc" = 1 ]; then
     echo "emux-x11: Xvfb died on first start - previous log kept at /tmp/xvfb.log.1:" >&2
     tail -5 /tmp/xvfb.log.1 >&2 2>/dev/null
     if grep -qi "shm" /tmp/xvfb.log.1 2>/dev/null && [ -n "$NOSHEM" ]; then
       echo "emux-x11: shm failure in log - retrying with $NOSHEM" >&2
-      start_xvfb $NOSHEM || rc=$?
+      start_xvfb -nolisten unix $NOSHEM || rc=$?
     else
-      echo "emux-x11: retrying once with the same flags" >&2
+      echo "emux-x11: retrying with ALL transports (tcp-only mode may be the issue)" >&2
       start_xvfb || rc=$?
     fi
-    # v0.1.80: if THAT also died on a socket clash, an unmatched holder is
-    # alive (foreign proot instance): sweep once more and take a 3rd shot.
+    # v0.1.80: if THAT also died on a socket clash, sweep once more, 3rd shot
     if [ "$rc" = 1 ] && grep -qi "listening sockets" /tmp/xvfb.log 2>/dev/null; then
       echo "emux-x11: socket clash persists - sweeping again, 3rd attempt" >&2
       probe_sockets
       kill_stale_x
-      start_xvfb || rc=$?
+      start_xvfb -nolisten unix || rc=$?
     fi
   fi
 fi
 # v0.1.79: REST (WM + capture toolchain) installs NOW that X is up - never
 # under a starting server (see APT_BRANCH note above). When it lands, start
 # the WM if none runs yet.
-if [ -e /tmp/.X11-unix/X0 ] && [ "$APT_BRANCH" = 1 ]; then
+if x_up && [ "$APT_BRANCH" = 1 ]; then
   (
     TRIES=0
     while [ "$TRIES" -lt 30 ]; do
@@ -364,8 +375,8 @@ fi
 [ -n "$XPID" ] || XPID=$!
 
 # fail loudly with the captured log
-if [ ! -e /tmp/.X11-unix/X0 ]; then
-  echo "emux-x11: X server did not create /tmp/.X11-unix/X0 in time - log follows (previous attempt: /tmp/xvfb.log.1):" >&2
+if ! x_up; then
+  echo "emux-x11: X server never came up (no X0, tcp 6000 closed) - log follows (previous attempt: /tmp/xvfb.log.1):" >&2
   tail -20 /tmp/xvfb.log >&2
   exit 1
 fi
@@ -396,10 +407,10 @@ if [ "$RC" != 0 ] && [ ! -e /tmp/emux_xvfb_restarted ]; then
   echo "emux-x11: Xvfb died rc=$RC - restarting once${NOSHEM:+ with $NOSHEM}" >&2
   [ -f /tmp/xvfb.log ] && mv -f /tmp/xvfb.log /tmp/xvfb.log.1 2>/dev/null
   kill_stale_x
-  "$XVFB" :0 -screen 0 "$RES" -listen tcp -ac $NOSHEM >/tmp/xvfb.log 2>&1 &
+  "$XVFB" :0 -screen 0 "$RES" -listen tcp -ac -nolisten unix $NOSHEM >/tmp/xvfb.log 2>&1 &
   XPID=$!
   i=0
-  while [ ! -e /tmp/.X11-unix/X0 ] && [ "$i" -lt 150 ]; do sleep 0.1; i=$((i+1)); done
+  while ! x_up && [ "$i" -lt 150 ]; do sleep 0.1; i=$((i+1)); done
   wait $XPID
   RC=$?
 fi

@@ -916,3 +916,24 @@ never reaches the app (Spanish physical keyboard, English-only output).
   orphan-vs-guest-b bind discrimination. probe_sockets() also mirrors its
   lines to /tmp/emux_probes for the watcher to read.
 versionCode 83, rebuilt emux-debug.apk (same keystore).
+
+## 30. v0.1.84 - tcp-only Xvfb (the guest-bind workaround) + in-app layout shortcut
+
+The v0.1.83 pinned probe delivered its verdict on the field:
+"hostbind tcp6000=true abs=true" while the guest Xvfb still dies with the
+generic clash fatal => NO orphan holder exists; the bind failure is
+GUEST-INTERNAL (proot unix-socket translation / SELinux on the path and
+abstract binds). It cannot be fixed from inside the guest, so v0.1.84
+routes around it: the first Xvfb attempt is now `-nolisten unix` (tcp
+transport only). Every client we run works over tcp: X11Client by design
+(tcp 6000), and xwd/xterm/openbox through Xlib's DISPLAY=:0 tcp fallback
+when the unix socket is unavailable. x_up() = X0 socket OR tcp 6000 open
+(nc -z, else bash /dev/tcp); ALL gates use it (REST install, fail-loudly,
+death-restart wait). Attempt 2 falls back to all transports in case
+tcp-only mode is ever the problem; attempt 3 keeps the clash sweep.
+- In-app layout shortcut: Alt+Shift toggles Terminal layout Auto<->Spanish
+  and prints the mode (the ROM shortcut never reaches the app); the
+  v0.1.83 Settings entry remains. Desktop tab still untouched.
+- Host probe note lists unixpath FIRST (the pane truncates from the end).
+- jailtest: 24 assertions (first launch must carry -nolisten unix).
+versionCode 84, rebuilt emux-debug.apk (same keystore).
