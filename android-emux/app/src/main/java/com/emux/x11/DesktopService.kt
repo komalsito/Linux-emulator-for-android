@@ -364,6 +364,30 @@ class DesktopService(
                 //     bind :7001 and start a fresh capture - otherwise the old
                 //     emux-capture keeps an ESTABLISHED socket on our port and the
                 //     bind fails EADDRINUSE, and the old Xvfb holds :0.
+                // v0.1.82 HOST BIND PROBE, before any cleanup: X's "server
+                //     already running" hides the real errno. If the HOST can
+                //     bind tcp 6000 / the unix socket path / an abstract socket
+                //     fine, then NO orphan holds them and the failure is inside
+                //     the guest (proot socket translation / SELinux) - the two
+                //     cases need completely different fixes, and the field pane
+                //     could not tell them apart until now.
+                runCatching {
+                    val tcpOk = runCatching {
+                        java.net.ServerSocket(6000).close(); true
+                    }.getOrElse { false }
+                    val absOk = runCatching {
+                        android.net.LocalServerSocket("emux-bind-probe").close(); true
+                    }.getOrElse { false }
+                    val fsOk = runCatching {
+                        val p = java.io.File(rootfs, "tmp/.X11-unix/Xprobe-host")
+                        p.parentFile?.mkdirs()
+                        val s = android.net.LocalSocket()
+                        s.bind(android.net.LocalSocketAddress(
+                            p.absolutePath, android.net.LocalSocketAddress.Namespace.FILESYSTEM))
+                        s.close(); p.delete(); true
+                    }.getOrElse { false }
+                    noteInfo("host bind probe: tcp6000=$tcpOk abstract=$absOk unixpath=$fsOk")
+                }
                 killDesktopGuests()
 
                 // 1) Open our frame listener BEFORE starting capture so no frames lost.

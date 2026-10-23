@@ -67,6 +67,25 @@ kill_stale_x() {
 kill_stale_x
 rm -f /tmp/emux_wm_launched /tmp/emux_xvfb_restarted 2>/dev/null
 
+# v0.1.82: SOCKET PROBES. X's "Cannot establish any listening sockets /
+# server already running" is a GENERIC message that hides the real errno -
+# it fires for a live orphan holder AND for bind() failures (proot socket
+# translation, SELinux). These lines let the next field round tell them
+# apart without guessing: directory state, kernel tcp tables (6000 =
+# 0x1770), and live bind probes (124 = bind OK and blocked in listen).
+probe_sockets() {
+  echo "emux-x11: probe .X11-unix: $(ls -la /tmp/.X11-unix 2>&1 | tr '\n' ' ')" >&2
+  echo "emux-x11: probe tcp6000: $(grep -hi ':1770 ' /proc/net/tcp /proc/net/tcp6 2>/dev/null | tr -s ' ' | cut -d' ' -f2,4,10 | tr '\n' ' ')" >&2
+  if command -v nc >/dev/null 2>&1 && command -v timeout >/dev/null 2>&1; then
+    timeout 1 nc -l 6001 >/dev/null 2>&1
+    echo "emux-x11: probe tcp-bind-6001 rc=$? (124=ok, other=failed)" >&2
+    timeout 1 nc -l -U /tmp/.X11-unix/Xprobe >/dev/null 2>&1
+    echo "emux-x11: probe unix-bind rc=$? (124=ok, other=failed)" >&2
+    rm -f /tmp/.X11-unix/Xprobe 2>/dev/null
+  fi
+}
+probe_sockets
+
 # v0.1.78: xkbcomp preflight. The X server execs /usr/bin/xkbcomp BY ABSOLUTE
 # PATH through /bin/sh while compiling its keymap; a ghost x11-xkb-utils (db
 # installed, binary gone) makes Xvfb die with "Failed to activate virtual core
@@ -308,6 +327,7 @@ else
     # alive (foreign proot instance): sweep once more and take a 3rd shot.
     if [ "$rc" = 1 ] && grep -qi "listening sockets" /tmp/xvfb.log 2>/dev/null; then
       echo "emux-x11: socket clash persists - sweeping again, 3rd attempt" >&2
+      probe_sockets
       kill_stale_x
       start_xvfb || rc=$?
     fi

@@ -868,3 +868,31 @@ host /proc) can.
 Reminder (v0.1.80): the FULL desktop log lives at guest
 /tmp/emux_desktop_diag.log - cat it in the Terminal tab when a round fails.
 versionCode 81, rebuilt emux-debug.apk (same keystore).
+
+## 28. v0.1.82 - terminal dead-key composition + errno-level socket forensics
+
+The v0.1.81 field pane repeated the generic clash fatal EVEN WITH the host
+orphan kill - proving the message cannot distinguish its causes: X prints
+"server already running / Cannot establish any listening sockets" for ANY
+bind() failure (live orphan holder, proot socket translation, SELinux).
+v0.1.82 ships the discrimination plus the keyboard fix the user approved
+for the TERMINAL ONLY (desktop deliberately untouched - "should feel as
+much as possible like a real laptop"):
+
+- VtTerminalView dead-key composition: a dead-key press ('´' '`' '^' '~'
+  '¨') arrives with KeyCharacterMap.COMBINING_ACCENT set; it is held and
+  composed with the next character via KeyEvent.getDeadChar(accent, base).
+  Non-composing follow-ups emit accent+base literally; control-key
+  follow-ups emit the accent then the control sequence. Before this,
+  '´'+'e' never produced 'é' on the Spanish physical keyboard.
+- emux-x11 probe_sockets(): at start AND on a persistent clash, dumps
+  /tmp/.X11-unix contents, the kernel tcp-table rows for :6000 (0x1770),
+  and live bind probes via nc (tcp 6001 + unix path; rc 124 = bind ok).
+- DesktopService host bind probe BEFORE any cleanup: ServerSocket(6000),
+  an abstract LocalServerSocket, and a FILESYSTEM-namespace LocalSocket
+  bind into the rootfs tmp. If the host binds all three fine while the
+  guest still reports the clash, the cause is guest-internal (proot
+  socket translation / SELinux), not an orphan - the two need completely
+  different fixes and the pane can now tell them apart.
+- jailtest unchanged (23 assertions; OLD scenario needs git history).
+versionCode 82, rebuilt emux-debug.apk (same keystore).

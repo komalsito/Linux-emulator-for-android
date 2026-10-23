@@ -61,6 +61,9 @@ class VtTerminalView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attr
     private var altScreen = false
     private var cursorVisible = true
     private var applicationCursorKeys = false
+    // v0.1.82: held dead-key accent (COMBINING_ACCENT-masked char) awaiting the
+    // next character for getDeadChar() composition. Terminal-only fix.
+    private var pendingDeadAccent = 0
 
     private val stylePool = ArrayList<Style>()
     private val defStyle = Style().also { stylePool.add(it) }
@@ -801,6 +804,38 @@ class VtTerminalView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attr
 
     override fun onKeyDown(keyCode: Int, event: KeyEvent): Boolean {
         val s = session ?: return super.onKeyDown(keyCode, event)
+        // v0.1.82 TERMINAL-ONLY dead-key composition (field request: Spanish
+        // physical keyboard). A dead-key press ('´', '`', '^', '~', '¨')
+        // arrives with the COMBINING_ACCENT bit set; hold it and compose with
+        // the NEXT character via KeyEvent.getDeadChar(). Before this, the
+        // accent event (unicodeChar carrying the accent bit) fell through the
+        // unicodeChar!=0 path as a raw combining char or was dropped, so
+        // '´'+'e' never produced 'é' - Spanish felt "not working" even with
+        // the correct Android layout. Desktop tab intentionally untouched.
+        val ucRaw = event.unicodeChar
+        if (ucRaw != 0 && (ucRaw and android.view.KeyCharacterMap.COMBINING_ACCENT) != 0) {
+            pendingDeadAccent = ucRaw and android.view.KeyCharacterMap.COMBINING_ACCENT_MASK
+            return true
+        }
+        if (pendingDeadAccent != 0) {
+            val accent = pendingDeadAccent
+            pendingDeadAccent = 0
+            val base = ucRaw
+            if (base != 0) {
+                val composed = android.view.KeyEvent.getDeadChar(accent, base)
+                val out = if (composed != 0) String(Character.toChars(composed))
+                else String(Character.toChars(accent)) + String(Character.toChars(base))
+                val bytes = out.toByteArray()
+                s.write(bytes)
+                localEcho(bytes)
+                return true
+            }
+            // non-printable follow-up (ESC/arrows/...): emit accent literally
+            val ab = String(Character.toChars(accent)).toByteArray()
+            s.write(ab)
+            localEcho(ab)
+            // fall through to the control-key handling below
+        }
         val seq: String? = when (keyCode) {
             KeyEvent.KEYCODE_DEL -> "\u007F"
             KeyEvent.KEYCODE_ENTER, KeyEvent.KEYCODE_NUMPAD_ENTER -> "\r"
