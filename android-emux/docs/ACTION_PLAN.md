@@ -1166,27 +1166,3 @@ never could.
   no-cache exec tax until the repair finished - the "reopen is faster"
   symptom).
 versionCode 95, rebuilt emux-debug.apk (same keystore).
-
-## 41. v0.1.95 - THE frames bug: mawk drops NULs; native converter + perf follow-ups
-
-v0.1.94 field: all-green pane (X up rc=0, capture started, bindlog clean)
-and STILL zero frames at 4 minutes, capture perfectly silent. Root cause:
-emux-capture's pixel conversion emits RGB565 via awk printf "%c" - verified
-against BUSYBOX awk (Alpine) back in v0.1.28 - but Debian/Ubuntu ship MAWK
-as awk, and mawk DROPS NUL bytes from %c output. Black pixels are two NULs
-in RGB565, so the stream desyncs silently: the Android reader waits for an
-8-byte header that never arrives intact. Alpine would have worked; Ubuntu
-never could.
-- tools/capture/emux-rgb565.c: freestanding static PPM(P3/P6)->RGB565LE
-  converter (raw syscalls, one binary per ABI, no DT_NEEDED), shipped in
-  assets/capture/<abi>/ and seeded to /usr/local/lib/emux/emux-rgb565
-  next to the shim (every installLinkFixShim call site). emux-capture uses
-  it when present (awk only as fallback) and echoes the converter choice,
-  first-grab and push-channel status to stderr (pane-visible).
-  Sandbox-verified byte-exact incl. NUL-heavy black pixels, P6 and comments.
-- v0.1.94 perf follow-up: the ld.so.cache login gate is now RESEEDED into
-  etc/profile.d/emux.sh on existing rootfs trees (profile was bootstrap-
-  only, so updated devices never got the cache gate and kept paying the
-  no-cache exec tax until the repair finished - the "reopen is faster"
-  symptom).
-versionCode 95, rebuilt emux-debug.apk (same keystore).
