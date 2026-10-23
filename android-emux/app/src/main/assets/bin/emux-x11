@@ -308,6 +308,9 @@ else
   x_up() { [ -e /tmp/.X11-unix/X0 ] || tcp_open; }
   XTRY=0
   start_xvfb() { # rc: 0 up, 1 server died, 2 alive but not up yet
+    # v0.1.88: keep THREE generations - attempt 1's log was being lost after
+    # two rotations, and attempt 1 is where the truth lives.
+    [ -f /tmp/xvfb.log.1 ] && mv -f /tmp/xvfb.log.1 /tmp/xvfb.log.2 2>/dev/null
     [ -f /tmp/xvfb.log ] && mv -f /tmp/xvfb.log /tmp/xvfb.log.1 2>/dev/null
     # v0.1.80/81: sweep + drop stale sockets on EVERY attempt
     kill_stale_x
@@ -333,8 +336,10 @@ else
   # .X11-unix dir. Both are sidestepped by -nolisten unix -nolisten inet6;
   # every client we run speaks IPv4 tcp (X11Client dials 127.0.0.1; Xlib
   # falls back from unix to tcp for DISPLAY=:0).
-  start_xvfb -nolisten unix -nolisten inet6 || rc=$?
-  echo "attempt $XTRY rc=$rc flags=$ATTEMPT_FLAGS" >> /tmp/emux_attempts 2>/dev/null
+  # v0.1.88: "local" too - on some X builds -nolisten unix alone does not
+  # disable the unix transport ("local" is the classic umbrella name).
+  start_xvfb -nolisten unix -nolisten local -nolisten inet6 || rc=$?
+  echo "$(date +%s) attempt $XTRY rc=$rc flags=$ATTEMPT_FLAGS" >> /tmp/emux_attempts 2>/dev/null
   if [ "$rc" = 2 ]; then
     # server alive, socket slow (first-run font scan under proot): give it
     # 60 s more INSTEAD of killing it - the v0.1.39 logic mistook slow for shm.
@@ -347,11 +352,11 @@ else
     if grep -qi "shm" /tmp/xvfb.log.1 2>/dev/null && [ -n "$NOSHEM" ]; then
       echo "emux-x11: shm failure in log - retrying with $NOSHEM" >&2
       start_xvfb -nolisten unix $NOSHEM || rc=$?
-      echo "attempt $XTRY rc=$rc flags=$ATTEMPT_FLAGS" >> /tmp/emux_attempts 2>/dev/null
+      echo "$(date +%s) attempt $XTRY rc=$rc flags=$ATTEMPT_FLAGS" >> /tmp/emux_attempts 2>/dev/null
     else
       echo "emux-x11: retrying with tcp (all families, unix off)" >&2
-      start_xvfb -nolisten unix || rc=$?
-      echo "attempt $XTRY rc=$rc flags=$ATTEMPT_FLAGS" >> /tmp/emux_attempts 2>/dev/null
+      start_xvfb -nolisten unix -nolisten local || rc=$?
+      echo "$(date +%s) attempt $XTRY rc=$rc flags=$ATTEMPT_FLAGS" >> /tmp/emux_attempts 2>/dev/null
     fi
     # v0.1.80: if THAT also died on a socket clash, sweep once more, 3rd shot
     if [ "$rc" = 1 ] && grep -qi "listening sockets" /tmp/xvfb.log 2>/dev/null; then
@@ -359,7 +364,7 @@ else
       probe_sockets
       kill_stale_x
       start_xvfb || rc=$?
-      echo "attempt $XTRY rc=$rc flags=$ATTEMPT_FLAGS" >> /tmp/emux_attempts 2>/dev/null
+      echo "$(date +%s) attempt $XTRY rc=$rc flags=$ATTEMPT_FLAGS" >> /tmp/emux_attempts 2>/dev/null
     fi
   fi
 fi

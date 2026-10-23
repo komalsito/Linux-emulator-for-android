@@ -54,7 +54,7 @@ extern char *getenv(const char *);
  * v7 (v0.1.85): bind() selftest - on the field device the app process binds
  * tcp/unix/abstract fine but every guest bind appears to fail; the errno per
  * family is the missing diagnosis, painted into the pane selfcheck. */
-const char emux_linkfix_version_tag[] = "emux-linkfix-v8";
+const char emux_linkfix_version_tag[] = "emux-linkfix-v9";
 const char *emux_linkfix_version(void) { return emux_linkfix_version_tag; }
 
 /* ---- syscall numbers per arch ---- */
@@ -362,11 +362,20 @@ static long do_bind(int fd, const void *sa, long len); /* fwd (v0.1.87) */
  * knows X's exact failure is X's own bind() - so interpose it (the shim is
  * LD_PRELOADed into every guest process via /etc/ld.so.preload) and append
  * family:errno of EVERY bind to /tmp/emux_bindlog. Passthrough semantics. */
-static void append_bindlog(const char *tag, long err)
+static void append_bindlog(long fam, long err)
 {
     char buf[48];
     long o = 0;
-    while (*tag && o < 40) buf[o++] = *tag++;
+    /* v0.1.88: numeric family tag - B2=AF_INET, B1=AF_UNIX, B10=AF_INET6,
+     * so the pane shows exactly which family each errno belongs to. */
+    buf[o++] = 'B';
+    {
+        char d[8]; long di = 0, f = fam;
+        if (f == 0) d[di++] = '0';
+        while (f > 0 && di < 8) { d[di++] = (char)('0' + (f % 10)); f /= 10; }
+        while (di > 0 && o < 38) buf[o++] = d[--di];
+    }
+    buf[o++] = '_';
     if (err == 0) { buf[o++] = 'O'; buf[o++] = 'K'; }
     else {
         char d[8]; long di = 0;
@@ -388,8 +397,7 @@ int bind(int sockfd, const struct sockaddr *addr, unsigned int addrlen)
         fam = (long)(p[0] | (p[1] << 8));
     }
     long r = do_bind(sockfd, addr, addrlen);
-    append_bindlog(fam == 2 ? "BINDINET_" : (fam == 1 ? "BINDUNIX_" : "BINDOTH_"),
-                   r < 0 ? -r : 0);
+    append_bindlog(fam, r < 0 ? -r : 0);
     if (r < 0) { *__errno_location() = (int)-r; return -1; }
     return 0;
 }

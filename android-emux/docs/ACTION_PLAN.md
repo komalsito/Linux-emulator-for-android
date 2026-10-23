@@ -997,3 +997,21 @@ exact per-bind errno and the flag sequence that produced it.
 Shim marker v8; sandbox-verified with a bind() test program (BINDINET_OK).
 No behaviour change otherwise; launch order stays v0.1.86's.
 versionCode 87, rebuilt emux-debug.apk (same keystore).
+
+## 34. v0.1.88 - complete bind telemetry (numeric families, full log, 3 log generations)
+
+v0.1.87 field bindlog (last 6 only): ... BINDINET_OK BINDUNIX_OK BINDOTH_OK
+BINDINET_OK BINDUNIX_E98 with attempts 1/2/3 all rc=1. Read: guest binds
+mostly succeed; ONE unix bind hits EADDRINUSE (98) - and the truncation
+hid which attempt/family sequence produced it (BINDOTH = AF_INET6=10
+unlabelled). v0.1.88 makes the telemetry lossless:
+- shim v9: numeric family tags (B2_=inet, B1_=unix, B10_=inet6, B<n>_ for
+  the rest), so every line is unambiguous.
+- Watcher paints the FULL bindlog (chunked 3x330), not takeLast(6).
+- xvfb.log now keeps THREE generations (.2 retained): attempt 1's real
+  error survived only two rotations before and was lost.
+- attempts file gains epoch timestamps; attempts 1-2 also pass
+  -nolisten local (on some X builds "unix" alone does not disable the
+  unix transport; "local" is the classic umbrella name).
+Sandbox-verified tag format with a double-bind program (B2_OK / B2_E98).
+versionCode 88, rebuilt emux-debug.apk (same keystore).

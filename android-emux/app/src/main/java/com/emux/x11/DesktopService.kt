@@ -494,12 +494,20 @@ class DesktopService(
                             // and the per-attempt flags/rc - the last missing
                             // witnesses, painted every tick so screenshots
                             // always carry them.
+                            // v0.1.88: the FULL bindlog, chunked - takeLast(6)
+                            // truncated exactly the entries that explain the
+                            // failure (field round v0.1.87).
                             val bl = java.io.File(rootfs, "tmp/emux_bindlog")
-                            if (bl.isFile) noteInfo("bindlog: " + bl.readText().lineSequence()
-                                .filter { it.isNotBlank() }.toList().takeLast(6).joinToString(" ").take(300))
+                            if (bl.isFile) bl.readText().lineSequence()
+                                .filter { it.isNotBlank() }.toList().joinToString(" ")
+                                .chunked(330).take(3)
+                                .forEach { chk -> noteInfo("bindlog: $chk") }
                             val at = java.io.File(rootfs, "tmp/emux_attempts")
                             if (at.isFile) noteInfo("attempts: " + at.readText().lineSequence()
-                                .filter { it.isNotBlank() }.toList().takeLast(4).joinToString(" | ").take(300))
+                                .filter { it.isNotBlank() }.toList().takeLast(4).joinToString(" | ").take(400))
+                            val xl2 = java.io.File(rootfs, "tmp/xvfb.log.2")
+                            if (xl2.isFile) noteInfo("xvfb.log.2: " + xl2.readText().lineSequence()
+                                .filter { it.isNotBlank() }.toList().take(3).joinToString(" | ").take(300))
                             val sc = java.io.File(rootfs, "tmp/emux_selfcheck")
                             // v0.1.86: chunked so the WHOLE selfcheck (shim
                             // errnos + guest probes) is pane-visible, not a
