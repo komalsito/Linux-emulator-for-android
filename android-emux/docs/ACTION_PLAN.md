@@ -1078,3 +1078,22 @@ toolchain landed. A healthy X with no capture = black pane forever.
   yields 6 s to the first session instead of racing it for CPU.
 - DiagColors: "X up=true tools=true" green.
 versionCode 91, rebuilt emux-debug.apk (same keystore).
+
+## 38. v0.1.92 - emux-capture was the last unix-socket believer
+
+v0.1.91 field (color pane, all green where it matters): capture gating
+note fired ("X up and toolchain present"), attempt 1 rc=0, bindlog all
+OK - and STILL no frames, with the capture session perfectly silent.
+Cause: emux-capture waited for /tmp/.X11-unix/X0 (300 x proot'd
+sleep 0.1), which NEVER exists in the v0.1.86+ tcp-only Xvfb mode; it
+spun out its wait, died, respawned silently (respawn notes went to logcat
+only), repeat - a crash-loop that looked like a hang.
+
+- emux-capture now waits for X0 OR tcp 6000 (nc -z / bash /dev/tcp), 1 s
+  granularity (10x less proot exec overhead), 90 s cap, and echoes
+  "X reachable - starting frame pipeline" so the pane sees it live.
+- Capture respawns now noteInfo("capture died pre-frame ... respawning #N")
+  - no more invisible crash-loops on field devices.
+This closes the last unix-socket dependency in the desktop stack: Xvfb,
+X11Client, Xlib clients and capture are all tcp-native now.
+versionCode 92, rebuilt emux-debug.apk (same keystore).

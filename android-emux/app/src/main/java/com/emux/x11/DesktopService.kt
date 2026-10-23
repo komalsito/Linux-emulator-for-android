@@ -496,6 +496,10 @@ class DesktopService(
                             // of leaving the pane at "waiting for X frames".
                             captureRespawns++
                             com.emux.EmuXLog.i("desktop: capture died before first frame - respawning (#$captureRespawns)")
+                            // v0.1.92: respawns were invisible in the pane
+                            // (logcat only), so a capture crash-loop looked
+                            // like a silent hang on the field device.
+                            noteInfo("capture died pre-frame (rc=${captureSession?.exitCode}) - respawning #$captureRespawns")
                             delay(2_000)
                             captureSession = TerminalSession(
                                 9002 + captureRespawns, ctx, root,
