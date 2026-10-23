@@ -79,12 +79,16 @@ probe_sockets() {
   pl "probe .X11-unix: $(ls -la /tmp/.X11-unix 2>&1 | tr '\n' ' ')"
   pl "probe tcp6000: $(grep -hi ':1770 ' /proc/net/tcp /proc/net/tcp6 2>/dev/null | tr -s ' ' | cut -d' ' -f2,4,10 | tr '\n' ' ')"
   if command -v nc >/dev/null 2>&1 && command -v timeout >/dev/null 2>&1; then
+    timeout 1 nc -l 6000 >/dev/null 2>&1
+    pl "probe tcp-bind-6000 rc=$? (124=ok, other=failed)"
     timeout 1 nc -l 6001 >/dev/null 2>&1
     pl "probe tcp-bind-6001 rc=$? (124=ok, other=failed)"
     timeout 1 nc -l -U /tmp/.X11-unix/Xprobe >/dev/null 2>&1
     pl "probe unix-bind rc=$? (124=ok, other=failed)"
     rm -f /tmp/.X11-unix/Xprobe 2>/dev/null
   fi
+  # v0.1.86: mirror into the pane-visible selfcheck file (chunked notes)
+  cat /tmp/emux_probes >> /tmp/emux_selfcheck 2>/dev/null
 }
 probe_sockets
 
@@ -320,7 +324,14 @@ else
     return 2
   }
   rc=0
-  start_xvfb -nolisten unix || rc=$?
+  # v0.1.86: PURE IPv4 TCP first. The v0.1.85 shim selftest proved guest
+  # binds work for IPv4/unix-path/abstract (all errno 0), so X's failure is
+  # X-specific: its dual-stack tcp listener tries AF_INET6 first (the host
+  # probe and shim only tested IPv4) and its unix listener uses the odd-mode
+  # .X11-unix dir. Both are sidestepped by -nolisten unix -nolisten inet6;
+  # every client we run speaks IPv4 tcp (X11Client dials 127.0.0.1; Xlib
+  # falls back from unix to tcp for DISPLAY=:0).
+  start_xvfb -nolisten unix -nolisten inet6 || rc=$?
   if [ "$rc" = 2 ]; then
     # server alive, socket slow (first-run font scan under proot): give it
     # 60 s more INSTEAD of killing it - the v0.1.39 logic mistook slow for shm.
@@ -334,15 +345,15 @@ else
       echo "emux-x11: shm failure in log - retrying with $NOSHEM" >&2
       start_xvfb -nolisten unix $NOSHEM || rc=$?
     else
-      echo "emux-x11: retrying with ALL transports (tcp-only mode may be the issue)" >&2
-      start_xvfb || rc=$?
+      echo "emux-x11: retrying with tcp (all families, unix off)" >&2
+      start_xvfb -nolisten unix || rc=$?
     fi
     # v0.1.80: if THAT also died on a socket clash, sweep once more, 3rd shot
     if [ "$rc" = 1 ] && grep -qi "listening sockets" /tmp/xvfb.log 2>/dev/null; then
       echo "emux-x11: socket clash persists - sweeping again, 3rd attempt" >&2
       probe_sockets
       kill_stale_x
-      start_xvfb -nolisten unix || rc=$?
+      start_xvfb || rc=$?
     fi
   fi
 fi

@@ -491,7 +491,11 @@ class DesktopService(
                             if (xl1.isFile) noteInfo("xvfb.log.1: " + xl1.readText().lineSequence()
                                 .filter { it.isNotBlank() }.toList().takeLast(4).joinToString(" | ").take(400))
                             val sc = java.io.File(rootfs, "tmp/emux_selfcheck")
-                            if (sc.isFile) noteInfo("selfcheck: " + sc.readText().take(350))
+                            // v0.1.86: chunked so the WHOLE selfcheck (shim
+                            // errnos + guest probes) is pane-visible, not a
+                            // 350-char prefix that cuts before the payload.
+                            if (sc.isFile) sc.readText().chunked(340).take(3)
+                                .forEach { chk -> noteInfo("selfcheck: $chk") }
                             // v0.1.77: dpkg's OWN log - names the exact package
                             // and step when a transaction fails.
                             val dl = java.io.File(rootfs, "var/log/dpkg.log")

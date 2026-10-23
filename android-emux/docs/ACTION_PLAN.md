@@ -959,3 +959,24 @@ Next-round decision table: BINDINET EACCES/EPERM => SELinux on tracee binds
 (try proot env/upgrade); EADDRINUSE => hidden holder inside guest netns;
 ENOSYS/EINVAL => proot syscall-translation bug (upgrade proot again).
 versionCode 85, rebuilt emux-debug.apk (same keystore).
+
+## 32. v0.1.86 - pure-IPv4-tcp Xvfb (the X-specific bind bypass) + full selfcheck in pane
+
+v0.1.85 shim selftest on the field: BINDINET_0 BINDUNIXP_0 BINDABS_0 - raw
+guest binds succeed in EVERY family, so proot/SELinux do not block bind()
+generally. The failure is X-SPECIFIC, and two candidates fit all data:
+(a) Xvfb's dual-stack tcp listener binds AF_INET6 first (host probe and shim
+only exercised IPv4; a mangled sockaddr_in6 translation kills the whole tcp
+transport), and (b) the unix listener uses /tmp/.X11-unix, which the field
+probe showed with bizarre modes (drwx------ under a drwx-w--w- /tmp) and the
+shim never tested. Both are sidestepped: attempt 1 is now
+`-nolisten unix -nolisten inet6` (pure IPv4 tcp). Every client we run
+speaks IPv4 tcp: X11Client dials 127.0.0.1:6000 by design; Xlib clients
+(xwd/xterm/openbox) fall back from unix to tcp for DISPLAY=:0. Attempt 2
+= tcp all families (unix off), attempt 3 = all transports.
+Visibility: probe_sockets now also bind-probes tcp 6000 (X's exact port)
+and mirrors all probe lines into /tmp/emux_selfcheck; DesktopService prints
+the selfcheck in 340-char chunks (3 notes) so shim errnos AND guest probes
+are pane-visible instead of a truncated 350-char prefix.
+jailtest: 25 assertions (first attempt must drop unix AND inet6).
+versionCode 86, rebuilt emux-debug.apk (same keystore).
