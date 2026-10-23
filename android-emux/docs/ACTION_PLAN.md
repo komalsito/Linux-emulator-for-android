@@ -896,3 +896,23 @@ much as possible like a real laptop"):
   different fixes and the pane can now tell them apart.
 - jailtest unchanged (23 assertions; OLD scenario needs git history).
 versionCode 82, rebuilt emux-debug.apk (same keystore).
+
+## 29. v0.1.83 - in-app terminal keyboard layout + probes pinned in the pane
+
+v0.1.82 field round: the clash fatal repeated AND the discriminating notes
+(host bind probe, guest probes, attempt echoes) scrolled out of the pane
+window before the user's screenshot - the recurring notes only keep the
+latest lines. And the ROM's external-keyboard layout-switch shortcut still
+never reaches the app (Spanish physical keyboard, English-only output).
+
+- Settings > "Terminal physical keyboard layout" (Auto / Spanish ISO /
+  English): TERMINAL-ONLY positional keycode table (ñ ´ ¨ ¡ ¿ º ç, shifted
+  digits/symbols per ES ISO) feeding the v0.1.82 dead-key composition; Ctrl
+  combos pass through untouched. Desktop tab unchanged (user constraint:
+  the desktop must feel like a real laptop).
+- Probe pinning: the host bind probe result AND the guest's last
+  /tmp/emux_probes lines are now appended to EVERY recurring "t+Ns no
+  frames yet" note and to the ctrl-wait note, so any screenshot carries the
+  orphan-vs-guest-b bind discrimination. probe_sockets() also mirrors its
+  lines to /tmp/emux_probes for the watcher to read.
+versionCode 83, rebuilt emux-debug.apk (same keystore).

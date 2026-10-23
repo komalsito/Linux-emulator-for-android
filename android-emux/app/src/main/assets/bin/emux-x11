@@ -74,13 +74,15 @@ rm -f /tmp/emux_wm_launched /tmp/emux_xvfb_restarted 2>/dev/null
 # apart without guessing: directory state, kernel tcp tables (6000 =
 # 0x1770), and live bind probes (124 = bind OK and blocked in listen).
 probe_sockets() {
-  echo "emux-x11: probe .X11-unix: $(ls -la /tmp/.X11-unix 2>&1 | tr '\n' ' ')" >&2
-  echo "emux-x11: probe tcp6000: $(grep -hi ':1770 ' /proc/net/tcp /proc/net/tcp6 2>/dev/null | tr -s ' ' | cut -d' ' -f2,4,10 | tr '\n' ' ')" >&2
+  : > /tmp/emux_probes 2>/dev/null
+  pl() { echo "emux-x11: $1" >&2; echo "$1" >> /tmp/emux_probes 2>/dev/null; }
+  pl "probe .X11-unix: $(ls -la /tmp/.X11-unix 2>&1 | tr '\n' ' ')"
+  pl "probe tcp6000: $(grep -hi ':1770 ' /proc/net/tcp /proc/net/tcp6 2>/dev/null | tr -s ' ' | cut -d' ' -f2,4,10 | tr '\n' ' ')"
   if command -v nc >/dev/null 2>&1 && command -v timeout >/dev/null 2>&1; then
     timeout 1 nc -l 6001 >/dev/null 2>&1
-    echo "emux-x11: probe tcp-bind-6001 rc=$? (124=ok, other=failed)" >&2
+    pl "probe tcp-bind-6001 rc=$? (124=ok, other=failed)"
     timeout 1 nc -l -U /tmp/.X11-unix/Xprobe >/dev/null 2>&1
-    echo "emux-x11: probe unix-bind rc=$? (124=ok, other=failed)" >&2
+    pl "probe unix-bind rc=$? (124=ok, other=failed)"
     rm -f /tmp/.X11-unix/Xprobe 2>/dev/null
   fi
 }

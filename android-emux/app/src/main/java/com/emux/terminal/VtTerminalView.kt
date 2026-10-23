@@ -804,6 +804,14 @@ class VtTerminalView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attr
 
     override fun onKeyDown(keyCode: Int, event: KeyEvent): Boolean {
         val s = session ?: return super.onKeyDown(keyCode, event)
+        // v0.1.83: optional in-app physical layout (TERMINAL ONLY; the user
+        // asked for the desktop to stay untouched). ROM shortcuts that switch
+        // an external keyboard's layout never reach this app on several
+        // devices, so "Spanish (ISO)" maps the position-based Android
+        // keycodes to ES characters here; dead accents then compose through
+        // the getDeadChar() path below. Ctrl combos always pass through
+        // untouched (Ctrl+C etc. must keep working).
+        val ucRaw = layoutChar(keyCode, event, event.unicodeChar)
         // v0.1.82 TERMINAL-ONLY dead-key composition (field request: Spanish
         // physical keyboard). A dead-key press ('´', '`', '^', '~', '¨')
         // arrives with the COMBINING_ACCENT bit set; hold it and compose with
@@ -812,7 +820,6 @@ class VtTerminalView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attr
         // unicodeChar!=0 path as a raw combining char or was dropped, so
         // '´'+'e' never produced 'é' - Spanish felt "not working" even with
         // the correct Android layout. Desktop tab intentionally untouched.
-        val ucRaw = event.unicodeChar
         if (ucRaw != 0 && (ucRaw and android.view.KeyCharacterMap.COMBINING_ACCENT) != 0) {
             pendingDeadAccent = ucRaw and android.view.KeyCharacterMap.COMBINING_ACCENT_MASK
             return true
@@ -864,6 +871,48 @@ class VtTerminalView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attr
             return true
         }
         return super.onKeyDown(keyCode, event)
+    }
+
+    /**
+     * v0.1.83: positional ES/EN physical-keyboard map for the TERMINAL tab
+     * (Settings > Terminal physical keyboard layout). Android keycodes are
+     * US-position-based; when the ROM never switches the external layout to
+     * Spanish (field device), "es" remaps the symbol keys to their Spanish
+     * ISO characters. Dead accents ('´', '`', '¨') are returned with the
+     * COMBINING_ACCENT bit so the getDeadChar() composition above applies.
+     * Letters/digits/Ctrl combos always pass through unchanged.
+     */
+    private fun layoutChar(keyCode: Int, event: KeyEvent, fallback: Int): Int {
+        val kl = runCatching {
+            androidx.preference.PreferenceManager.getDefaultSharedPreferences(context)
+                .getString("term_keylayout", "auto")
+        }.getOrDefault("auto") ?: "auto"
+        if (kl != "es" || event.isCtrlPressed) return fallback
+        val sh = event.isShiftPressed
+        val c: Char = when (keyCode) {
+            KeyEvent.KEYCODE_GRAVE -> if (sh) 'ª' else 'º'
+            KeyEvent.KEYCODE_2 -> if (sh) '"' else null
+            KeyEvent.KEYCODE_3 -> if (sh) '·' else null
+            KeyEvent.KEYCODE_6 -> if (sh) '&' else null
+            KeyEvent.KEYCODE_7 -> if (sh) '/' else null
+            KeyEvent.KEYCODE_8 -> if (sh) '(' else null
+            KeyEvent.KEYCODE_9 -> if (sh) ')' else null
+            KeyEvent.KEYCODE_0 -> if (sh) '=' else null
+            KeyEvent.KEYCODE_MINUS -> if (sh) '?' else '\''
+            KeyEvent.KEYCODE_EQUALS -> if (sh) '¿' else '¡'
+            KeyEvent.KEYCODE_LEFT_BRACKET -> if (sh) '^' else '`'
+            KeyEvent.KEYCODE_RIGHT_BRACKET -> if (sh) '*' else '+'
+            KeyEvent.KEYCODE_BACKSLASH -> if (sh) 'Ç' else 'ç'
+            KeyEvent.KEYCODE_SEMICOLON -> if (sh) 'Ñ' else 'ñ'
+            KeyEvent.KEYCODE_APOSTROPHE -> if (sh) '¨' else '´'
+            KeyEvent.KEYCODE_COMMA -> if (sh) ';' else ','
+            KeyEvent.KEYCODE_PERIOD -> if (sh) ':' else '.'
+            KeyEvent.KEYCODE_SLASH -> if (sh) '_' else '-'
+            else -> null
+        } ?: return fallback
+        return if (c == '´' || c == '`' || c == '¨')
+            c.code or android.view.KeyCharacterMap.COMBINING_ACCENT
+        else c.code
     }
 
     /** v0.1.40: renderer state for field diagnostics (fed into the stream dbg line). */

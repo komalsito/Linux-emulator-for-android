@@ -159,6 +159,21 @@ class SettingsActivity : AppCompatActivity() {
                 summary = "Use su/Magisk for real chroot when available"
                 setDefaultValue(true)
             })
+            // v0.1.83: TERMINAL-ONLY physical keyboard layout. ROM shortcuts
+            // that switch an external keyboard's layout never reach this app
+            // on several devices (Huawei-class), so the terminal gets its own
+            // positional ES/EN symbol table + dead-key composition. The
+            // Desktop tab is deliberately untouched (real-laptop feel).
+            screen.addPreference(androidx.preference.ListPreference(ctx).apply {
+                key = "term_keylayout"; title = "Terminal physical keyboard layout"
+                summary = "Terminal tab only. Auto = use what Android reports; " +
+                    "Spanish (ISO) maps the symbol keys positionally (ñ ´ ¨ ¡ ¿ º ç ...) " +
+                    "and composes dead-key accents; English = US as reported."
+                entries = arrayOf("Auto (Android layout)", "Spanish (ISO)", "English (US)")
+                entryValues = arrayOf("auto", "es", "en")
+                setDefaultValue("auto")
+                summaryProvider = androidx.preference.ListPreference.SimpleSummaryProvider.getInstance()
+            })
             screen.addPreference(androidx.preference.SwitchPreferenceCompat(ctx).apply {
                 key = "keepawake_burst"; title = "Keep-awake during activity"
                 summary = "Hold wake lock briefly after typing; auto-expire when idle"

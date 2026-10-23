@@ -140,6 +140,9 @@ class DesktopService(
     // v0.1.79: bounded respawn for the X session when it dies before the
     // first frame (transient mid-transaction deaths, see emux-x11 v0.1.79).
     private var xRespawns = 0
+    // v0.1.82/83: host bind probe result, pinned into every recurring pane
+    // note so a screenshot always carries the orphan-vs-guest discrimination.
+    private var hostProbeNote = ""
 
     /** Latest decoded frame; the View reads this under lock during draw. */
     @Volatile var currentFrame: Bitmap? = null
@@ -386,7 +389,8 @@ class DesktopService(
                             p.absolutePath, android.net.LocalSocketAddress.Namespace.FILESYSTEM))
                         s.close(); p.delete(); true
                     }.getOrElse { false }
-                    noteInfo("host bind probe: tcp6000=$tcpOk abstract=$absOk unixpath=$fsOk")
+                    hostProbeNote = "hostbind tcp6000=$tcpOk abs=$absOk unixpath=$fsOk"
+                    noteInfo("host bind probe: $hostProbeNote")
                 }
                 killDesktopGuests()
 
@@ -457,7 +461,8 @@ class DesktopService(
                             diag[t]?.toString()?.lineSequence()
                                 ?.filter { it.isNotBlank() }?.toList()?.takeLast(3)?.joinToString(" | ")
                         }.joinToString(" /// ")
-                        noteInfo("t+${elapsed / 1000}s no frames yet. " + tails.take(350))
+                        noteInfo("t+${elapsed / 1000}s no frames yet. " + tails.take(350) +
+                            " || " + hostProbeNote + " | guest: " + guestProbeTail(rootfs))
                         runCatching {
                             val xl = java.io.File(rootfs, "tmp/xvfb.log")
                             noteInfo("xvfb.log: " + (if (xl.isFile) xl.readText().lineSequence()
@@ -500,6 +505,7 @@ class DesktopService(
                             ?.filter { it.isNotBlank() }?.toList()?.takeLast(3)?.joinToString(" | ") ?: ""
                         val xl = java.io.File(rootfs, "tmp/xvfb.log")
                         noteInfo("ctrl-wait expired. x11: " + xt.take(250) +
+                            " || " + hostProbeNote + " | guest: " + guestProbeTail(rootfs) +
                             " | xvfb.log: " + (if (xl.isFile) xl.readText().lineSequence()
                                 .filter { it.isNotBlank() }.toList().takeLast(4).joinToString(" | ").take(400)
                             else "<absent>") +
@@ -556,6 +562,12 @@ class DesktopService(
         diag[t]?.toString()?.lineSequence()?.filter { it.isNotBlank() }?.toList()
             ?.takeLast(2)?.joinToString(" | ")
     }.joinToString(" /// ")
+
+    /** v0.1.83: last guest probe lines (emux-x11 probe_sockets). */
+    private fun guestProbeTail(rootfs: java.io.File): String = runCatching {
+        java.io.File(rootfs, "tmp/emux_probes").readText().lineSequence()
+            .filter { it.isNotBlank() }.toList().takeLast(3).joinToString(" | ").take(300)
+    }.getOrDefault("")
 
     private fun pumpDiag(tag: String, s: TerminalSession) {
         scope.launch {
