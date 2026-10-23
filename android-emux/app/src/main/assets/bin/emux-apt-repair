@@ -103,6 +103,7 @@ done
 EMUX_LINKFIX_SELFTEST=1 LD_PRELOAD=/usr/local/lib/emux/libemux-linkfix.so /bin/true 2>/dev/null
 cat /tmp/emux_shimtest 2>/dev/null
 { echo "== emux dpkg selfcheck ==";
+  cat /tmp/emux_shimtest 2>/dev/null;
   ls -l /usr/local/lib/emux/ 2>&1;
   cat /etc/ld.so.preload 2>&1;
   if grep -q libemux-linkfix /proc/self/maps; then echo SHIM_LOADED; else echo SHIM_NOT_LOADED; fi;

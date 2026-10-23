@@ -41,6 +41,7 @@
 #define O_WRONLY 1
 #define O_CREAT 0100
 #define O_TRUNC 01000
+#define O_APPEND 02000
 #define MODE 0644
 
 extern int *__errno_location(void);
@@ -49,13 +50,18 @@ extern char *getenv(const char *);
 /* v0.1.78: version marker the guest selfcheck greps OUT OF THE .so on disk
  * (pane shows it next to SHIM_LOADED), so a field round can prove which shim
  * generation the device actually carries - several rounds were already lost
- * to stale builds. Exported so the linker keeps it in .rodata/.dynsym. */
-const char emux_linkfix_version_tag[] = "emux-linkfix-v6";
+ * to stale builds. Exported so the linker keeps it in .rodata/.dynsym.
+ * v7 (v0.1.85): bind() selftest - on the field device the app process binds
+ * tcp/unix/abstract fine but every guest bind appears to fail; the errno per
+ * family is the missing diagnosis, painted into the pane selfcheck. */
+const char emux_linkfix_version_tag[] = "emux-linkfix-v7";
 const char *emux_linkfix_version(void) { return emux_linkfix_version_tag; }
 
 /* ---- syscall numbers per arch ---- */
 #if defined(__aarch64__)
 #define SYS_LINKAT 37
+#define N_SOCKET 198
+#define N_BIND 200
 #define N_OPENAT 56
 #define N_READ 63
 #define N_WRITE 64
@@ -63,6 +69,8 @@ const char *emux_linkfix_version(void) { return emux_linkfix_version_tag; }
 #define N_UNLINKAT 35
 #elif defined(__arm__)
 #define SYS_LINKAT 330
+#define N_SOCKET 281
+#define N_BIND 282
 #define N_OPENAT 322
 #define N_READ 3
 #define N_WRITE 4
@@ -70,6 +78,8 @@ const char *emux_linkfix_version(void) { return emux_linkfix_version_tag; }
 #define N_UNLINKAT 328
 #elif defined(__x86_64__)
 #define SYS_LINKAT 265
+#define N_SOCKET 41
+#define N_BIND 49
 #define N_OPENAT 257
 #define N_READ 0
 #define N_WRITE 1
@@ -77,6 +87,7 @@ const char *emux_linkfix_version(void) { return emux_linkfix_version_tag; }
 #define N_UNLINKAT 263
 #else /* i386 */
 #define SYS_LINKAT 303
+#define N_SOCKETCALL 102
 #define N_OPENAT 295
 #define N_READ 3
 #define N_WRITE 4
@@ -97,6 +108,14 @@ static long linkat_sc(long a, long b, long c, long d, long e)
     __asm__ volatile("svc 0" : "+r"(x0)
                      : "r"(x8), "r"(x1), "r"(x2), "r"(x3), "r"(x4)
                      : "memory");
+    return x0;
+}
+static long sys2(long n, long a, long b)
+{
+    register long x8 __asm__("x8") = n;
+    register long x0 __asm__("x0") = a;
+    register long x1 __asm__("x1") = b;
+    __asm__ volatile("svc 0" : "+r"(x0) : "r"(x8), "r"(x0), "r"(x1) : "memory");
     return x0;
 }
 static long sys3(long n, long a, long b, long c)
@@ -132,6 +151,14 @@ static long linkat_sc(long a, long b, long c, long d, long e)
                      : "memory");
     return r0;
 }
+static long sys2(long n, long a, long b)
+{
+    register long r7 __asm__("r7") = n;
+    register long r0 __asm__("r0") = a;
+    register long r1 __asm__("r1") = b;
+    __asm__ volatile("svc 0" : "+r"(r0) : "r"(r7), "r"(r0), "r"(r1) : "memory");
+    return r0;
+}
 static long sys3(long n, long a, long b, long c)
 {
     register long r7 __asm__("r7") = n;
@@ -163,6 +190,14 @@ static long linkat_sc(long a, long b, long c, long d, long e)
     __asm__ volatile("syscall" : "+r"(rax)
                      : "r"(rdi), "r"(rsi), "r"(rdx), "r"(r10), "r"(r8)
                      : "rcx", "r11", "memory");
+    return rax;
+}
+static long sys2(long n, long a, long b)
+{
+    register long rax __asm__("rax") = n;
+    register long rdi __asm__("rdi") = a;
+    register long rsi __asm__("rsi") = b;
+    __asm__ volatile("syscall" : "+r"(rax) : "r"(rdi), "r"(rsi) : "rcx", "r11", "memory");
     return rax;
 }
 static long sys3(long n, long a, long b, long c)
@@ -197,6 +232,18 @@ static long linkat_sc(long a, long b, long c, long d, long e)
                      : "=a"(r)
                      : "g"(a), "a"((long)SYS_LINKAT), "c"(b), "d"(c),
                        "S"(d), "D"(e)
+                     : "memory");
+    return r;
+}
+static long sys2(long n, long a, long b)
+{
+    long r;
+    __asm__ volatile("pushl %%ebx\n\t"
+                     "movl %1, %%ebx\n\t"
+                     "int $0x80\n\t"
+                     "popl %%ebx\n\t"
+                     : "=a"(r)
+                     : "g"(a), "a"(n), "c"(b)
                      : "memory");
     return r;
 }
@@ -323,8 +370,81 @@ static void write_result(const char *tag, long errnov)
         }
     }
     if (o < 30) buf[o++] = '\n';
-    long fd = do_open_wr("/tmp/emux_shimtest");
+    /* append: the selftest writes several result lines per load */
+    long fd = sys4(N_OPENAT, AT_FDCWD, (long)"/tmp/emux_shimtest", O_WRONLY | O_CREAT | O_APPEND, MODE);
     if (fd >= 0) { do_write(fd, buf, o); do_close(fd); }
+}
+
+/* ---- v0.1.85 bind selftest helpers ---- */
+static long do_socket(int fam, int type)
+{
+#ifdef N_SOCKETCALL
+    long args[3];
+    args[0] = fam; args[1] = type; args[2] = 0;
+    return sys2(N_SOCKETCALL, 1, (long)args); /* SYS_SOCKET */
+#else
+    return sys3(N_SOCKET, fam, type, 0);
+#endif
+}
+static long do_bind(int fd, const void *sa, long len)
+{
+#ifdef N_SOCKETCALL
+    long args[3];
+    args[0] = fd; args[1] = (long)sa; args[2] = len;
+    return sys2(N_SOCKETCALL, 2, (long)args); /* SYS_BIND */
+#else
+    return sys3(N_BIND, fd, (long)sa, len);
+#endif
+}
+static int cpystr(char *dst, const char *src, int off)
+{
+    int i = 0;
+    while (src[i] && i < 40) { dst[off + i] = src[i]; i++; }
+    dst[off + i] = 0;
+    return i;
+}
+static void bind_selftest(void)
+{
+    /* inet: 0.0.0.0:6001 */
+    long fd = do_socket(2, 1);
+    if (fd < 0) { write_result("BINDINETSOCK_", -fd); }
+    else {
+        char sa[16];
+        int i;
+        for (i = 0; i < 16; i++) sa[i] = 0;
+        sa[0] = 2; sa[1] = 0;          /* AF_INET */
+        sa[2] = 0x17; sa[3] = 0x71;    /* 6001 BE */
+        long r = do_bind((int)fd, sa, 16);
+        write_result("BINDINET_", r < 0 ? -r : 0);
+        do_close(fd);
+    }
+    /* unix path */
+    fd = do_socket(1, 1);
+    if (fd < 0) { write_result("BINDUNIXSOCK_", -fd); }
+    else {
+        char sa[64];
+        int i;
+        for (i = 0; i < 64; i++) sa[i] = 0;
+        sa[0] = 1; sa[1] = 0;          /* AF_UNIX */
+        int n = cpystr(sa, "/tmp/.emux_bindprobe", 2);
+        long r = do_bind((int)fd, sa, 2 + n + 1);
+        write_result("BINDUNIXP_", r < 0 ? -r : 0);
+        do_unlink("/tmp/.emux_bindprobe");
+        do_close(fd);
+    }
+    /* unix abstract */
+    fd = do_socket(1, 1);
+    if (fd < 0) { write_result("BINDABSSOCK_", -fd); }
+    else {
+        char sa[64];
+        int i;
+        for (i = 0; i < 64; i++) sa[i] = 0;
+        sa[0] = 1; sa[1] = 0; sa[2] = 0; /* abstract: leading NUL */
+        int n = cpystr(sa, "emuxbindprobe", 3);
+        long r = do_bind((int)fd, sa, 3 + n);
+        write_result("BINDABS_", r < 0 ? -r : 0);
+        do_close(fd);
+    }
 }
 
 __attribute__((constructor)) static void shim_selftest(void)
@@ -346,4 +466,5 @@ __attribute__((constructor)) static void shim_selftest(void)
     }
     do_unlink(src);
     do_unlink(dst);
+    bind_selftest();
 }

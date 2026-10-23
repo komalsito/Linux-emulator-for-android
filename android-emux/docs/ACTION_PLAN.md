@@ -937,3 +937,25 @@ tcp-only mode is ever the problem; attempt 3 keeps the clash sweep.
 - Host probe note lists unixpath FIRST (the pane truncates from the end).
 - jailtest: 24 assertions (first launch must carry -nolisten unix).
 versionCode 84, rebuilt emux-debug.apk (same keystore).
+
+## 31. v0.1.85 - bind() errno extraction (shim v7) + sticky post-mortem
+
+v0.1.84 field round: hostbind unixpath/tcp6000/abstract ALL true while even
+the TCP-ONLY Xvfb attempt died instantly => socket bind() fails for guest
+(proot tracee) processes on this device in every family, while the app
+process binds fine. Neither orphans nor unix-translation alone explains it;
+the missing datum is the ERRNO. v0.1.85 extracts it two ways:
+- Shim v7 bind selftest (EMUX_LINKFIX_SELFTEST): raw socket()+bind() per
+  family (AF_INET :6001, AF_UNIX path, AF_UNIX abstract), results appended
+  to /tmp/emux_shimtest as BINDINET_<errno> / BINDUNIXP_<errno> /
+  BINDABS_<errno> (0 = ok); the guest selfcheck now cats that file INTO
+  /tmp/emux_selfcheck, so the PANE shows the errnos next to SHIM_LOADED.
+  (write_result switched to O_APPEND - v6 truncated to the last line.)
+- Sticky POST-MORTEM: when pre-frame respawns are exhausted, the pane error
+  note packs hostProbe + guest probe file + FIRST lines of xvfb.log.1 and
+  xvfb.log (the first attempt's real error) - the error line survives
+  scrolling, unlike watcher notes.
+Next-round decision table: BINDINET EACCES/EPERM => SELinux on tracee binds
+(try proot env/upgrade); EADDRINUSE => hidden holder inside guest netns;
+ENOSYS/EINVAL => proot syscall-translation bug (upgrade proot again).
+versionCode 85, rebuilt emux-debug.apk (same keystore).

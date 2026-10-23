@@ -54,6 +54,9 @@ class BootstrapManager(private val ctx: Context) {
             "EMUX_LINKFIX_SELFTEST=1 LD_PRELOAD=/usr/local/lib/emux/libemux-linkfix.so /bin/true 2>/dev/null; " +
             "cat /tmp/emux_shimtest 2>/dev/null; " +
             "{ echo \"== emux dpkg selfcheck ==\"; " +
+            // v0.1.85: shim v7 bind selftest (BINDINET_/BINDUNIXP_/BINDABS_
+            // + errno) - the exact errnos of the guest bind failures.
+            "cat /tmp/emux_shimtest 2>/dev/null; " +
             "ls -l /usr/local/lib/emux/ 2>&1; " +
             "cat /etc/ld.so.preload 2>&1; " +
             // v0.1.78: which shim generation is ON DISK (grepped from the .so)

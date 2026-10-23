@@ -354,6 +354,21 @@ class DesktopService(
                                     .readText().lineSequence().filter { it.isNotBlank() }
                                     .toList().takeLast(3).joinToString(" | ")
                             }.getOrDefault("")
+                            // v0.1.85 STICKY POST-MORTEM: when respawns are
+                            // exhausted the pane error line is what survives
+                            // scrolling - pack the discrimination into it:
+                            // host probe + guest probe file + FIRST lines of
+                            // both xvfb logs (the first attempt's real error).
+                            val rf = com.emux.core.FsLayout.linuxRoot(ctx)
+                            fun first3(rel: String) = runCatching {
+                                java.io.File(rf, rel).readText().lineSequence()
+                                    .filter { it.isNotBlank() }.toList().take(3).joinToString(" | ")
+                            }.getOrDefault("")
+                            val pm = ("POSTMORTEM " + hostProbeNote +
+                                " | g: " + guestProbeTail(rf) +
+                                " | log1: " + first3("tmp/xvfb.log.1") +
+                                " | log: " + first3("tmp/xvfb.log")).take(500)
+                            noteInfo(pm)
                             setError(
                                 ("X server exited (code ${xSession?.exitCode}). " + tails +
                                     if (xlog.isNotBlank()) " || xvfb.log: $xlog" else "").take(500))
