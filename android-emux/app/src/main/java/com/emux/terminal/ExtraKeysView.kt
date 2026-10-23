@@ -30,6 +30,9 @@ class ExtraKeysView(ctx: Context, attrs: AttributeSet? = null) : HorizontalScrol
         // (no bytes go to the guest; the scrollback buffer lives in the renderer)
         PGUP("pgup", ByteArray(0)),
         PGDN("pgdn", ByteArray(0)),
+        // v0.1.90: in-app keyboard-layout toggle (ROM shortcuts never reach
+        // the app on several devices; Alt+Shift can be swallowed too).
+        LANG("es⇄", ByteArray(0)),
         PIPE("|", "|".toByteArray()),
         DASH("-", "-".toByteArray()),
         CARET("^", "^".toByteArray()),
@@ -49,7 +52,7 @@ class ExtraKeysView(ctx: Context, attrs: AttributeSet? = null) : HorizontalScrol
             ExtraKey.ESC, ExtraKey.TAB, ExtraKey.CTRL, ExtraKey.ALT,
             ExtraKey.UP, ExtraKey.DOWN, ExtraKey.LEFT, ExtraKey.RIGHT,
             ExtraKey.HOME, ExtraKey.END, ExtraKey.PIPE, ExtraKey.DASH,
-            ExtraKey.PGUP, ExtraKey.PGDN,
+            ExtraKey.PGUP, ExtraKey.PGDN, ExtraKey.LANG,
         )
         for (k in order) {
             val tv = TextView(context).apply {
@@ -73,6 +76,7 @@ class ExtraKeysView(ctx: Context, attrs: AttributeSet? = null) : HorizontalScrol
             ExtraKey.ALT -> { altDown = !altDown; refreshLatches() }
             ExtraKey.PGUP -> localScrollSink?.invoke(+1)
             ExtraKey.PGDN -> localScrollSink?.invoke(-1)
+            ExtraKey.LANG -> langToggleSink?.invoke()
             else -> {
                 val out = when {
                     ctrlDown && k.bytes.isNotEmpty() -> ctrlTransform(k)
@@ -91,6 +95,9 @@ class ExtraKeysView(ctx: Context, attrs: AttributeSet? = null) : HorizontalScrol
 
     /** v0.1.54: local scrollback paging hook (+1 page up / -1 page down). */
     var localScrollSink: ((Int) -> Unit)? = null
+
+    /** v0.1.90: terminal keyboard-layout toggle hook (Auto<->Spanish). */
+    var langToggleSink: (() -> Unit)? = null
 
     private fun ctrlTransform(k: ExtraKey): ByteArray {
         // map visible keys to control codes where meaningful

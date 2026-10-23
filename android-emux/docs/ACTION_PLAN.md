@@ -1040,3 +1040,18 @@ icted by this ordering.
 - On final ERROR: dump xvfb.log.2/.1/log + bindlog + attempts into history
   notes (chunked) - full telemetry survives the scroll window.
 versionCode 89, rebuilt emux-debug.apk (same keystore).
+
+## 36. v0.1.90 - color-coded pane + ROM-proof layout toggle (es⇄ key)
+
+User request: paint what is going RIGHT in green and the rest in red.
+- DiagColors classifier (shared): LINK_OK / SHIM_LOADED / SHIMTEST_*_OK /
+  BIND*_0 / B<n>_OK / rc=0 / rc=124 / hostbind *=true / port6000 free /
+  emux-linkfix-vN / installed / purged / dpkgdir+status perms / selfcheck
+  header+shim ls lines / "shim=true preload=true" => GREEN; everything
+  else RED. Applied to the DesktopView pane canvas (per line) and to the
+  status TextView (per-line ForegroundColorSpan).
+- Keyboard: the ROM swallows Alt+Shift on some devices, so the terminal
+  extra-keys row gains an es⇄ key: toggles term_keylayout Auto<->Spanish
+  and prints "[emux] terminal keyboard layout: X" into the session.
+  Works from both tabs' key rows; desktop behaviour itself unchanged.
+versionCode 90, rebuilt emux-debug.apk (same keystore).

@@ -372,12 +372,12 @@ class MainActivity : AppCompatActivity() {
             com.emux.x11.DesktopService.State.STARTING_X -> getString(R.string.x_starting)
             com.emux.x11.DesktopService.State.CONNECTED ->
                 if (d.frameId == 0)
-                    getString(R.string.x_connected, 0, 0) + "\n" + d.errorHistoryText()
+                    colored(getString(R.string.x_connected, 0, 0) + "\n" + d.errorHistoryText())
                 else
                     getString(R.string.x_connected, d.x11?.screenWidth ?: 0, d.x11?.screenHeight ?: 0) +
                         (d.errorText.value?.let { "\n" + it } ?: "")
             com.emux.x11.DesktopService.State.ERROR ->
-                getString(R.string.x_error, d.errorHistoryText())
+                colored(getString(R.string.x_error, d.errorHistoryText()))
         }
     }
 
@@ -657,6 +657,23 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    /** v0.1.90: per-line green/red spans for the desktop status TextView
+     *  (same classifier as the pane canvas). */
+    private fun colored(text: String): android.text.SpannableString {
+        val sp = android.text.SpannableString(text)
+        var start = 0
+        for (line in text.lineSequence()) {
+            val end = start + line.length
+            sp.setSpan(
+                android.text.style.ForegroundColorSpan(
+                    if (com.emux.x11.DiagColors.healthy(line)) com.emux.x11.DiagColors.green()
+                    else com.emux.x11.DiagColors.red()),
+                start, end, android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+            start = end + 1
+        }
+        return sp
+    }
+
     private fun wireExtraKeys() {
         // v0.1.54: pgup/pgdn page the renderer scrollback locally.
         b.extraKeys.localScrollSink = { pagesUp ->
@@ -666,6 +683,17 @@ class MainActivity : AppCompatActivity() {
             }
         }
         b.extraKeys.currentSessionSink = { bytes -> termView?.session?.write(bytes) }
+        // v0.1.90: the es⇄ key toggles the terminal physical-keyboard layout
+        // (Auto<->Spanish) with visible feedback - works regardless of ROM
+        // shortcut behaviour, unlike Alt+Shift which some ROMs swallow.
+        b.extraKeys.langToggleSink = {
+            val sp = androidx.preference.PreferenceManager.getDefaultSharedPreferences(this)
+            val cur = sp.getString("term_keylayout", "auto") ?: "auto"
+            val next = if (cur == "es") "auto" else "es"
+            sp.edit().putString("term_keylayout", next).apply()
+            val msg = "\r\n[emux] terminal keyboard layout: $next\r\n"
+            termView?.session?.write(msg.toByteArray())
+        }
     }
 
     private fun observeSessions() {

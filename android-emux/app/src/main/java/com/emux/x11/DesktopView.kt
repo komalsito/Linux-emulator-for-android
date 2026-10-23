@@ -82,10 +82,14 @@ class DesktopView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attrs) 
             val err = desktop?.errorHistoryText()?.takeIf { it != "?" && it.isNotBlank() }
                 ?: desktop?.diagTail()?.takeIf { it.isNotBlank() }
             if (!err.isNullOrBlank()) {
-                val pe = Paint().apply { color = Color.argb(0xD0, 0xFF, 0x8A, 0x65); textSize = 18f }
+                // v0.1.90 (user request): color-code the pane - GREEN for
+                // lines that prove health, RED for everything else.
+                val pOk = Paint().apply { color = Color.argb(0xE0, 0x66, 0xBB, 0x6A); textSize = 18f }
+                val pBad = Paint().apply { color = Color.argb(0xE0, 0xEF, 0x53, 0x50); textSize = 18f }
                 var y = height / 2f + 36f
                 for (line in err.lineSequence().filter { it.isNotBlank() }.take(16)) {
-                    canvas.drawText(line.take(190), 24f, y, pe)
+                    canvas.drawText(line.take(190), 24f, y,
+                        if (DiagColors.healthy(line)) pOk else pBad)
                     y += 24f
                 }
             }
@@ -212,4 +216,21 @@ class DesktopView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attrs) 
             postDelayed({ desktop?.injectClick(x, y, button = 3, press = false) }, 60)
         }
     }
+}
+
+/**
+ * v0.1.90: pane line health classifier (user request: green = going right,
+ * red = everything else). Shared by DesktopView canvas and the status
+ * TextView so both surfaces agree.
+ */
+object DiagColors {
+    private val OK = Regex(
+        "LINK_OK|SHIM_LOADED|SHIMTEST_[A-Z_]*OK|BIND[A-Z]*_0\\b|B\\d+_OK|rc=0\\b|rc=124|" +
+        "unixpath=true|tcp6000=true|abs=true|port6000 state at session start: free|" +
+        "emux-linkfix-v\\d|apt-stub: installed|ghost package|purged|dpkgdir u=0|" +
+        "status u=0 m=|== emux dpkg selfcheck|total \\d|-rw-.*linkfix|" +
+        "^/usr/local/lib/emux|^0$|shim=true preload=true|terminal keyboard layout: es")
+    fun healthy(line: String): Boolean = OK.containsMatchIn(line)
+    fun green(): Int = 0xFF66BB6A.toInt()
+    fun red(): Int = 0xFFEF5350.toInt()
 }
