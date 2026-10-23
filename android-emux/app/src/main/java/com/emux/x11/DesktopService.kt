@@ -306,6 +306,55 @@ class DesktopService(
                     }
                 }
 
+                // 0b) v0.1.54: clear orphaned desktop guests (and their X locks /
+                //     tcp sockets) from a previous tab visit or app life BEFORE we
+                //     bind :7001 and start a fresh capture - otherwise the old
+                //     emux-capture keeps an ESTABLISHED socket on our port and the
+                //     bind fails EADDRINUSE, and the old Xvfb holds :0.
+                // v0.1.82 HOST BIND PROBE, before any cleanup: X's "server
+                //     already running" hides the real errno. If the HOST can
+                //     bind tcp 6000 / the unix socket path / an abstract socket
+                //     fine, then NO orphan holds them and the failure is inside
+                //     the guest (proot socket translation / SELinux) - the two
+                //     cases need completely different fixes, and the field pane
+                //     could not tell them apart until now.
+                runCatching {
+                    val tcpOk = runCatching {
+                        java.net.ServerSocket(6000).close(); true
+                    }.getOrElse { false }
+                    val absOk = runCatching {
+                        android.net.LocalServerSocket("emux-bind-probe").close(); true
+                    }.getOrElse { false }
+                    val fsOk = runCatching {
+                        val p = java.io.File(rootfs, "tmp/.X11-unix/Xprobe-host")
+                        p.parentFile?.mkdirs()
+                        val s = android.net.LocalSocket()
+                        s.bind(android.net.LocalSocketAddress(
+                            p.absolutePath, android.net.LocalSocketAddress.Namespace.FILESYSTEM))
+                        s.close(); p.delete(); true
+                    }.getOrElse { false }
+                    // unixpath first: it is the discriminating value and the pane truncates
+                    hostProbeNote = "hostbind unixpath=$fsOk tcp6000=$tcpOk abs=$absOk"
+                    noteInfo("host bind probe: $hostProbeNote")
+                }
+                killDesktopGuests()
+                // v0.1.89: prove :6000 is actually FREE before investing in a
+                // session; an orphan listener (previous visit's Xvfb) makes
+                // every guest attempt die with EADDRINUSE and poisons the
+                // control plane handshake. Re-sweep until free (12 s cap).
+                var free = false
+                var sweeps = 0
+                while (!free && sweeps < 4) {
+                    free = runCatching { java.net.ServerSocket(6000).close(); true }.getOrElse { false }
+                    if (!free) {
+                        sweeps++
+                        noteInfo("port6000 STILL HELD after sweep #$sweeps - re-sweeping")
+                        runCatching { killDesktopGuests() }
+                        Thread.sleep(3_000)
+                    }
+                }
+                noteInfo("port6000 state at session start: " + (if (free) "free" else "HELD (orphan survivor)"))
+
                 val cmd = "emux-x11 $wmCommand"
                 xRespawns = 0
                 // v0.1.80: tell the user WHERE the full log lives - the pane
@@ -364,6 +413,19 @@ class DesktopService(
                                 java.io.File(rf, rel).readText().lineSequence()
                                     .filter { it.isNotBlank() }.toList().take(3).joinToString(" | ")
                             }.getOrDefault("")
+                            // v0.1.89: dump ALL telemetry into history notes
+                            // when we finally give up - history survives the
+                            // scroll window the user keeps losing data to.
+                            listOf("tmp/xvfb.log.2", "tmp/xvfb.log.1", "tmp/xvfb.log",
+                                   "tmp/emux_bindlog", "tmp/emux_attempts").forEach { rel ->
+                                runCatching {
+                                    val f = java.io.File(rf, rel)
+                                    if (f.isFile) f.readText().lineSequence()
+                                        .filter { it.isNotBlank() }.toList().joinToString(" | ")
+                                        .chunked(330).take(4)
+                                        .forEach { chk -> noteInfo("$rel: $chk") }
+                                }
+                            }
                             val pm = ("POSTMORTEM " + hostProbeNote +
                                 " | g: " + guestProbeTail(rf) +
                                 " | log1: " + first3("tmp/xvfb.log.1") +
@@ -377,38 +439,6 @@ class DesktopService(
                     }
                 }
 
-                // 0b) v0.1.54: clear orphaned desktop guests (and their X locks /
-                //     tcp sockets) from a previous tab visit or app life BEFORE we
-                //     bind :7001 and start a fresh capture - otherwise the old
-                //     emux-capture keeps an ESTABLISHED socket on our port and the
-                //     bind fails EADDRINUSE, and the old Xvfb holds :0.
-                // v0.1.82 HOST BIND PROBE, before any cleanup: X's "server
-                //     already running" hides the real errno. If the HOST can
-                //     bind tcp 6000 / the unix socket path / an abstract socket
-                //     fine, then NO orphan holds them and the failure is inside
-                //     the guest (proot socket translation / SELinux) - the two
-                //     cases need completely different fixes, and the field pane
-                //     could not tell them apart until now.
-                runCatching {
-                    val tcpOk = runCatching {
-                        java.net.ServerSocket(6000).close(); true
-                    }.getOrElse { false }
-                    val absOk = runCatching {
-                        android.net.LocalServerSocket("emux-bind-probe").close(); true
-                    }.getOrElse { false }
-                    val fsOk = runCatching {
-                        val p = java.io.File(rootfs, "tmp/.X11-unix/Xprobe-host")
-                        p.parentFile?.mkdirs()
-                        val s = android.net.LocalSocket()
-                        s.bind(android.net.LocalSocketAddress(
-                            p.absolutePath, android.net.LocalSocketAddress.Namespace.FILESYSTEM))
-                        s.close(); p.delete(); true
-                    }.getOrElse { false }
-                    // unixpath first: it is the discriminating value and the pane truncates
-                    hostProbeNote = "hostbind unixpath=$fsOk tcp6000=$tcpOk abs=$absOk"
-                    noteInfo("host bind probe: $hostProbeNote")
-                }
-                killDesktopGuests()
 
                 // 1) Open our frame listener BEFORE starting capture so no frames lost.
                 openFrameListener()
@@ -710,16 +740,32 @@ class DesktopService(
     }
 
     /** v0.1.59: one bounded attempt to reach the X server + handshake. */
-    private suspend fun connectControlPlane(timeoutMs: Long): Boolean = try {
-        waitForPort(6000, timeoutMs = timeoutMs)
-        val c = X11Client(display = 0)
-        c.connect()
-        x11 = c
-        Log.i(TAG, "X connected: ${c.screenWidth}x${c.screenHeight}@${c.depth} vendor=${c.vendor}")
-        true
-    } catch (e: Exception) {
-        Log.e(TAG, "X control plane unavailable (frames still streamed)", e)
-        false
+    private suspend fun connectControlPlane(timeoutMs: Long): Boolean {
+        // v0.1.89: the old form returned false on the FIRST handshake
+        // exception - and waitForPort can succeed against a STALE listener
+        // (orphan Xvfb from an earlier visit) whose handshake then fails,
+        // producing a bogus "ctrl-wait expired" one second after start.
+        // Now: keep retrying port+handshake until the deadline.
+        val deadline = System.currentTimeMillis() + timeoutMs
+        var last: Exception? = null
+        while (System.currentTimeMillis() < deadline) {
+            try {
+                Socket().apply {
+                    connect(java.net.InetSocketAddress("127.0.0.1", 6000), 300)
+                    close()
+                }
+                val c = X11Client(display = 0)
+                c.connect()
+                x11 = c
+                Log.i(TAG, "X connected: ${c.screenWidth}x${c.screenHeight}@${c.depth} vendor=${c.vendor}")
+                return true
+            } catch (e: Exception) {
+                last = e
+                kotlinx.coroutines.delay(2_000)
+            }
+        }
+        Log.e(TAG, "X control plane unavailable (frames still streamed)", last)
+        return false
     }
 
     private suspend fun waitForPort(port: Int, timeoutMs: Long) {

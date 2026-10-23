@@ -1015,3 +1015,28 @@ unlabelled). v0.1.88 makes the telemetry lossless:
   unix transport; "local" is the classic umbrella name).
 Sandbox-verified tag format with a double-bind program (B2_OK / B2_E98).
 versionCode 88, rebuilt emux-debug.apk (same keystore).
+
+## 35. v0.1.89 - THE lifecycle bug: startDesktop murdered its own first session
+
+v0.1.88 field panes (two parts) showed: ctrl-wait expired ONE SECOND after
+start (waitForPort succeeded against a STALE listener whose X handshake
+then failed - connectControlPlane returned false on the first exception),
+no attempts/bindlog notes ever (emux-x11 never reached a launch in the
+visible window), and respawns chaining. Root cause found by reading the
+lifecycle: section 0b (killDesktopGuests) runs AFTER the x11 session is
+launched, and v0.1.81 added "emux-x11" to the sweep patterns - so EVERY
+desktop start killed its own first x11 session milliseconds after spawn.
+The pre-frame respawn chain that follows then creates Xvfb orphans across
+proot instances (guest sweeps cannot signal foreign tracees) - the E98
+"server already running" cascade of rounds 81-88 was largely SELF-infl
+icted by this ordering.
+
+- Reordered: 0b sweep + NEW port-6000-free verification loop (re-sweep up
+  to 4x, notes "port6000 state at session start: free/HELD") now run
+  BEFORE the x11 session is spawned.
+- connectControlPlane: retry port+handshake until the deadline instead of
+  returning false on the first handshake exception (kills the +1 s bogus
+  "ctrl-wait expired" and lets a stale listener age out).
+- On final ERROR: dump xvfb.log.2/.1/log + bindlog + attempts into history
+  notes (chunked) - full telemetry survives the scroll window.
+versionCode 89, rebuilt emux-debug.apk (same keystore).
