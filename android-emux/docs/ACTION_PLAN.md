@@ -1097,3 +1097,23 @@ only), repeat - a crash-loop that looked like a hang.
 This closes the last unix-socket dependency in the desktop stack: Xvfb,
 X11Client, Xlib clients and capture are all tcp-native now.
 versionCode 92, rebuilt emux-debug.apk (same keystore).
+
+## 39. v0.1.93 - capture toolchain first, WM second; first-launch terminal priority
+
+v0.1.92 field at t+60 s: Xvfb up (rc=0, bindlog green) but no frames YET -
+the REST transaction was still "Processing triggers for libc-bin" and the
+capture gate was (correctly) waiting for xwd/pnm/nc. Not a failure, an
+ORDERING cost: one big REST install gated capture for minutes.
+
+- emux-x11 REST pass split: RESTCAP="x11-apps netpbm netcat-openbsd"
+  installs FIRST (frames can start), then RESTWM="x11-xserver-utils
+  openbox xterm" (the dep-heavy half); WM still launches after RESTWM.
+  Gate also changed from X0-exists to x_up (tcp-only mode).
+- Capture gating notes every 15 s while waiting for the toolchain, so the
+  pane is never silent during a long REST install.
+- First-launch terminal speed (user request): startupRepair now waits
+  12 s (was 6) AND runs its thread at THREAD_PRIORITY_BACKGROUND - the
+  first-run repair (configuring libc-bin/xvfb triggers for minutes) was
+  eating the CPU a cold terminal session needs; proot/dpkg children
+  inherit the nice level. Combined with v0.1.91's ttywrap probe cache.
+versionCode 93, rebuilt emux-debug.apk (same keystore).

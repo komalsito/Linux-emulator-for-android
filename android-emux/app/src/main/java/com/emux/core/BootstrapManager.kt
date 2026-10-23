@@ -2295,7 +2295,15 @@ class BootstrapManager(private val ctx: Context) {
                 // this repair's proot run (dpkg --configure -a, ghost purge)
                 // raced session launches on slow tablets ("terminal is a
                 // little slow to start"). Skip the courtesy when forced.
-                if (!force) Thread.sleep(6_000)
+                // v0.1.93: longer courtesy AND background scheduling class -
+                // the first-launch complaint was this repair (configuring
+                // libc-bin/xvfb triggers for minutes on first run) eating the
+                // CPU the cold terminal session needs; children (proot, dpkg)
+                // inherit the nice level.
+                if (!force) Thread.sleep(12_000)
+                runCatching {
+                    android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_BACKGROUND)
+                }
                 val spec = DistroCatalog.requested(ctx)
                 if (spec.pkg != PkgManager.APT) return@runCatching
                 val dest = FsLayout.linuxRoot(ctx)
