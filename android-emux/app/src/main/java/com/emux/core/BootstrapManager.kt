@@ -2096,6 +2096,23 @@ class BootstrapManager(private val ctx: Context) {
      * in /etc/ld.so.preload (idempotent). Non-fatal: without it, distros whose
      * kernel translates link(2) correctly keep working as before.
      */
+    /** v0.1.95: native PPM->RGB565 converter for emux-capture. Debian/Ubuntu
+     *  ship mawk as awk, and mawk DROPS NUL bytes from printf "%c" - black
+     *  pixels are two NULs in RGB565 - so the awk conversion path can never
+     *  produce a valid frame stream there (all-green diagnostics, zero
+     *  frames, forever). Freestanding static binary, per ABI like the shim. */
+    internal fun installCaptureConv(dest: File) {
+        runCatching {
+            val out = File(dest, "usr/local/lib/emux/emux-rgb565")
+            out.parentFile?.mkdirs()
+            ctx.assets.open("capture/${linkFixAbiDir()}/emux-rgb565").use { ins ->
+                replaceRegularFileWith(out) { f -> f.outputStream().use { os -> ins.copyTo(os) } }
+            }
+            out.setExecutable(true, false)
+            out.setReadable(true, false)
+        }
+    }
+
     internal fun installLinkFixShim(dest: File) {
         runCatching {
             val out = File(dest, "usr/local/lib/emux/libemux-linkfix.so")
@@ -2268,6 +2285,7 @@ class BootstrapManager(private val ctx: Context) {
             // still missing) it never ran and the desktop kept waiting. Gate
             // only the journal repair; always heal missing CORE packages.
             installLinkFixShim(dest)
+            installCaptureConv(dest)
             if (aptJournalDirty(dest) || !File(dest, "var/lib/emux-repair.stamp").isFile) {
                 val r = runRepairProot(proot, dest)
                 com.emux.EmuXLog.i("desktopPreRepair: ok=${r.ok} tail=${r.tail.take(200)}")
@@ -2324,12 +2342,22 @@ class BootstrapManager(private val ctx: Context) {
                 // re-runs on a stamped rootfs.
                 installNativeBridge()
                 reseedHelpersIfNeeded(dest)   // v0.1.56: refresh OLD in-rootfs helpers
+                // v0.1.94/95: the ld.so.cache login gate must reach EXISTING
+                // rootfs trees - the profile is seeded at bootstrap, so devices
+                // that updated later never received it and kept paying the
+                // no-cache tax on every exec until the repair finished.
+                runCatching {
+                    val prof = File(dest, "etc/profile.d/emux.sh")
+                    if (prof.isFile && !prof.readText().contains("ld.so.cache"))
+                        prof.appendText("[ -s /etc/ld.so.cache ] || ldconfig 2>/dev/null\n")
+                }
                 // v0.1.70: ALWAYS refresh the shim - the healthy-skip below
                 // kept the v1 shim (which only overrode link(), a no-op on
                 // arm64 where glibc builds link() on linkat()) on the field
                 // device forever; v2 (link+linkat, copy fallback) never
                 // arrived. ~13-67 KB copy, cheap every startup.
                 installLinkFixShim(dest)
+                installCaptureConv(dest)
                 // v0.1.68: foreign-uid dpkg db rebuild (real-DAC EACCES path)
                 val sw = hostDpkgDbSwap(dest)
                 com.emux.EmuXLog.i("startupRepair: $sw")
@@ -2379,6 +2407,7 @@ class BootstrapManager(private val ctx: Context) {
                 }.getOrDefault(false)
                 if (!force && !dirty && shim.isFile && stamp.isFile && gaps.isEmpty()) return@runCatching
                 installLinkFixShim(dest)
+                installCaptureConv(dest)
                 if (dirty || force || !stamp.isFile) {
                     val r = runRepairProot(proot, dest)
                     com.emux.EmuXLog.i("startupRepair: ok=${r.ok} tail=${r.tail.take(200)}")
@@ -2948,6 +2977,7 @@ class BootstrapManager(private val ctx: Context) {
         // (both bootstrap branches reach postInstall before installDistroExtras),
         // so the very first dpkg invocation on link()-broken kernels works.
         installLinkFixShim(dest)
+        installCaptureConv(dest)
         // sane defaults: non-login shells get our env, disable services that need init
         // v0.1.13 THROW FIX: both writes are guarded now. The old code did a bare
         // writeText() on etc/profile.d/emux.sh and — worse — an unguarded
