@@ -443,13 +443,35 @@ class DesktopService(
                 // 1) Open our frame listener BEFORE starting capture so no frames lost.
                 openFrameListener()
 
-                // 2) Start the in-distro capture helper pointed at us right away:
-                //    it only needs the X socket (/tmp/.X11-unix/X0), not TCP, so it
-                //    can stream frames even if the control-plane connect below fails.
-                captureSession = TerminalSession(
-                    9002, ctx, root,
-                    "emux-capture 127.0.0.1:$FRAME_PORT",
-                ).also { it.start() }
+                // 2) v0.1.91: start the capture helper ONLY once the guest X is
+                //    actually up (tcp 6000) AND its toolchain (xwd/netpbm/nc,
+                //    installed by the background REST pass) is on disk. Before
+                //    this, capture started immediately, died on the missing
+                //    X/tools, and burned its 3 respawns BEFORE the REST install
+                //    landed - so a perfectly healthy Xvfb (v0.1.90 field:
+                //    "attempt 1 rc=0", bindlog all OK) still produced zero
+                //    frames forever.
+                scope.launch {
+                    val up = runCatching {
+                        waitForPort(6000, timeoutMs = 120_000); true
+                    }.getOrElse { false }
+                    var tools = false; var w = 0
+                    while (!tools && w < 48 && state.value != State.IDLE) {
+                        tools = listOf("usr/bin/xwd", "usr/bin/pnmtoplainpnm", "bin/nc.openbsd")
+                            .all { java.io.File(rootfs, it).isFile }
+                        if (!tools) { kotlinx.coroutines.delay(5_000); w++ }
+                    }
+                    if (!up || state.value == State.IDLE) {
+                        noteInfo("capture: gave up waiting (X up=$up tools=$tools)")
+                        return@launch
+                    }
+                    noteInfo("capture: X up and toolchain present - starting emux-capture")
+                    captureSession = TerminalSession(
+                        9002, ctx, root,
+                        "emux-capture 127.0.0.1:$FRAME_PORT",
+                    ).also { it.start() }
+                    pumpDiag("capture", captureSession!!)
+                }
 
                 // v0.1.37 BUGFIX ("desktop says waiting for X frames" with zero
                 // explanation): the X and capture sessions are HEADLESS — their
@@ -467,7 +489,7 @@ class DesktopService(
                 scope.launch {
                     captureSession?.state?.collect { st ->
                         if (st == TerminalSession.State.DEAD && frameId == 0 &&
-                            state.value != State.IDLE && captureRespawns < 3) {
+                            state.value != State.IDLE && captureRespawns < 40) {
                             // v0.1.59: capture can die waiting for the X socket
                             // while the cascade install is still running. With
                             // zero frames so far, respawn it (bounded) instead

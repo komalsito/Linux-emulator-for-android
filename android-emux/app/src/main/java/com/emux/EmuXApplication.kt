@@ -28,6 +28,9 @@ class EmuXApplication : Application() {
     // permanently broken. Nothing in app-start may be able to crash it.
     override fun onCreate() {
         super.onCreate()
+        // v0.1.91: persist the PTY-wrapper probe so terminal cold starts skip
+        // re-exec'ing every wrapper candidate (part of "terminal slow to start").
+        com.emux.terminal.TtyWrap.cacheFile = java.io.File(filesDir, "ttywrap.probe")
         try {
             com.emux.EmuXLog.init(this)
             com.emux.EmuXLog.i("EmuXApplication onCreate v${com.emux.EmuXLog.appVersion(this)}")

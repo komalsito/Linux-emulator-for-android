@@ -646,6 +646,26 @@ object TtyWrap {
     @Volatile private var resolved: List<String>? = null
     @Volatile private var probed = false
 
+    /** v0.1.91: disk cache for the probe result - terminal cold-start no
+     *  longer re-exec's every wrapper candidate on each app launch. */
+    @Volatile var cacheFile: java.io.File? = null
+    private fun readCache(): Boolean = runCatching {
+        val f = cacheFile ?: return false
+        if (!f.isFile) return false
+        val lines = f.readText().split('\n')
+        if (lines.size < 3) return false
+        resolved = if (lines[0] == "-") null else lines[0].split('\u0001')
+        dialect = runCatching { Dialect.valueOf(lines[1]) }.getOrDefault(Dialect.TOYBOX)
+        hasCtty = lines[2] == "1"
+        probed = true
+        true
+    }.getOrDefault(false)
+    private fun writeCache() = runCatching {
+        cacheFile?.writeText(
+            (resolved?.joinToString("\u0001") ?: "-") + "\n" + dialect.name + "\n" +
+                (if (hasCtty) "1" else "0"))
+    }
+
     /** Which script(1) argument dialect the probed binary actually speaks. */
     enum class Dialect { TOYBOX, BBSTYLE }
     @Volatile private var dialect: Dialect = Dialect.TOYBOX
@@ -659,6 +679,7 @@ object TtyWrap {
         if (probed) return resolved
         synchronized(this) {
             if (probed) return resolved
+            if (readCache()) return resolved
             for (c in candidates) {
                 val f = File(c)
                 if (!f.canExecute()) continue
@@ -791,6 +812,7 @@ object TtyWrap {
                 }
             }
             probed = true
+            writeCache()
             return resolved
         }
     }

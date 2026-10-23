@@ -298,7 +298,7 @@ else
   # unix-socket translation / SELinux on the path+abstract binds), not an
   # orphan holder. -nolisten unix drops the unix transport entirely; every
   # client we run works over tcp (X11Client talks tcp:6000 by design; xwd /
-  // xterm / openbox use Xlib, which falls back to tcp for DISPLAY=:0 when
+  # xterm / openbox use Xlib, which falls back to tcp for DISPLAY=:0 when
   # the unix socket is unavailable).
   tcp_open() {
     if command -v nc >/dev/null 2>&1; then nc -z 127.0.0.1 6000 2>/dev/null; return $?; fi

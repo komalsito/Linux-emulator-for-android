@@ -2291,6 +2291,11 @@ class BootstrapManager(private val ctx: Context) {
         }
         Thread {
             runCatching {
+                // v0.1.91: yield the CPU to the first terminal/desktop start -
+                // this repair's proot run (dpkg --configure -a, ghost purge)
+                // raced session launches on slow tablets ("terminal is a
+                // little slow to start"). Skip the courtesy when forced.
+                if (!force) Thread.sleep(6_000)
                 val spec = DistroCatalog.requested(ctx)
                 if (spec.pkg != PkgManager.APT) return@runCatching
                 val dest = FsLayout.linuxRoot(ctx)

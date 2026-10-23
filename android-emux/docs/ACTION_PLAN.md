@@ -1055,3 +1055,26 @@ User request: paint what is going RIGHT in green and the rest in red.
   and prints "[emux] terminal keyboard layout: X" into the session.
   Works from both tabs' key rows; desktop behaviour itself unchanged.
 versionCode 90, rebuilt emux-debug.apk (same keystore).
+
+## 37. v0.1.91 - Xvfb is UP; capture was the last missing link (+ terminal perf)
+
+v0.1.90 field pane (color-coded, working as intended): "port6000 state at
+session start: free", "attempts: ... attempt 1 rc=0 flags=-nolisten unix
+-nolisten local -nolisten inet6", bindlog all B1_OK/B2_OK, xvfb.log only
+cosmetic keysym warnings => THE X SERVER FINALLY RUNS on this device.
+Zero frames remained because emux-capture started IMMEDIATELY at session
+start, died (no X yet, and xwd/netpbm/nc not installed yet - they arrive
+with the background REST pass), and burned its 3 respawns before the
+toolchain landed. A healthy X with no capture = black pane forever.
+
+- Capture start is now GATED: wait for guest tcp 6000 (<=120 s) AND for
+  usr/bin/xwd + usr/bin/pnmtoplainpnm + bin/nc.openbsd on disk (<=240 s),
+  then start; note "capture: X up and toolchain present". Respawn cap 3->40.
+- emux-x11: fixed a stray "//" comment line (v0.1.86) that made dash print
+  "//: Permission denied" on every run.
+- Terminal cold-start perf (user request): TtyWrap PTY-wrapper probe result
+  (argv prefix + dialect + ctty) is now cached in files/ttywrap.probe, so
+  app launches skip re-exec'ing every wrapper candidate; startupRepair
+  yields 6 s to the first session instead of racing it for CPU.
+- DiagColors: "X up=true tools=true" green.
+versionCode 91, rebuilt emux-debug.apk (same keystore).
