@@ -42,6 +42,9 @@ fi
 
 [ -d /var/lib/dpkg ] || exit 0
 export DEBIAN_FRONTEND=noninteractive
+# v0.1.94 PERF (twin of the inline payload): linker cache first - ~1 s here
+# saves every later exec from crawling lib paths without /etc/ld.so.cache.
+ldconfig >/dev/null 2>&1 || true
 
 rm -f /var/lib/dpkg/status-old
 if ! dpkg --configure -a >&2; then

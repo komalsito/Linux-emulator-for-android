@@ -1117,3 +1117,28 @@ ORDERING cost: one big REST install gated capture for minutes.
   eating the CPU a cold terminal session needs; proot/dpkg children
   inherit the nice level. Combined with v0.1.91's ttywrap probe cache.
 versionCode 93, rebuilt emux-debug.apk (same keystore).
+
+## 40. v0.1.94 - performance round: ld.so.cache first, shorter settles, fresh-list gates
+
+Field report: terminal slow to first prompt (fast after app reopen),
+desktop slow to load. Root causes measured from the panes:
+ 1. Missing /etc/ld.so.cache while libc-bin sat half-configured: EVERY
+    guest exec crawled default lib paths until the background repair
+    finished configuring libc-bin - which is exactly why reopening the
+    app (repair done by then) was fast.
+ 2. Desktop settle-wait idled up to 120 s behind that same repair.
+ 3. Fresh roots paid a full apt-get update (30-60 s on slow links) inside
+    the desktop cascade even with fresh lists.
+Fixes:
+- APT_REPAIR_PAYLOAD + emux-apt-repair twin: `ldconfig` FIRST (~1 s) so
+  the cache exists before the multi-minute trigger processing.
+- Seeded /etc/profile.d/emux.sh: `[ -s /etc/ld.so.cache ] || ldconfig` -
+  the first LOGIN builds the cache if the repair hasn't yet.
+- startupRepair healthy-skip now treats half-configured/half-installed
+  status entries as dirty (must not paper over an unfinished db), while
+  steady-state launches still skip the proot payload entirely.
+- emux-x11 settle cap 120 s -> 45 s (x_up retries cover a still-running
+  transaction); apt-get update skipped when list files are <6 h old.
+Combined with v0.1.91 (ttywrap probe cache) and v0.1.93 (repair delay +
+background priority, REST split) this is the full first-launch perf pass.
+versionCode 94, rebuilt emux-debug.apk (same keystore).

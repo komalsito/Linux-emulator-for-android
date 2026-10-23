@@ -131,7 +131,11 @@ else
       else
         dpkg --configure -a >&2 || true
       fi
-      apt-get update >&2
+      # v0.1.94 PERF: skip apt-get update when list files are fresh (<6 h) -
+      # on slow links this alone cost 30-60 s of desktop open time.
+      if [ -z "$(find /var/lib/apt/lists -maxdepth 1 -name '*Packages*' -mmin -360 2>/dev/null | head -1)" ]; then
+        apt-get update >&2
+      fi
       # v0.1.54 FIELD FIX ("X server exited code 1" on FIRST desktop open right
       # after an update): the app-start repair pass may still hold the dpkg
       # lock when the desktop cascade runs - apt then fails with "Could not
@@ -281,9 +285,13 @@ else
   # (dpkg.log: libc-bin half-configured = ld.so.cache gone; /etc/profile even
   # lost `id`): Xvfb could not exec, the old blind 15 s window expired, and
   # the retry then died on a flag noble's Xvfb no longer knows.
+  # v0.1.94 PERF: cap the settle at 45 s (was 120) - waiting longer for a
+  # foreign transaction delays X past any useful bound; a still-running
+  # transaction after the cap is tolerated (x_up retries cover it).
   i=0
-  while [ "$i" -lt 24 ] && command -v apt_busy >/dev/null 2>&1 && apt_busy; do
-    echo "emux-x11: dpkg/apt still running before X start - settling ($i/24)" >&2
+  while [ "$i" -lt 9 ] && command -v apt_busy >/dev/null 2>&1 && apt_busy; do
+    echo "emux-x11: dpkg/apt still running before X start - settling ($i/9)" >&2
+    [ "$i" = 0 ] && echo "emux-x11: note: waiting on background package transaction" >&2
     sleep 5; i=$((i + 1))
   done
   # v0.1.79: -noshmem was REMOVED from Xvfb (xorg-server 21.1, Ubuntu noble):

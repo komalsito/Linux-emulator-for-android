@@ -103,6 +103,13 @@ class BootstrapManager(private val ctx: Context) {
             "dpkg --remove --force-all \"\$gp\" >&2 || true; fi; done; "
 
         private const val APT_REPAIR_PAYLOAD =
+            // v0.1.94 PERF: build the dynamic-linker cache FIRST. An interrupted
+            // transaction leaves libc-bin half-configured = NO /etc/ld.so.cache
+            // = every guest exec crawls the default lib paths (the "terminal
+            // slow until you reopen the app" symptom: reopen is fast because
+            // the repair finished the cache in between). ldconfig alone takes
+            // ~1 s and unblocks everything that follows.
+            "ldconfig >/dev/null 2>&1 || true; " +
             // v0.1.70: belt INSIDE the guest shell (the path exists only there).
             "[ -f /usr/local/lib/emux/libemux-linkfix.so ] && export LD_PRELOAD=/usr/local/lib/emux/libemux-linkfix.so; " +
             "export DEBIAN_FRONTEND=noninteractive; " +
@@ -2363,7 +2370,13 @@ class BootstrapManager(private val ctx: Context) {
                             !(File(dest, "usr/bin/xwd").isFile || File(dest, "usr/local/bin/xwd").isFile) ||
                             !(File(dest, "usr/bin/nc").isFile || File(dest, "bin/nc").isFile))
                 ) gaps += spec.desktopPkgs
-                val dirty = aptJournalDirty(dest)
+                // v0.1.94: half-configured packages (interrupted REST pass on
+                // the field device) count as dirty - the healthy-skip below
+                // must not paper over an unfinished db.
+                val dirty = aptJournalDirty(dest) || runCatching {
+                    File(dest, "var/lib/dpkg/status").readText()
+                        .let { it.contains("half-configured") || it.contains("half-installed") }
+                }.getOrDefault(false)
                 if (!force && !dirty && shim.isFile && stamp.isFile && gaps.isEmpty()) return@runCatching
                 installLinkFixShim(dest)
                 if (dirty || force || !stamp.isFile) {
@@ -2956,6 +2969,10 @@ class BootstrapManager(private val ctx: Context) {
             it.writeText(
                 "# v0.1.21: keep inherited PATH; prepend distro + helper dirs\n" +
                 "export PATH=\"/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:\$PATH\"\n" +
+                // v0.1.94 PERF: first login after an interrupted libc-bin
+                // configure pays ~1 s of ldconfig instead of every exec
+                // paying for the missing cache until the repair finishes.
+                "[ -s /etc/ld.so.cache ] || ldconfig 2>/dev/null\n" +
                 "[ -n \"\$EMUX_BIN\" ] && export PATH=\"\$EMUX_BIN:/system/bin:/system/xbin:\$PATH\"\n" +
                                 "# v0.1.28: host-side SHELL=/system/bin/sh (util-linux script(1) needs a host shell);\n" +
                 "# inside the distro, advertise the real shell to child programs.\n" +
