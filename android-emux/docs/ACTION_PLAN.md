@@ -1242,3 +1242,12 @@ WITH its NUL) followed by 00 00 00 00 d0 02 00 05 00 00 00 00 (frame 0
 header). This is the exact regression guard for the dash-printf NUL
 truncation class (v0.1.96) running through the REAL shell pipeline, not a
 unit mock. Jail gained mkfifo+sed for capture fidelity. 28 assertions.
+
+### 44.2 Feature-presence audit (post-v0.1.98)
+Two rounds in this project "shipped" features whose edits silently failed
+their text anchors (v0.1.93 REST split + capture wait notes). A systematic
+grep audit of every claim in §24-§44 against the tree ran clean: 48/48
+markers present (the four apparent misses were shell quoting artifacts of
+the audit itself; RESTCAP is intentionally gone - superseded by the v0.1.98
+CORE move). Lesson kept: every round's commit message lists file-level
+claims; the jail harness covers behaviour; this audit covers presence.
