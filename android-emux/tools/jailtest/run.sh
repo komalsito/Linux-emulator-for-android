@@ -96,6 +96,32 @@ else
 fi
 kill "$WRAP" 2>/dev/null; wait "$WRAP" 2>/dev/null
 
+echo "=== CAPTURE: wire bytes must start with the NUL-carrying 8B header ==="
+sh "$HERE/mkjail.sh" || exit 1
+# stub toolchain: xwd/xwdtopnm pass-through, pnmtoplainpnm emits a 720x1280 P3
+printf '#!/bin/sh\nexit 0\n' > "$FR/usr/bin/xwd"; chmod +x "$FR/usr/bin/xwd"
+printf '#!/bin/sh\nexit 0\n' > "$FR/usr/bin/xwdtopnm"; chmod +x "$FR/usr/bin/xwdtopnm"
+printf '#!/bin/sh\necho "P3"\necho "720 1280"\necho "255"\nawk "BEGIN{for(i=0;i<921600;i++) print 0,0,0}"\n' > "$FR/usr/bin/pnmtoplainpnm"; chmod +x "$FR/usr/bin/pnmtoplainpnm"
+printf '#!/bin/sh\ncat >> /tmp/cap.bin\n' > "$FR/bin/nc"; chmod +x "$FR/bin/nc"
+cp "$ARENA_WORKSPACE"/termux2/android-emux/app/src/main/assets/capture/x86_64/emux-rgb565 "$FR/usr/local/lib/emux/emux-rgb565" 2>/dev/null || {
+  # workspace path may differ when run from a checkout root
+  cp "$(dirname "$HERE")/app/src/main/assets/capture/x86_64/emux-rgb565" "$FR/usr/local/lib/emux/emux-rgb565"
+}
+chmod +x "$FR/usr/local/lib/emux/emux-rgb565"
+cp "$HERE/../../app/src/main/assets/bin/emux-capture" "$FR/usr/local/bin/emux-capture" 2>/dev/null || true
+chmod +x "$FR/usr/local/bin/emux-capture"
+rm -f "$FR/tmp/cap.bin"
+timeout 60 chroot "$FR" /bin/sh -c "PATH=/usr/local/bin:/usr/bin:/bin; export PATH; exec /usr/local/bin/emux-capture 127.0.0.1:7001" > "$T/capture.log" 2>&1 &
+CPID=$!
+i=0; while [ "$i" -lt 50 ]; do [ -s "$FR/tmp/cap.bin" ] && break; sleep 0.2; i=$((i+1)); done
+sleep 1
+kill "$CPID" 2>/dev/null; wait "$CPID" 2>/dev/null
+HDR=$(od -An -tx1 -N 8 "$FR/tmp/cap.bin" 2>/dev/null | tr -d ' \n')
+echo "capture wire header: $HDR"
+[ "$HDR" = "454d5558d00200 05" ] || [ "$HDR" = "454d5558d0020005" ]; expect "CAPTURE: 8B stream header byte-exact (EMUX|720|1280 with NUL)" 0 $?
+FHDR=$(od -An -tx1 -N 20 "$FR/tmp/cap.bin" 2>/dev/null | tr -d ' \n')
+case "$FHDR" in 454d5558d002000500000000d0020005*) expect "CAPTURE: 12B frame header follows (seq0|720|1280|0|0)" 0 0;; *) expect "CAPTURE: 12B frame header follows (seq0|720|1280|0|0)" 0 1;; esac
+
 echo "=== REPAIR: $(basename "$REPAIR") against ghost coreutils ==="
 sh "$HERE/mkjail.sh" || exit 1
 rm -f "$FR/usr/bin/id"

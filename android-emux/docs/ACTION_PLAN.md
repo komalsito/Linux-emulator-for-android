@@ -1232,3 +1232,13 @@ Field audit adoption (external review of the panes, round 17):
     repair/REST in progress.
 DiagColors: capture progress + copy/paste toasts classify green.
 versionCode 98, rebuilt emux-debug.apk (same keystore).
+
+### 44.1 CAPTURE wire-byte regression (v0.1.98 tooling)
+The jail harness gained a CAPTURE scenario: stub toolchain (xwd/xwdtopnm
+pass-through, pnmtoplainpnm emitting a real 720x1280 P3), a sink "nc"
+(appending to a file), the native converter seeded from assets - then the
+first 20 wire bytes are asserted: 45 4d 55 58 d0 02 00 05 (stream header
+WITH its NUL) followed by 00 00 00 00 d0 02 00 05 00 00 00 00 (frame 0
+header). This is the exact regression guard for the dash-printf NUL
+truncation class (v0.1.96) running through the REAL shell pipeline, not a
+unit mock. Jail gained mkfifo+sed for capture fidelity. 28 assertions.

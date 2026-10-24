@@ -39,7 +39,7 @@ copybin /bin/sh
 for b in /usr/bin/id /usr/bin/ln /usr/bin/stat /usr/bin/cat /usr/bin/mkdir \
          /usr/bin/rm /usr/bin/sleep /usr/bin/date /usr/bin/tr /usr/bin/grep \
          /usr/bin/chmod /usr/bin/tail /usr/bin/head /usr/bin/awk /usr/bin/wc \
-         /usr/bin/mv /usr/bin/ls; do
+         /usr/bin/mv /usr/bin/ls /usr/bin/mkfifo /usr/bin/sed; do
   copybin "$b"
 done
 
