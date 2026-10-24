@@ -155,10 +155,13 @@ echo "emux-capture: converter=$([ -x "$CONV" ] && echo native || echo awk-fallba
 
 grab_frame() {
   # v0.1.60: XWD -> (xwdtopnm) -> plain PNM; the middle step is mandatory
+  # v0.1.98 (field audit): grab errors used to go to /dev/null, so the pane
+  # never said WHY capture was waiting. Keep them in a file and surface the
+  # tail on repeated failures.
   if [ -n "$X2P" ]; then
-    "$XWD" -root -silent 2>/dev/null | "$X2P" 2>/dev/null | "$PNM" 2>/dev/null > "$TMPF" || return 1
+    "$XWD" -root -silent 2>>/tmp/emux_cap.err | "$X2P" 2>>/tmp/emux_cap.err | "$PNM" 2>>/tmp/emux_cap.err > "$TMPF" || return 1
   else
-    "$XWD" -root -silent 2>/dev/null | "$PNM" 2>/dev/null > "$TMPF" || return 1
+    "$XWD" -root -silent 2>>/tmp/emux_cap.err | "$PNM" 2>>/tmp/emux_cap.err > "$TMPF" || return 1
   fi
   [ -s "$TMPF" ] || return 1
   if [ -x "$CONV" ]; then
@@ -244,6 +247,10 @@ fails=0
 while :; do
   if ! grab_frame; then
     fails=$((fails+1))
+    # v0.1.98: surface the grab error tail on the 1st and every 10th failure
+    if [ "$fails" = 1 ] || [ $((fails % 10)) = 0 ]; then
+      echo "emux-capture: grab failure #$fails: $(tail -2 /tmp/emux_cap.err 2>/dev/null | tr '\n' ' ')" >&2
+    fi
     [ $fails -ge 50 ] && { echo "emux-capture: 50 consecutive frame grabs failed - is DISPLAY=$DISPLAY alive?" >&2; exit 1; }
     sleep 0.3; continue
   fi

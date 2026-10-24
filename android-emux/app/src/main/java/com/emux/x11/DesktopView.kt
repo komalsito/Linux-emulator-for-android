@@ -229,7 +229,8 @@ object DiagColors {
         "unixpath=true|tcp6000=true|abs=true|port6000 state at session start: free|" +
         "emux-linkfix-v\\d|apt-stub: installed|ghost package|purged|dpkgdir u=0|" +
         "status u=0 m=|== emux dpkg selfcheck|total \\d|-rw-.*linkfix|" +
-        "^/usr/local/lib/emux|^0$|shim=true preload=true|terminal keyboard layout: es|X up=true tools=true")
+        "^/usr/local/lib/emux|^0$|shim=true preload=true|terminal keyboard layout: es|X up=true tools=true|" +
+        "first grab ok|push channel open|X reachable|converter=native|copied |pasted ")
     fun healthy(line: String): Boolean = OK.containsMatchIn(line)
     fun green(): Int = 0xFF66BB6A.toInt()
     fun red(): Int = 0xFFEF5350.toInt()

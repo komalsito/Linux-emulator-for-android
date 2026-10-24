@@ -213,8 +213,13 @@ else
       # control-plane wait expired ("touch input: X TCP not up yet").
       # v0.1.60 CRITICAL: "xkbcomp" is NOT a Debian/Ubuntu package name
       # (x11-xkb-utils is) - apt aborts the WHOLE transaction on one bad name.
-      CORE="coreutils xvfb x11-xkb-utils xkb-data xfonts-base"
-      REST="x11-xserver-utils x11-apps netpbm netcat-openbsd openbox xterm"
+      # v0.1.98 (field audit): the capture toolchain (xwd/xwdtopnm from
+      # x11-apps, pnmtoplainpnm from netpbm, nc) moved INTO the synchronous
+      # CORE install - installing it in the background after X started raced
+      # the capture helper on slow devices (the "desktop running but
+      # invisible" rounds). Only the WM half stays backgrounded now.
+      CORE="coreutils xvfb x11-xkb-utils xkb-data xfonts-base x11-apps netpbm netcat-openbsd"
+      REST="x11-xserver-utils openbox xterm"
       TRIES=0
       while [ "$TRIES" -lt 30 ]; do
         if apt_busy; then

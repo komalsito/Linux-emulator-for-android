@@ -101,6 +101,18 @@ class VtTerminalView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attr
     private var lastTapTs = 0L
     private val touchSlopPx = android.view.ViewConfiguration.get(context).scaledTouchSlop * 1.5f
 
+    // v0.1.98 COPY/PASTE (user request): long-press then drag = select text
+    // (release copies to the Android clipboard); long-press WITHOUT dragging =
+    // paste the clipboard into the session. Selection renders as a blue
+    // overlay; it clears on the next touch or after copying.
+    private var selecting = false
+    private var selMoved = false
+    private var selA = -1; private var selACol = 0
+    private var selB = -1; private var selBCol = 0
+    private val lpHandler = android.os.Handler(android.os.Looper.getMainLooper())
+    private var lpRunnable: Runnable? = null
+    private val selPaint = Paint().apply { color = 0x663399FF; style = Paint.Style.FILL }
+
     /** Push a row that is about to scroll off the top into scrollback. */
     private fun pushHistory(r: Row) {
         history.addLast(r)
@@ -610,6 +622,65 @@ class VtTerminalView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attr
         synchronized(modelLock) { drawLocked(canvas) }
     }
 
+    /** Absolute virtual row -> Row (history + live grid), null if outside. */
+    private fun rowAt(a: Int): Row? = synchronized(modelLock) {
+        val hsize = history.size
+        when {
+            a < 0 || a >= hsize + rows -> null
+            a < hsize -> history[a]
+            else -> screen[a - hsize]
+        }
+    }
+
+    private fun normSel(): IntArray {
+        var a1 = selA; var c1 = selACol; var a2 = selB; var c2 = selBCol
+        if (a1 > a2 || (a1 == a2 && c1 > c2)) {
+            val ta = a1; val tc = c1; a1 = a2; c1 = c2; a2 = ta; c2 = tc
+        }
+        return intArrayOf(a1, c1, a2, c2)
+    }
+
+    private fun selectedText(): String {
+        if (selA < 0 || selB < 0) return ""
+        val (a1, c1, a2, c2) = listOf(normSel()[0], normSel()[1], normSel()[2], normSel()[3])
+        val sb = StringBuilder()
+        for (a in a1..a2) {
+            val r = rowAt(a) ?: continue
+            val line = buildString(r.chars.size) { for (cp in r.chars) append(cp.toChar()) }
+            val cs = if (a == a1) c1.coerceIn(0, line.length) else 0
+            val ce = if (a == a2) (c2 + 1).coerceIn(0, line.length) else line.length
+            if (cs < ce) sb.append(line.substring(cs, ce))
+            if (a != a2) sb.append('\n')
+        }
+        return sb.toString()
+    }
+
+    private fun cellOf(x: Float, y: Float): Pair<Int, Int> {
+        val hsize = history.size
+        val vTop = hsize - scrollOffset
+        val row = (y / cellH).toInt().coerceIn(0, rows - 1)
+        val col = (x / cellW).toInt().coerceIn(0, cols - 1)
+        return (vTop + row) to col
+    }
+
+    private fun copySelection() {
+        val txt = selectedText()
+        selA = -1; selB = -1; invalidate()
+        if (txt.isBlank()) return
+        val cm = context.getSystemService(android.content.ClipboardManager::class.java)
+        cm?.setPrimaryClip(android.content.ClipData.newPlainText("emux terminal", txt))
+        android.widget.Toast.makeText(context, "copied ${txt.length} chars", android.widget.Toast.LENGTH_SHORT).show()
+    }
+
+    private fun pasteClipboard() {
+        val cm = context.getSystemService(android.content.ClipboardManager::class.java)
+        val clip = cm?.primaryClip ?: return
+        if (clip.itemCount == 0) return
+        val txt = clip.getItemAt(0).coerceToText(context)?.toString() ?: return
+        session?.write(txt.toByteArray())
+        android.widget.Toast.makeText(context, "pasted ${txt.length} chars", android.widget.Toast.LENGTH_SHORT).show()
+    }
+
     private fun drawLocked(canvas: Canvas) {
         canvas.drawColor(BG_COLOR)
         val fm = textPaint.fontMetrics
@@ -630,6 +701,15 @@ class VtTerminalView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attr
             // grid of <=40 runs/row is trivially cheap per frame).
             val v = vTop + y
             val row = if (v < hsize) history[v] else screen[v - hsize]
+            // v0.1.98: selection overlay for this row
+            if (selA >= 0 && selB >= 0) {
+                val ns = normSel()
+                if (v in ns[0]..ns[2]) {
+                    val cs = if (v == ns[0]) ns[1] else 0
+                    val ce = if (v == ns[2]) ns[3] + 1 else row.chars.size
+                    if (cs < ce) canvas.drawRect(cs * cellW, top.toFloat(), ce * cellW, (top + cellH).toFloat(), selPaint)
+                }
+            }
             val rcols = row.chars.size      // rows keep their birth width across resizes
             val top = y * cellH
             var x = 0
@@ -749,11 +829,28 @@ class VtTerminalView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attr
         when (event?.actionMasked) {
             android.view.MotionEvent.ACTION_DOWN -> {
                 touchLastY = event.y; touchAcc = 0f; dragging = false
+                // v0.1.98: arm the long-press (select or paste) timer
+                selA = -1; selB = -1
+                lpRunnable?.let { lpHandler.removeCallbacks(it) }
+                val dx = event.x; val dy2 = event.y
+                lpRunnable = Runnable {
+                    selecting = true; selMoved = false
+                    val (a, c) = cellOf(dx, dy2)
+                    selA = a; selACol = c; selB = a; selBCol = c
+                    invalidate()
+                }
+                lpHandler.postDelayed(lpRunnable!!, 400)
             }
             android.view.MotionEvent.ACTION_MOVE -> {
                 val dy = event.y - touchLastY
+                if (selecting) {
+                    val (a, c) = cellOf(event.x, event.y)
+                    if (a != selB || c != selBCol) { selMoved = true; selB = a; selBCol = c; invalidate() }
+                    return true
+                }
                 if (!dragging && kotlin.math.abs(dy) > touchSlopPx && history.isNotEmpty()) {
                     dragging = true; touchAcc = 0f
+                    lpRunnable?.let { lpHandler.removeCallbacks(it) }
                 }
                 if (dragging) {
                     touchLastY = event.y
@@ -764,6 +861,12 @@ class VtTerminalView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attr
                 }
             }
             android.view.MotionEvent.ACTION_UP -> {
+                lpRunnable?.let { lpHandler.removeCallbacks(it) }
+                if (selecting) {
+                    selecting = false
+                    if (selMoved) copySelection() else pasteClipboard()
+                    return true
+                }
                 val now = System.currentTimeMillis()
                 if (dragging) {
                     dragging = false
@@ -775,7 +878,11 @@ class VtTerminalView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attr
                     showKeyboard()
                 }
             }
-            android.view.MotionEvent.ACTION_CANCEL -> dragging = false
+            android.view.MotionEvent.ACTION_CANCEL -> {
+                dragging = false
+                lpRunnable?.let { lpHandler.removeCallbacks(it) }
+                selecting = false
+            }
         }
         return true
     }

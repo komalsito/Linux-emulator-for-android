@@ -1209,3 +1209,26 @@ host-side connects do not always). v0.1.97:
   screenshot-able, unlike the pane's moving window.
 - jailtest asserts the marker file appears (26 assertions).
 versionCode 97, rebuilt emux-debug.apk (same keystore).
+
+## 44. v0.1.98 - terminal copy/paste + field-audit fixes (capture tools in CORE)
+
+User request: copy-paste in the terminal. Gestures (VtTerminalView):
+long-press then DRAG = select (blue overlay over history+live rows);
+release = copy to the Android clipboard (toast with char count);
+long-press WITHOUT moving = paste clipboard into the session; selection
+clears on copy or next touch. Works across scrollback (virtual rows).
+Field audit adoption (external review of the panes, round 17):
+ 1. "emux-capture sends grab errors to /dev/null" - true: grab stderr now
+    appends to /tmp/emux_cap.err and the tail is echoed to the pane on the
+    1st and every 10th consecutive failure.
+ 2. "capture tools should install WITH the X server, not backgrounded" -
+    adopted as the main fix: x11-apps/netpbm/netcat-openbsd moved into the
+    synchronous CORE list; REST (background) is now WM-only. NOTE: the
+    v0.1.93 "REST split" edit had silently failed its anchor (the gate line
+    had changed in v0.1.92), so the race it claimed to fix was still live -
+    this round applies it for real against the current text.
+ 3. Audit's harmless-items list confirmed: keysym warnings (xkbcomp ran),
+    /proc cmdline race during the stale sweep, half-configured lines =
+    repair/REST in progress.
+DiagColors: capture progress + copy/paste toasts classify green.
+versionCode 98, rebuilt emux-debug.apk (same keystore).
