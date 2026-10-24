@@ -90,7 +90,10 @@ probe_sockets() {
   # v0.1.86: mirror into the pane-visible selfcheck file (chunked notes)
   cat /tmp/emux_probes >> /tmp/emux_selfcheck 2>/dev/null
 }
-probe_sockets
+# v0.1.99 PERF: probes are diagnostics, not gates - run them in the
+# background so the launch path never pays their ~3 s; the clash branch
+# still calls probe_sockets synchronously when it needs fresh numbers.
+( probe_sockets ) >/dev/null 2>&1 &
 
 # v0.1.78: xkbcomp preflight. The X server execs /usr/bin/xkbcomp BY ABSOLUTE
 # PATH through /bin/sh while compiling its keymap; a ghost x11-xkb-utils (db
@@ -290,12 +293,14 @@ else
   # (dpkg.log: libc-bin half-configured = ld.so.cache gone; /etc/profile even
   # lost `id`): Xvfb could not exec, the old blind 15 s window expired, and
   # the retry then died on a flag noble's Xvfb no longer knows.
-  # v0.1.94 PERF: cap the settle at 45 s (was 120) - waiting longer for a
-  # foreign transaction delays X past any useful bound; a still-running
-  # transaction after the cap is tolerated (x_up retries cover it).
+  # v0.1.94 PERF: cap the settle at 45 s (was 120). v0.1.99 PERF: with a
+  # valid ld.so.cache the original reason for settling (execs failing mid
+  # libc-bin swap) is gone, so the cap drops to 10 s; without cache keep 45.
+  SETTLE_CAP=9
+  [ -s /etc/ld.so.cache ] && SETTLE_CAP=2
   i=0
-  while [ "$i" -lt 9 ] && command -v apt_busy >/dev/null 2>&1 && apt_busy; do
-    echo "emux-x11: dpkg/apt still running before X start - settling ($i/9)" >&2
+  while [ "$i" -lt "$SETTLE_CAP" ] && command -v apt_busy >/dev/null 2>&1 && apt_busy; do
+    echo "emux-x11: dpkg/apt still running before X start - settling ($i/$SETTLE_CAP)" >&2
     [ "$i" = 0 ] && echo "emux-x11: note: waiting on background package transaction" >&2
     sleep 5; i=$((i + 1))
   done

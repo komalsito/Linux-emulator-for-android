@@ -89,6 +89,11 @@ class BootstrapManager(private val ctx: Context) {
          * packages too. Shell twin lives in assets/bin/emux-apt-repair and
          * emux-x11 ghost_purge(): keep the package:marker table identical.
          */
+        /** v0.1.99: non-blocking ld.so.cache builder, mkdir-locked. */
+        private const val LDCONFIG_GATE_LINE =
+            "if [ ! -s /etc/ld.so.cache ] && mkdir /tmp/.ldcfg.lock 2>/dev/null; then " +
+            "(ldconfig 2>/dev/null; rmdir /tmp/.ldcfg.lock 2>/dev/null) & fi\n"
+
         private const val GHOST_PURGE_PAYLOAD =
             "for pair in " +
             "\"coreutils:/usr/bin/id\" \"util-linux:/usr/bin/script\" \"bash:/bin/bash\" " +
@@ -2325,7 +2330,7 @@ class BootstrapManager(private val ctx: Context) {
                 // libc-bin/xvfb triggers for minutes on first run) eating the
                 // CPU the cold terminal session needs; children (proot, dpkg)
                 // inherit the nice level.
-                if (!force) Thread.sleep(12_000)
+                if (!force) Thread.sleep(4_000)
                 runCatching {
                     android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_BACKGROUND)
                 }
@@ -2348,8 +2353,15 @@ class BootstrapManager(private val ctx: Context) {
                 // no-cache tax on every exec until the repair finished.
                 runCatching {
                     val prof = File(dest, "etc/profile.d/emux.sh")
-                    if (prof.isFile && !prof.readText().contains("ld.so.cache"))
-                        prof.appendText("[ -s /etc/ld.so.cache ] || ldconfig 2>/dev/null\n")
+                    if (prof.isFile) {
+                        val t = prof.readText()
+                        val oldLine = "[ -s /etc/ld.so.cache ] || ldconfig 2>/dev/null\n"
+                        when {
+                            t.contains(".ldcfg.lock") -> { /* already v0.1.99 form */ }
+                            t.contains(oldLine) -> prof.writeText(t.replace(oldLine, LDCONFIG_GATE_LINE))
+                            else -> prof.appendText(LDCONFIG_GATE_LINE)
+                        }
+                    }
                 }
                 // v0.1.70: ALWAYS refresh the shim - the healthy-skip below
                 // kept the v1 shim (which only overrode link(), a no-op on
@@ -2999,10 +3011,12 @@ class BootstrapManager(private val ctx: Context) {
             it.writeText(
                 "# v0.1.21: keep inherited PATH; prepend distro + helper dirs\n" +
                 "export PATH=\"/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:\$PATH\"\n" +
-                // v0.1.94 PERF: first login after an interrupted libc-bin
-                // configure pays ~1 s of ldconfig instead of every exec
-                // paying for the missing cache until the repair finishes.
-                "[ -s /etc/ld.so.cache ] || ldconfig 2>/dev/null\n" +
+                // v0.1.94 PERF: first login builds the cache if missing.
+                // v0.1.99 PERF: ...in the BACKGROUND - the synchronous form
+                // cost the first terminal prompt a full ldconfig under proot
+                // (tens of seconds on slow tablets). Execs fall back to the
+                // default lib paths until the cache lands.
+                LDCONFIG_GATE_LINE +
                 "[ -n \"\$EMUX_BIN\" ] && export PATH=\"\$EMUX_BIN:/system/bin:/system/xbin:\$PATH\"\n" +
                                 "# v0.1.28: host-side SHELL=/system/bin/sh (util-linux script(1) needs a host shell);\n" +
                 "# inside the distro, advertise the real shell to child programs.\n" +

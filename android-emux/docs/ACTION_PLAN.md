@@ -1251,3 +1251,26 @@ markers present (the four apparent misses were shell quoting artifacts of
 the audit itself; RESTCAP is intentionally gone - superseded by the v0.1.98
 CORE move). Lesson kept: every round's commit message lists file-level
 claims; the jail harness covers behaviour; this audit covers presence.
+
+## 45. v0.1.99 - the sub-two-minute pass (async ldconfig, cache-aware settle)
+
+Field: terminal first prompt still ~1 min; desktop all-green only after a
+couple of minutes. Remaining minute-eaters, each now cut:
+ 1. First login ran ldconfig SYNCHRONOUSLY in the profile gate (v0.1.94) -
+    tens of seconds under proot on this tablet. Now backgrounded with a
+    mkdir lock; execs use the fallback lib paths until the cache lands.
+ 2. Desktop settle-wait idled up to 45 s behind the background repair even
+    though with a valid ld.so.cache the original reason (execs dying mid
+    libc-bin swap) is gone: cap is now 10 s with cache, 45 s without.
+ 3. Start-time socket probes (~3 s of timeout-1 binds) moved to a
+    background subshell; the clash branch still probes synchronously.
+ 4. Capture gate polls at 1 s (was 5 s); note cadence unchanged (~15 s).
+ 5. startupRepair courtesy delay 12 s -> 4 s (terminal no longer depends on
+    the repair for speed, see 1).
+ 6. emux-capture echoes "frame 1 pushed (N bytes)" so the pane proves the
+    stream side end-to-end.
+Expected steady timeline: terminal prompt ~3-8 s cold; desktop open
+sweep ~2 s + settle <=10 s + Xvfb ~3-5 s + capture gate ~1 s + first frame
+~1 s => well under a minute; first open after update adds nothing new
+(CORE install skips when binaries exist).
+versionCode 99, rebuilt emux-debug.apk (same keystore).

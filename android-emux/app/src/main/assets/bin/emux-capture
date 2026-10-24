@@ -265,6 +265,7 @@ while :; do
     [ "$SINK" = 3 ] && { echo "emux-capture: push channel closed (Android side gone)" >&2; exit 0; }
   }
   fi
+  if [ "$seq" = 0 ]; then echo "emux-capture: frame 1 pushed ($(wc -c < "$RAW") bytes)" >&2; fi
   seq=$((seq+1))
   sleep 0.1   # ~10 fps cap - plenty for a WM desktop, battery-friendly
 done

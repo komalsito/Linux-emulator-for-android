@@ -459,14 +459,16 @@ class DesktopService(
                     // toolchain files land with the REST pass. Narrate every
                     // 15 s so the pane is never silent while waiting.
                     var up = false; var tools = false; var w = 0
-                    while ((!(up && tools)) && w < 60 && state.value != State.IDLE) {
+                    while ((!(up && tools)) && w < 180 && state.value != State.IDLE) {
                         up = up or java.io.File(rootfs, "tmp/emux_x_up").isFile
                         tools = listOf("usr/bin/xwd", "usr/bin/pnmtoplainpnm", "bin/nc.openbsd")
                             .all { java.io.File(rootfs, it).isFile }
                         if (!(up && tools)) {
-                            kotlinx.coroutines.delay(5_000); w++
-                            if (w % 3 == 0) noteInfo(
-                                "capture: waiting - X-up marker=$up toolchain=$tools ($w/60)")
+                            kotlinx.coroutines.delay(1_000); w++
+                            // v0.1.99 PERF: 1 s poll (was 5); note cadence kept
+                            // at ~15 s.
+                            if (w % 15 == 0) noteInfo(
+                                "capture: waiting - X-up marker=$up toolchain=$tools ($w/180)")
                         }
                     }
                     if (!(up && tools) || state.value == State.IDLE) {
