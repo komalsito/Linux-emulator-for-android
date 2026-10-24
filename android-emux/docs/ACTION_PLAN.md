@@ -1192,3 +1192,20 @@ network install - mitigated v0.1.93/94 (REST split, list freshness gate);
 (4) capture readiness - closed v0.1.91-96 (gating, native converter,
 binary-safe headers).
 versionCode 96, rebuilt emux-debug.apk (same keystore).
+
+## 43. v0.1.97 - capture gate moves to files; diag bundle escapes to the terminal
+
+v0.1.96 field: X up (rc=0) and bindlog green again, but the capture gate
+note never appeared - the host-side waitForPort(6000) that gates capture
+proved unreliable on this device (guest-internal nc sees the listener,
+host-side connects do not always). v0.1.97:
+- emux-x11 touches /tmp/emux_x_up the moment x_up is true (background
+  poller); the capture gate polls FILES only: the marker + the three
+  toolchain files, narrating every 15 s ("capture: waiting - X-up
+  marker=... toolchain=... (n/60)").
+- If the gate ever gives up, dumpDiagBundleToTerminal() writes the whole
+  bundle (diag log, attempts, bindlog, probes, xvfb.log.2/.1/.log) into
+  the CURRENT TERMINAL session scrollback - readable with pgup and
+  screenshot-able, unlike the pane's moving window.
+- jailtest asserts the marker file appears (26 assertions).
+versionCode 97, rebuilt emux-debug.apk (same keystore).

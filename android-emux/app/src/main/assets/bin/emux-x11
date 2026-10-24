@@ -65,7 +65,7 @@ kill_stale_x() {
   rm -f /tmp/.X0-lock /tmp/.X11-unix/X0 2>/dev/null
 }
 kill_stale_x
-rm -f /tmp/emux_wm_launched /tmp/emux_xvfb_restarted 2>/dev/null
+rm -f /tmp/emux_wm_launched /tmp/emux_xvfb_restarted /tmp/emux_x_up 2>/dev/null
 
 # v0.1.82: SOCKET PROBES. X's "Cannot establish any listening sockets /
 # server already running" is a GENERIC message that hides the real errno -
@@ -335,6 +335,13 @@ else
     done
     return 2
   }
+  # v0.1.97: tell the Android side (via a FILE - socket waits proved
+  # unreliable as a gate on this device) the moment X is reachable.
+  ( i=0
+    while [ "$i" -lt 600 ]; do
+      if x_up; then : > /tmp/emux_x_up 2>/dev/null; break; fi
+      sleep 0.5; i=$((i + 1))
+    done ) &
   rc=0
   : > /tmp/emux_attempts 2>/dev/null
   # v0.1.86: PURE IPv4 TCP first. The v0.1.85 shim selftest proved guest

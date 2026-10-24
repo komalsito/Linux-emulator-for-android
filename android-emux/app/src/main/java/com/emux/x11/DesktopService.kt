@@ -452,17 +452,26 @@ class DesktopService(
                 //    "attempt 1 rc=0", bindlog all OK) still produced zero
                 //    frames forever.
                 scope.launch {
-                    val up = runCatching {
-                        waitForPort(6000, timeoutMs = 120_000); true
-                    }.getOrElse { false }
-                    var tools = false; var w = 0
-                    while (!tools && w < 48 && state.value != State.IDLE) {
+                    // v0.1.97: gate on FILES, not host-side socket waits:
+                    // emux-x11 touches /tmp/emux_x_up the moment the server is
+                    // reachable from inside the guest (host waitForPort proved
+                    // unreliable as the gate on the field device), and the
+                    // toolchain files land with the REST pass. Narrate every
+                    // 15 s so the pane is never silent while waiting.
+                    var up = false; var tools = false; var w = 0
+                    while ((!(up && tools)) && w < 60 && state.value != State.IDLE) {
+                        up = up or java.io.File(rootfs, "tmp/emux_x_up").isFile
                         tools = listOf("usr/bin/xwd", "usr/bin/pnmtoplainpnm", "bin/nc.openbsd")
                             .all { java.io.File(rootfs, it).isFile }
-                        if (!tools) { kotlinx.coroutines.delay(5_000); w++ }
+                        if (!(up && tools)) {
+                            kotlinx.coroutines.delay(5_000); w++
+                            if (w % 3 == 0) noteInfo(
+                                "capture: waiting - X-up marker=$up toolchain=$tools ($w/60)")
+                        }
                     }
-                    if (!up || state.value == State.IDLE) {
+                    if (!(up && tools) || state.value == State.IDLE) {
                         noteInfo("capture: gave up waiting (X up=$up tools=$tools)")
+                        dumpDiagBundleToTerminal()
                         return@launch
                     }
                     noteInfo("capture: X up and toolchain present - starting emux-capture")
@@ -656,6 +665,27 @@ class DesktopService(
         diag[t]?.toString()?.lineSequence()?.filter { it.isNotBlank() }?.toList()
             ?.takeLast(2)?.joinToString(" | ")
     }.joinToString(" /// ")
+
+    /** v0.1.97: when the capture gate gives up, dump the whole diagnostic
+     *  bundle into the CURRENT TERMINAL session scrollback - the terminal can
+     *  be scrolled (pgup) and screenshotted, unlike the pane's moving window. */
+    private fun dumpDiagBundleToTerminal() {
+        runCatching {
+            val rf = com.emux.core.FsLayout.linuxRoot(ctx)
+            val sb = StringBuilder()
+            sb.append("\r\n===== EMUX DESKTOP DIAG BUNDLE =====\r\n")
+            listOf("tmp/emux_desktop_diag.log", "tmp/emux_attempts", "tmp/emux_bindlog",
+                   "tmp/emux_probes", "tmp/xvfb.log.2", "tmp/xvfb.log.1", "tmp/xvfb.log").forEach { rel ->
+                val f = java.io.File(rf, rel)
+                sb.append("----- $rel -----\r\n")
+                sb.append(runCatching { f.readText().takeLast(3000) }.getOrDefault("<absent>"))
+                sb.append("\r\n")
+            }
+            sb.append("===== END BUNDLE =====\r\n")
+            com.emux.terminal.TerminalService.sessions().value.firstOrNull()?.write(sb.toString().toByteArray())
+            noteInfo("diag bundle dumped into the Terminal tab scrollback (pgup to read)")
+        }
+    }
 
     /** v0.1.83: last guest probe lines (emux-x11 probe_sockets). */
     private fun guestProbeTail(rootfs: java.io.File): String = runCatching {
