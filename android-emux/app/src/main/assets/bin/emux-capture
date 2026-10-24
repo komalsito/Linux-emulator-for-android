@@ -229,8 +229,15 @@ u16le() { printf "$(printf '\\%03o\\%03o' $(($1 & 255)) $((($1 >> 8) & 255)))"; 
 u32le() { printf "$(printf '\\%03o\\%03o\\%03o\\%03o' \
   $(($1 & 255)) $((($1 >> 8) & 255)) $((($1 >> 16) & 255)) $((($1 >> 24) & 255)))"; }
 
-# stream header: EXACTLY 8 bytes
-{ printf EMUX; u16le "$W"; u16le "$H"; } | send_bytes || true
+# stream header: EXACTLY 8 bytes.
+# v0.1.96: from C when available - dash printf TRUNCATES the format string at
+# the first NUL (1280 = 0x0500 -> u16le starts with 0x00), so the shell path
+# sent a 6-byte header and the Android reader desynced forever on Ubuntu.
+if [ -x "$CONV" ]; then
+  "$CONV" -s "$W" "$H" | send_bytes || true
+else
+  { printf EMUX; u16le "$W"; u16le "$H"; } | send_bytes || true
+fi
 
 seq=0
 fails=0
@@ -242,9 +249,15 @@ while :; do
   fi
   fails=0
   if [ "$(wc -c < "$RAW")" -ne $((W*H*2)) ]; then sleep 0.3; continue; fi
+  if [ -x "$CONV" ]; then
+    "$CONV" -F "$seq" "$W" "$H" < "$RAW" | send_bytes || {
+      [ "$SINK" = 3 ] && { echo "emux-capture: push channel closed (Android side gone)" >&2; exit 0; }
+    }
+  else
   { u32le "$seq"; u16le "$W"; u16le "$H"; u16le 0; u16le 0; cat "$RAW"; } | send_bytes || {
     [ "$SINK" = 3 ] && { echo "emux-capture: push channel closed (Android side gone)" >&2; exit 0; }
   }
+  fi
   seq=$((seq+1))
   sleep 0.1   # ~10 fps cap - plenty for a WM desktop, battery-friendly
 done

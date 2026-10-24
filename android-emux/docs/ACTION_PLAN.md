@@ -1166,3 +1166,29 @@ never could.
   no-cache exec tax until the repair finished - the "reopen is faster"
   symptom).
 versionCode 95, rebuilt emux-debug.apk (same keystore).
+
+## 42. v0.1.96 - THE last bug: dash printf truncates headers at NUL
+
+v0.1.95 field: still zero frames. The native converter fixed the PIXELS,
+but the 8-byte stream header and 12-byte frame headers were still emitted
+with the shell trick printf "$(printf '\\%03o...')". On dash (Ubuntu) the
+outer printf treats its format as a C string: output STOPS at the first
+NUL. The default geometry 720x1280 encodes height 1280 as u16le 00 05 -
+a NUL first byte - so the stream header went out SIX bytes long and every
+frame header lost its low bytes too: the Android reader desynced on byte
+6 and waited forever. Silent, error-free, permanent.
+Why this survived eleven rounds: v0.1.28 verified the header technique on
+ALPINE, whose toybox printf emits NUL bytes correctly - and the early
+field device ran Alpine. Ubuntu's dash never could.
+- emux-rgb565 gains header modes: -s W H (8 B stream header), -F SEQ W H
+  (12 B frame header then stdin verbatim). emux-capture uses them when
+  the converter exists; shell printf only as fallback. Sandbox-verified:
+  -s 720 1280 -> 45 4d 55 58 d0 02 00 05; -F keeps NULs; P3 conversion
+  regression unchanged.
+Mapping of the user's four-point checklist (round 15): (1) first-open
+network install - mitigated v0.1.93/94 (REST split, list freshness gate);
+(2) Xvfb port - closed v0.1.86-89 (tcp-only mode, rc=0 proven on device);
+(3) stale processes - closed v0.1.81/89 (host sweep + port6000 verify);
+(4) capture readiness - closed v0.1.91-96 (gating, native converter,
+binary-safe headers).
+versionCode 96, rebuilt emux-debug.apk (same keystore).

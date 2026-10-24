@@ -120,6 +120,16 @@ static long sys1(long n, long a)
 /* libgcc's ARM div-by-zero trap references raise(); freestanding stub. */
 int raise(int sig) { (void)sig; return 0; }
 
+/* freestanding entry: pull argc/argv off the stack per ABI, then call C. */
+#if defined(__aarch64__)
+__asm__(".globl _start\n_start:\n\tldp x0, x1, [sp]\n\tb _start_c\n");
+#elif defined(__arm__)
+__asm__(".globl _start\n_start:\n\tldr r0, [sp]\n\tadd r1, sp, #4\n\tb _start_c\n");
+#elif defined(__x86_64__)
+__asm__(".globl _start\n_start:\n\tmov (%rsp),%rdi\n\tlea 8(%rsp),%rsi\n\tjmp _start_c\n");
+#else /* i386 */
+__asm__(".globl _start\n_start:\n\tmov (%esp),%eax\n\tlea 4(%esp),%ecx\n\tpush %ecx\n\tpush %eax\n\tcall _start_c\n\thlt\n");
+#endif
 static long do_read(long fd, void *b, long n) { return sys3(N_READ, fd, (long)b, n); }
 static void do_write(long fd, const void *b, long n)
 {
@@ -183,9 +193,55 @@ static void out2(unsigned v)
     ob[opos++] = (char)((v >> 8) & 255);
 }
 
-void _start(void)
+/* v0.1.96: binary header modes. The shell printf octal-escape technique
+ * TRUNCATES at NUL bytes on dash (Ubuntu): 1280 = 0x0500 puts a NUL in the
+ * u16le height, so the 8-byte stream header went out 6 bytes long and the
+ * Android reader desynced forever - silently. toybox printf (Alpine) emits
+ * NULs fine, which is why v0.1.28 verification passed and old Alpine field
+ * devices worked while Ubuntu never showed a frame. Headers now come from C.
+ *   emux-rgb565 -s W H        -> 8 B stream header  (EMUX | w u16 | h u16)
+ *   emux-rgb565 -F SEQ W H    -> 12 B frame header (seq u32 | w | h | x | y)
+ *                                then stdin bytes verbatim (raw RGB565)
+ */
+static void ppm_main(void);
+static void put_u16(unsigned v) { char b[2]; b[0] = (char)(v & 255); b[1] = (char)((v >> 8) & 255); do_write(1, b, 2); }
+static void put_u32(unsigned long v)
 {
-    /* optional input file argument is ignored: the script feeds stdin. */
+    char b[4];
+    b[0] = (char)(v & 255); b[1] = (char)((v >> 8) & 255);
+    b[2] = (char)((v >> 16) & 255); b[3] = (char)((v >> 24) & 255);
+    do_write(1, b, 4);
+}
+static long argnum(const char *s)
+{
+    long v = 0;
+    while (*s >= '0' && *s <= '9') v = v * 10 + (*s++ - '0');
+    return v;
+}
+void _start_c(long argc, char **argv)
+{
+    if (argc >= 2 && argv[1][0] == '-' && argv[1][1] == 's' && argc >= 4) {
+        long W = argnum(argv[2]), H = argnum(argv[3]);
+        do_write(1, "EMUX", 4);
+        put_u16((unsigned)W); put_u16((unsigned)H);
+        do_exit(0);
+    }
+    if (argc >= 2 && argv[1][0] == '-' && argv[1][1] == 'F' && argc >= 5) {
+        long seq = argnum(argv[2]), W = argnum(argv[3]), H = argnum(argv[4]);
+        put_u32((unsigned long)seq);
+        put_u16((unsigned)W); put_u16((unsigned)H);
+        put_u16(0); put_u16(0);
+        for (;;) {
+            long r = do_read(0, ib, INBUF);
+            if (r <= 0) break;
+            do_write(1, ib, r);
+        }
+        do_exit(0);
+    }
+    ppm_main();
+}
+static void ppm_main(void)
+{
     int c1 = getch(), c2 = getch();
     int eoi = 0;
     long W, H, MX;
