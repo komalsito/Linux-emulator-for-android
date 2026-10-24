@@ -1,5 +1,0 @@
-<?xml version="1.0" encoding="utf-8"?>
-<!-- Accept any USB device class; the desktop session decides what to do with it -->
-<resources>
-    <usb-device />
-</resources>

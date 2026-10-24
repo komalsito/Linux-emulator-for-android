@@ -7,3 +7,7 @@ build/
 *.ap_
 .idea/
 .vscode/
+# v0.1.98+: build intermediates no longer tracked (source + committed APK are
+# the artifacts; these churned every round and vanish from sandbox snapshots)
+android-emux/app/build/
+android-emux/.gradle/
