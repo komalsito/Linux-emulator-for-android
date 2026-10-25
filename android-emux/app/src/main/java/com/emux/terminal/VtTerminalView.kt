@@ -9,6 +9,7 @@ import android.text.TextPaint
 import android.util.AttributeSet
 import android.view.KeyEvent
 import android.view.View
+import android.util.TypedValue
 import android.view.inputmethod.BaseInputConnection
 import android.view.inputmethod.EditorInfo
 import android.view.inputmethod.InputConnection
@@ -153,6 +154,13 @@ class VtTerminalView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attr
     private var baseline = 0f
 
     init {
+        // v0.1.101 MOBILE: the paint was 34px RAW — about 17dp on a
+        // 2x tablet but only ~11dp on a 3x phone, so phone terminal
+        // text was tiny and the grid ballooned to 100+ columns.
+        // 13sp keeps text readable on phones and close to the old
+        // look on tablets; onSizeChanged() re-derives cols/rows.
+        textPaint.textSize = TypedValue.applyDimension(
+            TypedValue.COMPLEX_UNIT_SP, 13f, resources.displayMetrics)
         isFocusableInTouchMode = true
         // v0.1.19 BUGFIX I: without onCheckIsTextEditor() == true the framework
         // treats this View as a NON-text-editor: showSoftInput() is ignored, no
