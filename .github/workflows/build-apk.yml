@@ -1,0 +1,64 @@
+# Build the EmuX debug APK on GitHub Actions and publish it as a Release.
+# The VM build is blocked (Gradle's daemon needs Java loopback TCP, which
+# this sandbox intercepts), so the build runs on a GitHub runner instead.
+# Triggered by pushing to main (including the commit that adds this file)
+# and manually from the Actions tab (workflow_dispatch). Each successful
+# run publishes a release named apk-build-<run number> with the APK attached,
+# so the APK can be downloaded from the repo's Releases page without
+# needing the Actions artifacts UI.
+name: Build APK
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: gradle
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Point local.properties at the runner SDK
+        # The repo tracks sdk.dir=/opt/android-sdk (the author's machine).
+        # On the runner, ANDROID_HOME is the real SDK location; without
+        # this, AGP would look in /opt/android-sdk and fail.
+        working-directory: android-emux
+        run: printf 'sdk.dir=%s\n' "$ANDROID_HOME" > local.properties
+
+      - name: Build debug APK
+        working-directory: android-emux
+        run: ./gradlew assembleDebug --console=plain
+
+      - name: Upload APK as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: emux-debug-apk
+          path: android-emux/app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
+
+      - name: Publish APK as a release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: apk-build-${{ github.run_number }}
+          name: EmuX debug APK (build ${{ github.run_number }})
+          body: |
+            Debug APK built from main (${{ github.sha }}).
+            Signed with the repo's committed debug keystore, so it installs
+            over the previous debug build without uninstalling.
+            Note: the app still reports version 0.1.99 (versionCode 99);
+            tell this build apart by behaviour, not by the version number.
+          files: android-emux/app/build/outputs/apk/debug/app-debug.apk
