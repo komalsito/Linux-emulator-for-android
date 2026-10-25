@@ -18,6 +18,8 @@ import java.net.ServerSocket
 import java.net.Socket
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
+import kotlin.math.max
+import kotlin.math.min
 
 /**
  * Owns the whole desktop pipeline in ONE place:
@@ -188,6 +190,32 @@ class DesktopService(
 
     /** Scratch buffer reused across frames → zero steady-state allocations. */
     private var scratchPx: IntArray? = null
+
+    /**
+     * v0.1.101 MOBILE: X desktop size for this device, as "WxHx24".
+     * Pixel count is capped at the old 720x1280 (921,600 px) so the
+     * full-frame capture + per-pixel decode cost does not grow.
+     *  - Phone (smallest width < 600dp): always 1280x720 landscape.
+     *    A phone desktop is used rotated; a portrait X server on a
+     *    landscape phone fits to a tiny 360px-wide strip, while a
+     *    landscape server still fills the phone's width in portrait
+     *    (letterboxed, pinch/double-tap to zoom) and fills it fully
+     *    in landscape.
+     *  - Tablet: the device's own aspect, long side capped at 1280.
+     * Geometry only applies when the desktop STARTS (Xvfb is not
+     * resized mid-session); rotating mid-session re-fits the existing
+     * frame in DesktopView until the next desktop start.
+     */
+    private fun desktopGeometry(): String {
+        val cfg = ctx.resources.configuration
+        if (cfg.smallestScreenWidthDp in 1 until 600) return "1280x720x24"
+        val dm = ctx.resources.displayMetrics
+        val w = dm.widthPixels; val h = dm.heightPixels
+        if (w <= 0 || h <= 0) return "720x1280x24"
+        val longSide = 1280
+        val shortSide = ((longSide * min(w, h) / max(w, h)).coerceIn(480, 1280) / 2 * 2)
+        return if (w >= h) "${longSide}x${shortSide}x24" else "${shortSide}x${longSide}x24"
+    }
 
     // ------------------------------------------------------------------ start
     fun startDesktop(wmCommand: String = "openbox") {
@@ -393,7 +421,15 @@ class DesktopService(
                 }
                 noteInfo("port6000 state at session start: " + (if (free) "free" else "HELD (orphan survivor)"))
 
-                val cmd = "emux-x11 $wmCommand"
+                // v0.1.101 MOBILE: the desktop geometry used to be
+                // fixed at 720x1280 portrait in emux-x11, whatever the
+                // device. On a phone that letterboxes to a tiny strip
+                // (landscape) or a narrow column (portrait) and makes
+                // every X window control untappable. Pass the geometry
+                // for THIS device instead (see desktopGeometry()).
+                val desktopGeometry = desktopGeometry()
+                noteInfo("desktop geometry: $desktopGeometry")
+                val cmd = "emux-x11 $wmCommand $desktopGeometry"
                 xRespawns = 0
                 // v0.1.80: tell the user WHERE the full log lives - the pane
                 // only shows a scrolling window; the diag file never rotates.

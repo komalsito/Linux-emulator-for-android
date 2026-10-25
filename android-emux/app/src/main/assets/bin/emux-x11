@@ -10,7 +10,11 @@
 # not exist and Xvfb dies with "Failed to activate virtual core keyboard"
 # (verified). proot's execve/PT_INTERP path translation is exactly the fix.
 WM="${1:-openbox}"
-RES="${EMUX_X_RES:-720x1280x24}"
+# v0.1.101 MOBILE: Android passes the device geometry as $2
+# (DesktopService.desktopGeometry(): phone 1280x720 landscape, tablet
+# aspect-matched, long side capped at 1280). Manual runs and EMUX_X_RES
+# keep the legacy 720x1280 portrait default.
+RES="${2:-${EMUX_X_RES:-720x1280x24}}"
 
 ROOT="${EMUX_ROOTFS:-${EMUX_ROOT:-}}"
 if [ -n "$ROOT" ] && [ -d "$ROOT/lib" ]; then
@@ -22,7 +26,7 @@ if [ -n "$ROOT" ] && [ -d "$ROOT/lib" ]; then
     LD_LIBRARY_PATH="$NB" HOME=/root PROOT_TMP_DIR="$ROOT/tmp" \
     PROOT_LOADER="$NB/loader" exec "$NB/proot" -0 -r "$ROOT" \
       -b /dev -b /proc -b /sys -w /root \
-      /bin/sh -l -c "unset EMUX_ROOTFS EMUX_ROOT EMUX_NATIVE_BRIDGE; exec /usr/local/bin/emux-x11 $WM"
+      /bin/sh -l -c "unset EMUX_ROOTFS EMUX_ROOT EMUX_NATIVE_BRIDGE; exec /usr/local/bin/emux-x11 $WM \"$RES\""
   fi
   echo "emux-x11: bundled proot missing at $NB/proot - tap Install to re-seed (or use root chroot mode)." >&2
   exit 1

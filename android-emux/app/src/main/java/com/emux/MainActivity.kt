@@ -111,6 +111,7 @@ class MainActivity : AppCompatActivity() {
         setContentView(b.root)
 
         wireTabs()
+        applyPhoneLayout()
         wireExtraKeys()
         androidx.preference.PreferenceManager.getDefaultSharedPreferences(this)
             .registerOnSharedPreferenceChangeListener(distroPrefListener)
@@ -300,6 +301,45 @@ class MainActivity : AppCompatActivity() {
             if (restarted > 0 && desktop.state.value != com.emux.x11.DesktopService.State.IDLE) {
                 desktop.stop()
             }
+        }
+    }
+
+    /**
+     * v0.1.101 MOBILE: the top bar was built for a tablet — three tabs
+     * plus two status TextViews. On a ~360dp phone that crowds/clips
+     * the statuses and squeezes the tabs. On phones (smallest width
+     * < 600dp) hide the two statuses (they are diagnostic — the
+     * version/root and session-count info is not essential on the
+     * main screen, and the values are still logged) and tighten tab
+     * padding so the three tabs always fit. Tablets keep the current
+     * layout untouched.
+     */
+    private fun applyPhoneLayout() {
+        if (resources.configuration.smallestScreenWidthDp >= 600) return
+        b.statusRoot.visibility = android.view.View.GONE
+        b.statusSessions.visibility = android.view.View.GONE
+        val pad = (10 * resources.displayMetrics.density).toInt()
+        for (tab in listOf(b.tabTerm, b.tabX11, b.tabSettings)) {
+            tab.setPadding(pad, 0, pad, 0)
+        }
+    }
+
+    /**
+     * v0.1.101 MOBILE: the manifest declares configChanges for
+     * orientation/screenSize, so rotation does NOT recreate this
+     * activity — the DesktopView simply re-fits the existing frame
+     * on the next draw. Invalidate explicitly here so a rotated phone
+     * does not sit on a stale letterbox until the next frame, and
+     * re-apply the phone/tablet top-bar rule after a fold/rotation
+     * that crosses the 600dp boundary. The X geometry itself is NOT
+     * resized mid-session (Xvfb keeps the geometry it started with);
+     * it is re-chosen on the next desktop start.
+     */
+    override fun onConfigurationChanged(newConfig: android.content.res.Configuration) {
+        super.onConfigurationChanged(newConfig)
+        runCatching {
+            applyPhoneLayout()
+            b.desktopView.invalidate()
         }
     }
 
