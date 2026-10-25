@@ -9,6 +9,8 @@ import android.util.AttributeSet
 import android.view.MotionEvent
 import android.view.ScaleGestureDetector
 import android.view.View
+import android.util.TypedValue
+import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.min
 
@@ -35,6 +37,11 @@ class DesktopView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attrs) 
     private var scale = 1f
     private var tx = 0f
     private var ty = 0f
+
+    // v0.1.101 MOBILE: raw px text sizes were density-blind — 18px is
+    // ~6sp on a 3x phone screen but ~12sp on a 2x tablet. Use sp.
+    private fun sp(v: Float) =
+        TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_SP, v, resources.displayMetrics)
 
     private val bmpPaint = Paint(Paint.FILTER_BITMAP_FLAG)
     private var lastFrameId = -1
@@ -69,9 +76,9 @@ class DesktopView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attrs) 
             // v0.1.100: name the pipeline stage that has NOT happened
             // yet (X ready? capture running? frames: 0?) above the
             // "waiting" line — probe history alone cannot answer that.
-            val pipe = Paint().apply { color = Color.argb(0xE0, 0xFF, 0xFF, 0xFF); textSize = 20f }
+            val pipe = Paint().apply { color = Color.argb(0xE0, 0xFF, 0xFF, 0xFF); textSize = sp(12f) }
             canvas.drawText((desktop?.pipelineStatusText() ?: "desktop: not started").take(190), 24f, height / 2f - 36f, pipe)
-            val p = Paint().apply { color = Color.argb(0xB0, 0xFF, 0x8A, 0x65); textSize = 28f }
+            val p = Paint().apply { color = Color.argb(0xB0, 0xFF, 0x8A, 0x65); textSize = sp(16f) }
             canvas.drawText("waiting for X frames…", 24f, height / 2f, p)
             // v0.1.41: paint the failure tail ON the pane too — the status
             // TextView is easy to miss off-screen, and these lines are the only
@@ -89,8 +96,8 @@ class DesktopView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attrs) 
             if (!err.isNullOrBlank()) {
                 // v0.1.90 (user request): color-code the pane - GREEN for
                 // lines that prove health, RED for everything else.
-                val pOk = Paint().apply { color = Color.argb(0xE0, 0x66, 0xBB, 0x6A); textSize = 18f }
-                val pBad = Paint().apply { color = Color.argb(0xE0, 0xEF, 0x53, 0x50); textSize = 18f }
+                val pOk = Paint().apply { color = Color.argb(0xE0, 0x66, 0xBB, 0x6A); textSize = sp(11f) }
+                val pBad = Paint().apply { color = Color.argb(0xE0, 0xEF, 0x53, 0x50); textSize = sp(11f) }
                 var y = height / 2f + 36f
                 // v0.1.100: takeLast, not take — the old code painted
                 // the FIRST 16 history lines, i.e. the old green startup
@@ -193,6 +200,31 @@ class DesktopView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attrs) 
             }
             MotionEvent.ACTION_UP -> {
                 removeCallbacks(longPressRunnable)
+                // Double-tap zoom (see field above) — checked before
+                // the click, so the zooming tap does not also click.
+                val nowMs = System.currentTimeMillis()
+                val isDoubleTap = !dragging && !panning && !longPressFired &&
+                    nowMs - lastTapUpMs < 300 &&
+                    abs(event.x - lastTapUpX) < 40 && abs(event.y - lastTapUpY) < 40
+                lastTapUpMs = nowMs; lastTapUpX = event.x; lastTapUpY = event.y
+                if (isDoubleTap) {
+                    val f = desktop?.currentFrame
+                    if (f != null) {
+                        val (zx, zy) = mapToX(event.x, event.y)
+                        if (scale <= 1.01f) {
+                            scale = 2.5f
+                            val fitScale = min(width.toFloat() / f.width, height.toFloat() / f.height)
+                            val s = max(fitScale, fitScale * scale)
+                            tx = event.x - zx * s - (width - f.width * s) / 2
+                            ty = event.y - zy * s - (height - f.height * s) / 2
+                        } else {
+                            scale = 1f; tx = 0f; ty = 0f
+                        }
+                        invalidate()
+                    }
+                    dragging = false; panning = false
+                    return true
+                }
                 val (x, y) = mapToX(event.x, event.y)
                 if (!longPressFired && !panning) {
                     if (dragging) {
@@ -215,6 +247,16 @@ class DesktopView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attrs) 
     }
 
     private var lastPanX = 0f; private var lastPanY = 0f
+    // v0.1.101 MOBILE: double-tap zoom. On a phone the fit-to-screen
+    // desktop makes X controls (titlebar buttons, menus) a few px
+    // wide and untappable; pinch exists but is undiscoverable and
+    // awkward one-handed. Double-tap toggles fit <-> 2.5x centred on
+    // the tap; a second double-tap returns to fit. Trade-off: the
+    // second tap of a double-tap is NOT sent as an X click (the first
+    // tap already was), so X double-click is sacrificed for zoom.
+    private var lastTapUpMs = 0L
+    private var lastTapUpX = 0f
+    private var lastTapUpY = 0f
 
     private val longPressRunnable = Runnable {
         if (!dragging && !panning) {
