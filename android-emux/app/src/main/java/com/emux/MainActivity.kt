@@ -314,6 +314,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun showTerminal() {
         b.paneDesktop.visibility = android.view.View.GONE
+        b.desktopStatus.visibility = android.view.View.GONE
         b.termContainer.visibility = android.view.View.VISIBLE
         b.tabTerm.isSelected = true; b.tabX11.isSelected = false
         ensureSessionAttached()
@@ -329,6 +330,11 @@ class MainActivity : AppCompatActivity() {
     private fun showDesktop() {
         b.termContainer.visibility = android.view.View.GONE
         b.paneDesktop.visibility = android.view.View.VISIBLE
+        // v0.1.100: desktopStatus is visibility="gone" in the layout
+        // and was never made visible anywhere — its text was updated
+        // into a view nobody could see. The pane canvas was the only
+        // status surface. Show it on this tab, hide it on the others.
+        b.desktopStatus.visibility = android.view.View.VISIBLE
         b.tabTerm.isSelected = false; b.tabX11.isSelected = true
         // v0.1.25 DIAGNOSTIC: paint the view once immediately. If this red
         // background does not appear, the problem is layout/z-order/size —
@@ -370,6 +376,8 @@ class MainActivity : AppCompatActivity() {
         b.desktopStatus.text = when (d.state.value) {
             com.emux.x11.DesktopService.State.IDLE -> ""
             com.emux.x11.DesktopService.State.STARTING_X -> getString(R.string.x_starting)
+            com.emux.x11.DesktopService.State.AWAITING_FRAMES ->
+                colored(getString(R.string.x_awaiting_frames) + "\n" + d.errorHistoryText())
             com.emux.x11.DesktopService.State.CONNECTED ->
                 if (d.frameId == 0)
                     colored(getString(R.string.x_connected, 0, 0) + "\n" + d.errorHistoryText())

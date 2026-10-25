@@ -72,7 +72,7 @@ class DesktopService(
         const val MAX_FPS_IDLE = 5
     }
 
-    enum class State { IDLE, STARTING_X, CONNECTED, ERROR }
+    enum class State { IDLE, STARTING_X, AWAITING_FRAMES, CONNECTED, ERROR }
     val state = MutableStateFlow(State.IDLE)
     val errorText = MutableStateFlow<String?>(null)
 
@@ -137,6 +137,27 @@ class DesktopService(
      *  live same-tuple socket). Closing it from stop() unblocks the reader. */
     @Volatile private var activeSock: Socket? = null
     private var captureRespawns = 0
+    private var pumpedCaptureSession: TerminalSession? = null
+    /** One-line pipeline state for the frameless pane header (see DesktopView).
+     *  This is the antidote to "all green, no desktop": it names the stage
+     *  that has NOT happened yet (capture not started / no frames), instead
+     *  of re-listing probes that passed. */
+    fun pipelineStatusText(): String {
+        val x = when (state.value) {
+            State.IDLE -> "X: idle"
+            State.STARTING_X -> "X: starting"
+            State.AWAITING_FRAMES -> "X: ready, waiting for frames"
+            State.CONNECTED -> "X: connected"
+            State.ERROR -> "X: error"
+        }
+        val cap = when {
+            captureSession == null -> "capture: not started"
+            captureSession?.state?.value == TerminalSession.State.DEAD ->
+                "capture: exited (${captureSession?.exitCode})"
+            else -> "capture: running"
+        }
+        return "$x · $cap · frames: $frameId"
+    }
     // v0.1.79: bounded respawn for the X session when it dies before the
     // first frame (transient mid-transaction deaths, see emux-x11 v0.1.79).
     private var xRespawns = 0
@@ -170,7 +191,10 @@ class DesktopService(
 
     // ------------------------------------------------------------------ start
     fun startDesktop(wmCommand: String = "openbox") {
-        if (state.value == State.STARTING_X || state.value == State.CONNECTED) return
+        // v0.1.100: AWAITING_FRAMES is also an in-progress state —
+        // a second startDesktop() here would launch a duplicate X/capture
+        // pipeline on top of the one already waiting for frames.
+        if (state.value == State.STARTING_X || state.value == State.AWAITING_FRAMES || state.value == State.CONNECTED) return
         // v0.1.17 BUGFIX (desktop showed nothing, ever): a previous failed attempt
         // left the state at ERROR and this method then refused to retry — the
         // desktop was permanently dead until app restart. Also stop() could leave
@@ -281,8 +305,22 @@ class DesktopService(
                 // in-rootfs helpers predate emux-apt-repair the cascade itself
                 // cannot recover from a dirty journal ("E: dpkg was
                 // interrupted" -> no Xvfb -> exit 1 -> rotating pane errors).
-                com.emux.core.BootstrapManager(ctx).desktopPreRepair()
-                    ?.let { noteInfo(it) }
+                // v0.1.100 WARM-START FAST PATH: if the whole desktop
+                // stack is already on disk, the synchronous pre-repair
+                // (apt-lock wait up to 90 s + a possible CORE apt install)
+                // is pure overhead on every tab open — skip it. The
+                // background startup repair still runs at app start, and
+                // a missing file falls through to the full pre-repair.
+                val warmDesktop = listOf(
+                    "usr/bin/Xvfb", "usr/bin/openbox", "usr/bin/xwd",
+                    "usr/bin/pnmtoplainpnm", "bin/nc.openbsd",
+                ).all { java.io.File(rootfs, it).isFile }
+                if (warmDesktop) {
+                    noteInfo("warm start: desktop stack present - skipping pre-repair")
+                } else {
+                    com.emux.core.BootstrapManager(ctx).desktopPreRepair()
+                        ?.let { noteInfo(it) }
+                }
                 // v0.1.63: surface the guest dpkg selfcheck (shim loaded? link()
                 // ok? db dir owner/mode?) in the pane history + desktop.log so
                 // the next field screenshot answers WHY instead of guessing.
@@ -344,13 +382,13 @@ class DesktopService(
                 // control plane handshake. Re-sweep until free (12 s cap).
                 var free = false
                 var sweeps = 0
-                while (!free && sweeps < 4) {
+                while (!free && sweeps < 3) {
                     free = runCatching { java.net.ServerSocket(6000).close(); true }.getOrElse { false }
                     if (!free) {
                         sweeps++
                         noteInfo("port6000 STILL HELD after sweep #$sweeps - re-sweeping")
                         runCatching { killDesktopGuests() }
-                        Thread.sleep(3_000)
+                        Thread.sleep(2_000)
                     }
                 }
                 noteInfo("port6000 state at session start: " + (if (free) "free" else "HELD (orphan survivor)"))
@@ -441,7 +479,13 @@ class DesktopService(
 
 
                 // 1) Open our frame listener BEFORE starting capture so no frames lost.
+                // v0.1.100: ALSO start the frame reader here, in parallel
+                // with the control plane below. Previously beginFrameLoop()
+                // ran only after the 60 s control-plane wait, so even a
+                // capture helper that connected instantly could not deliver
+                // a frame until that wait finished.
                 openFrameListener()
+                beginFrameLoop { frameCallback?.invoke() }
 
                 // 2) v0.1.91: start the capture helper ONLY once the guest X is
                 //    actually up (tcp 6000) AND its toolchain (xwd/netpbm/nc,
@@ -474,6 +518,19 @@ class DesktopService(
                     if (!(up && tools) || state.value == State.IDLE) {
                         noteInfo("capture: gave up waiting (X up=$up tools=$tools)")
                         dumpDiagBundleToTerminal()
+                        // v0.1.100: a gate timeout used to be silent in
+                        // state terms — capture never started, yet the main
+                        // flow still promoted the session to CONNECTED.
+                        // Fail loudly so the tab can be retried (and so a
+                        // missing toolchain is visible instead of "green").
+                        if (state.value != State.IDLE) {
+                            setError(
+                                ("capture tools missing after 180s " +
+                                    "(X up=$up tools=$tools) — " +
+                                    "tap Desktop again to retry; if this repeats, " +
+                                    "re-run Settings → Install desktop components").take(500))
+                            state.value = State.ERROR
+                        }
                         return@launch
                     }
                     noteInfo("capture: X up and toolchain present - starting emux-capture")
@@ -497,32 +554,67 @@ class DesktopService(
                 // the X session had a death watcher, so a dead emux-capture
                 // (missing xwd/netpbm/nc, connect refused ...) left the pane
                 // at "waiting for X frames" with no explanation at all.
+                // v0.1.100: the old watcher did
+                // `captureSession?.state?.collect {}` here, at a moment
+                // when the async gate coroutine had usually NOT assigned
+                // captureSession yet — so it collected nothing, forever,
+                // and a dead capture helper was silent. Poll the CURRENT
+                // session instead, so gate assignment and respawns are
+                // both followed.
                 scope.launch {
-                    captureSession?.state?.collect { st ->
-                        if (st == TerminalSession.State.DEAD && frameId == 0 &&
-                            state.value != State.IDLE && captureRespawns < 40) {
-                            // v0.1.59: capture can die waiting for the X socket
-                            // while the cascade install is still running. With
-                            // zero frames so far, respawn it (bounded) instead
-                            // of leaving the pane at "waiting for X frames".
-                            captureRespawns++
-                            com.emux.EmuXLog.i("desktop: capture died before first frame - respawning (#$captureRespawns)")
-                            // v0.1.92: respawns were invisible in the pane
-                            // (logcat only), so a capture crash-loop looked
-                            // like a silent hang on the field device.
-                            noteInfo("capture died pre-frame (rc=${captureSession?.exitCode}) - respawning #$captureRespawns")
-                            delay(2_000)
-                            captureSession = TerminalSession(
-                                9002 + captureRespawns, ctx, root,
-                                "emux-capture 127.0.0.1:$FRAME_PORT",
-                            ).also { it.start() }
-                            pumpDiag("capture", captureSession!!)
-                        } else if (st == TerminalSession.State.DEAD && frameId == 0) {
-                            val tails = diag["capture"]?.toString()?.lineSequence()
-                                ?.filter { it.isNotBlank() }?.toList()?.takeLast(4)
-                                ?.joinToString(" | ") ?: ""
-                            setError(("capture helper exited (code ${captureSession?.exitCode}). " + tails).take(500))
+                    while (isActive && state.value != State.IDLE && state.value != State.ERROR) {
+                        val cur = captureSession
+                        if (cur != null && cur !== pumpedCaptureSession) {
+                            pumpedCaptureSession = cur
+                            pumpDiag("capture", cur)
                         }
+                        if (cur != null && cur.state.value == TerminalSession.State.DEAD &&
+                            frameId == 0) {
+                            if (captureRespawns < 40) {
+                                captureRespawns++
+                                com.emux.EmuXLog.i("desktop: capture died before first frame - respawning (#$captureRespawns)")
+                                noteInfo("capture died pre-frame (rc=${cur.exitCode}) - respawning #$captureRespawns")
+                                delay(2_000)
+                                if (state.value == State.IDLE || state.value == State.ERROR) break
+                                captureSession = TerminalSession(
+                                    9002 + captureRespawns, ctx, root,
+                                    "emux-capture 127.0.0.1:$FRAME_PORT",
+                                ).also { it.start() }
+                                pumpedCaptureSession = null
+                            } else {
+                                val tails = diag["capture"]?.toString()?.lineSequence()
+                                    ?.filter { it.isNotBlank() }?.toList()?.takeLast(4)
+                                    ?.joinToString(" | ") ?: ""
+                                setError(("capture helper exited (code ${cur.exitCode}). " + tails).take(500))
+                                state.value = State.ERROR
+                                break
+                            }
+                        }
+                        delay(1_000)
+                    }
+                }
+                // v0.1.100 FRAMELESS DEADLINE: once X is ready
+                // (AWAITING_FRAMES) but no frame lands within 120 s, fail
+                // loudly instead of sitting at "waiting for X frames"
+                // forever. The tab can then be retried (IDLE/ERROR restart).
+                scope.launch {
+                    var seenAwaiting = false
+                    var waited = 0L
+                    while (isActive && state.value != State.IDLE &&
+                        state.value != State.ERROR && state.value != State.CONNECTED) {
+                        if (state.value == State.AWAITING_FRAMES) {
+                            seenAwaiting = true
+                            waited += 1_000
+                            if (frameId > 0) return@launch
+                            if (waited >= 120_000) {
+                                setError("no desktop frames in 120s after X was ready — capture may have died; tap Desktop again to retry")
+                                state.value = State.ERROR
+                                return@launch
+                            }
+                        } else if (seenAwaiting) {
+                            return@launch
+                        }
+                        delay(1_000)
                     }
                 }
                 scope.launch {
@@ -621,7 +713,7 @@ class DesktopService(
                     }
                     errorText.value = "touch input: X TCP not up yet - retrying in background"
                     scope.launch {
-                        while (isActive && x11 == null && state.value != State.IDLE) {
+                        while (isActive && x11 == null && state.value != State.IDLE && state.value != State.ERROR) {
                             delay(10_000)
                             if (connectControlPlane(20_000)) {
                                 errorText.value = null
@@ -631,21 +723,18 @@ class DesktopService(
                     }
                 }
 
-                // v0.1.17 BUGFIX #3: the frame reader was NEVER started by anyone
-                // except MainActivity's beginFrameLoop callback path, which raced
-                // with accept(); worse, when the reader thread blocked in
-                // listener.accept() forever (helper never connected because apk add
-                // inside emux-capture failed), nothing surfaced. Now we arm the
-                // loop ourselves with a self-contained invalidation callback;
-                // MainActivity may re-arm it later with a UI-bound one.
-                // v0.1.28: single frame reader owned by startDesktop; the UI
-                // hook arrives via frameCallback (set by MainActivity before
-                // startDesktop). The old duplicate beginFrameLoop() call from
-                // MainActivity raced with this one and the loser's callback
-                // (empty) won — frames decoded but the view never repainted.
-                beginFrameLoop { frameCallback?.invoke() }
-
-                state.value = State.CONNECTED
+                // v0.1.100: the frame reader now starts BEFORE the
+                // control-plane wait (see section 1 above), so there is
+                // nothing left to arm here. Promote the state on facts,
+                // not on launch: CONNECTED only once a frame has actually
+                // been decoded; otherwise AWAITING_FRAMES, which the
+                // frameless deadline above turns into ERROR. This kills
+                // the old "CONNECTED, 0 frames, tab tap does nothing"
+                // dead end. A gate timeout or frame error that already
+                // set ERROR/IDLE is never overwritten here.
+                if (state.value == State.STARTING_X) {
+                    state.value = if (frameId > 0) State.CONNECTED else State.AWAITING_FRAMES
+                }
             } catch (e: Exception) {
                 Log.e(TAG, "desktop start failed", e)
                 // v0.1.54: a failed start must not leak the listener/accepted
@@ -709,6 +798,13 @@ class DesktopService(
     }
 
     private fun resetForRestart() {
+        // v0.1.100: a retry must not inherit the previous attempt's
+        // frame — otherwise frameId > 0 from a dead session can promote
+        // the new attempt straight to CONNECTED with a stale bitmap.
+        frameId = 0
+        currentFrame = null
+        pumpedCaptureSession = null
+        captureRespawns = 0
         runCatching { frameReader?.cancel() }; frameReader = null
         runCatching { activeSock?.close() }; activeSock = null   // v0.1.54
         runCatching { listener?.close() }; listener = null
@@ -928,6 +1024,9 @@ class DesktopService(
                     }
                     writeDirtyRegion(dx, dy, dw, dh, rows)
                     frameId++
+                    // v0.1.100: CONNECTED means "a frame was decoded",
+                    // not "the reader was launched".
+                    if (state.value == State.AWAITING_FRAMES) state.value = State.CONNECTED
 
                     // Adaptive pacing: if the sender floods us, drop frames but keep
                     // reading (socket backpressure would stall their diff loop).
@@ -941,7 +1040,12 @@ class DesktopService(
                     if (spent < minFrameMs) delay(minFrameMs - spent)
                 }
             } catch (_: Exception) {
-                if (state.value == State.CONNECTED) {
+                // v0.1.100: previously this only reported when the state
+                // was already CONNECTED — but the reader used to start
+                // before CONNECTED was set, so early stream deaths (bad
+                // magic, EOF before first frame) were swallowed and the
+                // session was still promoted to CONNECTED afterwards.
+                if (state.value != State.IDLE && state.value != State.ERROR) {
                     setError("frame stream ended")
                     state.value = State.ERROR
                 }

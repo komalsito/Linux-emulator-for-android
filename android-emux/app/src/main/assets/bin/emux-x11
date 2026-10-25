@@ -438,11 +438,21 @@ run_wm() {
 run_wm "$WM" || run_wm openbox || run_wm twm || run_wm icewm || {
   if [ -x /usr/bin/xterm ]; then
     /usr/bin/xterm -e /bin/sh -l >/tmp/wm.log 2>&1 &
-    touch /tmp/emux_wm_launched
+    touch /tmp/emux_wm_launched /tmp/emux_xterm_launched
   else
     echo "emux-x11: no window manager found ($WM/openbox/twm/icewm) and no xterm - root window will be blank. Install one with the distro package manager (apk add openbox / apt-get install openbox / pacman -S openbox / dnf install openbox)" >&2
   fi
 }
+# v0.1.100 FIX (blank desktop even when frames flow): Openbox alone
+# draws a bare root window — no icons, no taskbar, no open window —
+# so a perfectly working frame stream still reads as "no visual
+# interface". Launch one xterm once the WM is up, so SOMETHING visible
+# is on screen. The fallback branch above already launched xterm and
+# touched emux_xterm_launched, so this never launches a second one.
+if [ -e /tmp/emux_wm_launched ] && [ ! -e /tmp/emux_xterm_launched ] && [ -x /usr/bin/xterm ]; then
+  /usr/bin/xterm >/tmp/xterm.log 2>&1 &
+  touch /tmp/emux_xterm_launched
+fi
 # v0.1.43: never exit silently — the Android side paints this on the desktop
 # pane, so a dying X server now names its own reason in the field.
 wait $XPID

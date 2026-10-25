@@ -18,6 +18,7 @@
     <string name="root_available">root: %1$s (accelerator on)</string>
 
     <string name="x_starting">Starting X server…</string>
+    <string name="x_awaiting_frames">X server ready — waiting for first desktop frame…</string>
     <string name="x_connected">X11 connected · %1$d×%2$d</string>
     <string name="x_error">X error: %1$s</string>
 

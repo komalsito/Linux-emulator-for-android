@@ -66,6 +66,11 @@ class DesktopView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attrs) 
         val f = desktop?.currentFrame ?: run {
             // v0.1.25 DIAGNOSTIC: no frames yet — say so ON the pane instead of
             // showing an unexplained uniform dark rectangle.
+            // v0.1.100: name the pipeline stage that has NOT happened
+            // yet (X ready? capture running? frames: 0?) above the
+            // "waiting" line — probe history alone cannot answer that.
+            val pipe = Paint().apply { color = Color.argb(0xE0, 0xFF, 0xFF, 0xFF); textSize = 20f }
+            canvas.drawText((desktop?.pipelineStatusText() ?: "desktop: not started").take(190), 24f, height / 2f - 36f, pipe)
             val p = Paint().apply { color = Color.argb(0xB0, 0xFF, 0x8A, 0x65); textSize = 28f }
             canvas.drawText("waiting for X frames…", 24f, height / 2f, p)
             // v0.1.41: paint the failure tail ON the pane too — the status
@@ -87,7 +92,10 @@ class DesktopView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attrs) 
                 val pOk = Paint().apply { color = Color.argb(0xE0, 0x66, 0xBB, 0x6A); textSize = 18f }
                 val pBad = Paint().apply { color = Color.argb(0xE0, 0xEF, 0x53, 0x50); textSize = 18f }
                 var y = height / 2f + 36f
-                for (line in err.lineSequence().filter { it.isNotBlank() }.take(16)) {
+                // v0.1.100: takeLast, not take — the old code painted
+                // the FIRST 16 history lines, i.e. the old green startup
+                // probes, and hid the latest failure entirely.
+                for (line in err.lineSequence().filter { it.isNotBlank() }.takeLast(16)) {
                     canvas.drawText(line.take(190), 24f, y,
                         if (DiagColors.healthy(line)) pOk else pBad)
                     y += 24f
