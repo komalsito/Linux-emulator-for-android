@@ -102,7 +102,7 @@ class DesktopView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attrs) 
                 // v0.1.100: takeLast, not take — the old code painted
                 // the FIRST 16 history lines, i.e. the old green startup
                 // probes, and hid the latest failure entirely.
-                for (line in err.lineSequence().filter { it.isNotBlank() }.takeLast(16)) {
+                for (line in err.lines().filter { it.isNotBlank() }.takeLast(16)) {
                     canvas.drawText(line.take(190), 24f, y,
                         if (DiagColors.healthy(line)) pOk else pBad)
                     y += 24f
