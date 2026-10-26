@@ -439,6 +439,18 @@ class DesktopService(
                     hostProbeNote = "hostbind unixpath=$fsOk tcp6000=$tcpOk abs=$absOk"
                     noteInfo("host bind probe: $hostProbeNote")
                 }
+                // v0.2.6 FIELD FIX: drop STALE gate markers and socket files
+                // from previous app lives. A leftover /tmp/emux_x_up made the
+                // capture gate launch emux-capture against a server that no
+                // longer existed (then rc=137 in the respawn churn), and
+                // leftover XN socket files make Xvfb's unix listener die with
+                // "server already running" even on a port nobody holds.
+                runCatching {
+                    listOf("tmp/emux_x_up", "tmp/emux_display_num").forEach {
+                        java.io.File(rootfs, it).delete()
+                    }
+                    (0..4).forEach { n -> java.io.File(rootfs, "tmp/.X11-unix/X$n").delete() }
+                }
                 killDesktopGuests()
                 // v0.1.89: prove :6000 is actually FREE before investing in a
                 // session; an orphan listener (previous visit's Xvfb) makes
@@ -976,6 +988,12 @@ class DesktopService(
         var last: Exception? = null
         while (System.currentTimeMillis() < deadline) {
             try {
+                // v0.2.6: the guest may have rotated displays (occupied
+                // sockets); emux-x11 publishes the one it actually runs on.
+                runCatching {
+                    java.io.File(com.emux.core.FsLayout.linuxRoot(ctx), "tmp/emux_display_num")
+                        .readText().trim().toIntOrNull()
+                }.getOrNull()?.let { displayNum = it }
                 Socket().apply {
                     connect(java.net.InetSocketAddress("127.0.0.1", 6000 + displayNum), 300)
                     close()

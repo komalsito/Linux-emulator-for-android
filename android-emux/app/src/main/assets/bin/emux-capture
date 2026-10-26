@@ -54,6 +54,13 @@ fi
 # below tries the SESSION display FIRST so frames can never be grabbed
 # from a stale zombie server left on :0 by an earlier app life.
 DN="${2:-0}"
+# v0.2.6 FIELD FIX: the session may have rotated displays (occupied
+# sockets from unkillable zombies); emux-x11 publishes the display it
+# actually runs on. Trust the file over the launch argument.
+if [ -r /tmp/emux_display_num ]; then
+  FD="$(tr -dc '0-9' < /tmp/emux_display_num 2>/dev/null)"
+  [ -n "$FD" ] && DN="$FD"
+fi
 XP=$((6000 + DN))
 export DISPLAY="${DISPLAY:-:$DN}"
 export TMPDIR=/tmp

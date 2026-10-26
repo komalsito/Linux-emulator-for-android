@@ -416,6 +416,32 @@ else
       echo "$(date +%s) attempt $XTRY rc=$rc flags=$ATTEMPT_FLAGS" >> /tmp/emux_attempts 2>/dev/null
     fi
   fi
+  # v0.2.6 FIELD FIX: WALK AWAY from occupied sockets. The field ROM hides
+  # other processes' cmdlines, so the host pid-scan kill has silently
+  # no-oped for five versions, and guest sweeps cannot signal foreign
+  # proot tracees - zombie Xvfb processes from previous app lives keep
+  # their unix/abstract/tcp sockets forever ("server already running",
+  # every ladder attempt rc=1, even on a display the host probe called
+  # free one second earlier). Instead of fighting: rotate to the next
+  # display number and run the ladder there, up to 3 rotations.
+  ROT=0
+  while ! x_up && [ "$ROT" -lt 3 ]; do
+    DN=$((DN + 1)); XP=$((6000 + DN)); ROT=$((ROT + 1))
+    echo "emux-x11: sockets occupied on :$((DN - 1)) - rotating to :$DN (rot $ROT/3)" >&2
+    kill_stale_x
+    rc=0
+    start_xvfb || rc=$?
+    echo "$(date +%s) attempt $XTRY rc=$rc flags=$ATTEMPT_FLAGS" >> /tmp/emux_attempts 2>/dev/null
+    if [ "$rc" = 1 ]; then
+      start_xvfb -nolisten unix -nolisten local -nolisten inet6 || rc=$?
+      echo "$(date +%s) attempt $XTRY rc=$rc flags=$ATTEMPT_FLAGS" >> /tmp/emux_attempts 2>/dev/null
+    fi
+  done
+  # v0.2.6: publish the display this session ACTUALLY runs on; emux-capture
+  # and the Android control plane read it instead of assuming :0/$2.
+  echo "$DN" > /tmp/emux_display_num 2>/dev/null
+  export DISPLAY=:$DN
+  echo "emux-x11: session display :$DN (tcp $XP)" >&2
 fi
 # v0.1.79: REST (WM + capture toolchain) installs NOW that X is up - never
 # under a starting server (see APT_BRANCH note above). When it lands, start
