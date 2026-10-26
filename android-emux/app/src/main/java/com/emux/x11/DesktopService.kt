@@ -490,6 +490,25 @@ class DesktopService(
                 scope.launch {
                     xSession?.state?.collect { st ->
                         if (st == TerminalSession.State.DEAD && state.value != State.ERROR) {
+                            // v0.2.7 FIELD FIX (the rc=137 murder loop): emux-x11
+                            // is a LAUNCHER, not a daemon - it backgrounds Xvfb
+                            // and the WM, then EXITS 0 by design. This watcher
+                            // treated that normal exit as a pre-frame death:
+                            // killDesktopGuests() SIGKILLed the HEALTHY running
+                            // emux-capture (field pane: "capture died pre-frame
+                            // (rc=137)" every ~15 s) and respawned emux-x11,
+                            // whose fresh ladder then died on the STILL-ALIVE
+                            // server's sockets ("server already running", all
+                            // attempts rc=1) - an endless loop that murdered
+                            // every capture ~2 s after start and truncated
+                            // /tmp/emux_attempts each cycle. Clean exit =
+                            // success: daemons are detached, keep them, keep
+                            // the capture, respawn nothing.
+                            if (xSession?.exitCode == 0) {
+                                com.emux.EmuXLog.i("desktop: x11 launcher exited 0 (daemons detached) - not respawning")
+                                noteInfo("x11 launcher exited cleanly - X/WM daemons detached, session continues")
+                                return@collect
+                            }
                             // v0.1.79: a PRE-FRAME death is often transient - the
                             // v0.1.78 field round died on a first launch that
                             // landed inside our own background dpkg transaction
@@ -1070,6 +1089,14 @@ class DesktopService(
         runCatching { activeSock?.close() }   // v0.1.54: drop any previous stream
         activeSock = null
         frameReader = scope.launch {
+          // v0.2.7 FIELD FIX: re-accept after a capture stream ends. The
+          // reader used to accept EXACTLY ONE connection per desktop start;
+          // any capture death (respawn churn, the rc=137 loop, rotations)
+          // left the session deaf forever - later captures connected and
+          // pushed frames into a closed door (cap.err happily "writing PPM
+          // file" while the pane sat at frames: 0). Now a finished stream
+          // closes and the next helper connection is accepted, until stop.
+          while (isActive) {
             var sock: Socket? = null
             try {
                 sock = listener!!.accept()          // blocks until helper connects
@@ -1130,19 +1157,21 @@ class DesktopService(
                     if (spent < minFrameMs) delay(minFrameMs - spent)
                 }
             } catch (_: Exception) {
-                // v0.1.100: previously this only reported when the state
-                // was already CONNECTED — but the reader used to start
-                // before CONNECTED was set, so early stream deaths (bad
-                // magic, EOF before first frame) were swallowed and the
-                // session was still promoted to CONNECTED afterwards.
-                if (state.value != State.IDLE && state.value != State.ERROR) {
-                    setError("frame stream ended")
-                    state.value = State.ERROR
-                }
+                // v0.2.7: a stream end is no longer terminal - the next
+                // capture (respawn or rotated display) gets a fresh accept.
+                // Only give up when the desktop is stopping or already
+                // idle/erroring (v0.1.100 kept those guards).
+                runCatching { sock?.close() }
+                if (activeSock === sock) activeSock = null
+                if (!isActive || state.value == State.IDLE || state.value == State.ERROR) break
+                noteInfo("frame stream ended - waiting for the next capture connection")
+                kotlinx.coroutines.delay(500)
+                continue
             } finally {
                 runCatching { sock?.close() }
                 if (activeSock === sock) activeSock = null
             }
+          }
         }
     }
 
