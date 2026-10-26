@@ -2322,16 +2322,56 @@ class BootstrapManager(private val ctx: Context) {
             // belt + aptLock + settle pass) instead of leaving it to the
             // in-guest cascade - by the time the X session starts, Xvfb is
             // either present or the pane history says exactly why not.
-            if (!File(dest, "usr/bin/Xvfb").isFile || !File(dest, "usr/bin/id").isFile) {
-                // coreutils first: without /usr/bin/id and /usr/bin/tr the
-                // maintainer scripts of EVERY later package fail ("/bin/sh:
-                // 12: id: not found" on the field device).
-                val core = listOf("coreutils", "xvfb", "x11-xkb-utils", "xkb-data", "xfonts-base")
+            // v0.2.2 FIELD FIX: gate on the WHOLE desktop stack, not just
+            // Xvfb+id. Field pane (v0.2.1): Xvfb up (xvfb.log keysym warnings,
+            // attempt rc=0) but "capture: waiting - X-up marker=true
+            // toolchain=false" and "no window manager found", with dpkg.log
+            // stuck at "status half-configured xvfb/libc-bin". Xvfb existed
+            // (half-configured), so the old gate skipped installing; the
+            // capture toolchain (xwd/xwdtopnm/pnmtoplainpnm/nc) and a WM
+            // stayed missing; and the in-guest cascade that tried to install
+            // them runs INSIDE the desktop session - so every respawn /
+            // tab-revisit killDesktopGuests() shot apt mid-configure, which
+            // is what manufactures the half-configured journal that breaks
+            // the next attempt. Installing the full stack host-side (aptLock
+            // + bounded run) puts it out of reach of session teardown, and
+            // the guest cascade then has nothing left to apt.
+            val required = listOf(
+                "usr/bin/Xvfb",      // xvfb
+                "usr/bin/id",        // coreutils (maintainer scripts need it)
+                "usr/bin/xkbcomp",   // x11-xkb-utils
+                "usr/bin/xwd",       // x11-apps (grab)
+                "usr/bin/xwdtopnm",  // netpbm (XWD -> PNM converter)
+                "usr/bin/pnmtoplainpnm", // netpbm (PNM -> text)
+                "usr/bin/openbox",   // window manager (else blank root window)
+            )
+            val ncPaths = listOf("usr/bin/nc", "bin/nc", "usr/bin/nc.openbsd", "bin/nc.openbsd")
+            val ncOk = ncPaths.any { File(dest, it).isFile }
+            val missing = required.filter { !File(dest, it).isFile }
+            if (missing.isNotEmpty() || !ncOk) {
+                val missNames = missing.map { it.substringAfterLast('/') } +
+                    if (!ncOk) listOf("nc") else emptyList()
                 Companion.progressNote?.invoke(
-                    "pre-repair: installing X core (coreutils/xvfb/xkb/fonts) - first run can take minutes")
-                val rc = runAptProot(proot, dest, core, "Installing X server core") { _, _ -> }
-                com.emux.EmuXLog.i("desktopPreRepair core install: ok=${rc.ok} tail=${rc.tail.take(200)}")
-                note = (note ?: "") + " | core install ok=${rc.ok}: " + rc.tail.take(180)
+                    "pre-repair: desktop stack incomplete (missing: " +
+                        missNames.joinToString(",") + ") - installing via apt, first run can take minutes")
+                // coreutils first in the list: without /usr/bin/id and
+                // /usr/bin/tr the maintainer scripts of EVERY later package
+                // fail ("/bin/sh: 12: id: not found" on the field device).
+                val pkgs = (listOf("coreutils") + spec.desktopPkgs).distinct()
+                val rc = runAptProot(proot, dest, pkgs, "Installing desktop stack") { ph, _ ->
+                    Companion.progressThrottled("$ph...")
+                }
+                com.emux.EmuXLog.i("desktopPreRepair stack install: ok=${rc.ok} tail=${rc.tail.take(200)}")
+                note = (note ?: "") + " | stack install ok=${rc.ok}: " + rc.tail.take(180)
+                // v0.2.2: an interrupted install (timeout/kill) leaves the
+                // journal dirty again - heal it NOW so the next start does
+                // not inherit "dpkg was interrupted".
+                if (!rc.ok && aptJournalDirty(dest)) {
+                    Companion.progressNote?.invoke("pre-repair: install interrupted - re-healing dpkg journal")
+                    val r2 = runRepairProot(proot, dest)
+                    com.emux.EmuXLog.i("desktopPreRepair re-heal: ok=${r2.ok}")
+                    note = (note ?: "") + " | re-heal ok=${r2.ok}"
+                }
             }
         }.onFailure { com.emux.EmuXLog.e("desktopPreRepair failed (non-fatal)", it) }
         } finally { if (got) runCatching { Companion.aptLock().unlock() } }
@@ -2579,6 +2619,7 @@ class BootstrapManager(private val ctx: Context) {
         pkgs: List<String>,
         phase: String,
         report: (String, Int) -> Unit,
+        timeoutMs: Long = 15 * 60_000L,
     ): ApkRun = runCatching {
         val pb = ProcessBuilder(argv)
         pb.environment().clear()
@@ -2599,7 +2640,7 @@ class BootstrapManager(private val ctx: Context) {
         val p = pb.start()
         // Bounded wait in 3 s slices: keeps progress reporting live and makes
         // a hung guest incapable of wedging the desktop start path again.
-        val deadline = System.currentTimeMillis() + 10 * 60_000L
+        val deadline = System.currentTimeMillis() + timeoutMs
         var exited = false
         var lastLen = -1L
         while (!exited && System.currentTimeMillis() < deadline) {
@@ -2612,11 +2653,12 @@ class BootstrapManager(private val ctx: Context) {
             }
         }
         if (!exited) {
-            com.emux.EmuXLog.e("apk run TIMEOUT after 10 min: $phase - destroying forcibly")
-            Companion.progressNote?.invoke("$phase: TIMEOUT after 10 min - killed, continuing")
+            val mins = timeoutMs / 60_000L
+            com.emux.EmuXLog.e("apk run TIMEOUT after $mins min: $phase - destroying forcibly")
+            Companion.progressNote?.invoke("$phase: TIMEOUT after $mins min - killed, continuing")
             p.destroyForcibly()
             runCatching { p.waitFor(5, java.util.concurrent.TimeUnit.SECONDS) }
-            return ApkRun(false, "TIMEOUT after 10 min\n" + tailOf(log))
+            return ApkRun(false, "TIMEOUT after $mins min\n" + tailOf(log))
         }
         val code = p.exitValue()
         val tail = tailOf(log)
