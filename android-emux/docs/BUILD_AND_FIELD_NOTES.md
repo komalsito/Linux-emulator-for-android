@@ -73,6 +73,30 @@ $BT/apksigner verify --print-certs app-debug.apk           # must match cert abo
   occupied, publish the winner in `/tmp/emux_display_num`; capture and the Android
   control plane read that file; stale `emux_x_up` / `emux_display_num` / `X0..X4`
   socket files deleted at session start.
+- **v0.2.7 / vc107** — the last loop, closed. `emux-x11` is a LAUNCHER: it
+  backgrounds Xvfb+WM and exits 0 by design; the x11 death watcher read that clean
+  exit as a crash, SIGKILLed the healthy running capture (`rc=137` every cycle)
+  and respawned the launcher into the still-alive server's sockets (all attempts
+  rc=1, `emux_attempts` truncated each cycle). And `beginFrameLoop` accepted
+  exactly ONE connection per desktop start, so respawned captures pushed into a
+  closed door. Now: exit 0 = success (respawn nothing, kill nothing), and the
+  frame reader re-accepts after any stream ends until stop(). Any live X server —
+  even an old zombie — is now a usable frame source instead of a trap.
+- **v0.2.8 / vc108** — the rc=137 murder's last layer: `kill_stale_x()` (run at every
+  Xvfb attempt since v0.1.54) matches `emux-capture|xwd`, so the ladder's own retry
+  sweep SIGKILLed the current session's live capture. All stale sweeps (guest and
+  host) are now age-filtered via `/proc/*/stat` starttime ticks: only processes
+  older than the current launcher/desktop-start are stale; our own previous Xvfb
+  attempt is killed explicitly by pid.
+- **v0.2.9 / vc109** — the field process table showed attempt-3's Xvfb ALIVE while
+  `emux_attempts` logged rc=1 for all three attempts: `start_xvfb` declared death
+  on a single `kill -0` miss, and proot's pid translation races right after fork —
+  so the ladder launched duplicates that died on the first (alive) server's
+  sockets ("server already running" = us fighting ourselves). Now three
+  consecutive misses ~1 s apart. And capture's silent hang (alive, no output after
+  `converter=native`) was the FIFO pump's blocking `exec 3>` / unbounded xwd: now
+  `timeout 8` per grab stage, progress echoes every 10 retries, and per-frame `nc`
+  instead of the FIFO pump (host re-accepts since v0.2.7).
 
 ## Diagnostics cheat-sheet (device side)
 
