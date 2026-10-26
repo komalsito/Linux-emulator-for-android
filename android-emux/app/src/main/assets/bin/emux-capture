@@ -189,12 +189,26 @@ grab_frame() {
   # but not servicing, proot socket stall) used to block grab_frame
   # FOREVER - capture then sat silent after "converter=native" with the
   # process alive and zero frames (field v0.2.8 process table).
-  if [ -n "$X2P" ]; then
-    timeout 8 "$XWD" -root -silent 2>>/tmp/emux_cap.err | timeout 8 "$X2P" 2>>/tmp/emux_cap.err | timeout 8 "$PNM" 2>>/tmp/emux_cap.err > "$TMPF" || return 1
-  else
-    timeout 8 "$XWD" -root -silent 2>>/tmp/emux_cap.err | timeout 8 "$PNM" 2>>/tmp/emux_cap.err > "$TMPF" || return 1
+  # v0.2.10 FIELD FIX: stage-wise grab with per-stage echoes. A piped
+  # triple-timeout hides WHICH stage died (timeout kills are silent), and
+  # the pane tail then reads as a mystery hang. Now each stage writes to
+  # its own file and reports its own failure into cap.err + stderr.
+  GX=/tmp/emux_frame.xwd
+  if ! timeout 8 "$XWD" -root -silent >"$GX" 2>>/tmp/emux_cap.err; then
+    echo "emux-capture: stage xwd FAILED (rc=$?, DISPLAY=$DISPLAY) - see cap.err" >&2
+    return 1
   fi
-  [ -s "$TMPF" ] || return 1
+  [ -s "$GX" ] || { echo "emux-capture: stage xwd produced EMPTY file" >&2; return 1; }
+  if [ -n "$X2P" ]; then
+    if ! timeout 8 "$X2P" <"$GX" 2>>/tmp/emux_cap.err | timeout 8 "$PNM" 2>>/tmp/emux_cap.err >"$TMPF"; then
+      echo "emux-capture: stage convert (xwdtopnm|pnmtoplainpnm) FAILED" >&2; return 1
+    fi
+  else
+    if ! timeout 8 "$PNM" <"$GX" 2>>/tmp/emux_cap.err >"$TMPF"; then
+      echo "emux-capture: stage pnmtoplainpnm FAILED" >&2; return 1
+    fi
+  fi
+  [ -s "$TMPF" ] || { echo "emux-capture: stage convert produced EMPTY PNM" >&2; return 1; }
   if [ -x "$CONV" ]; then
     "$CONV" < "$TMPF" > "$RAW" 2>/dev/null || return 1
   else

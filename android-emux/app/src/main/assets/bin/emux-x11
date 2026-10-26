@@ -363,7 +363,13 @@ else
     XTRY=$((XTRY + 1))
     echo "emux-x11: Xvfb attempt $XTRY:$*" >&2
     ATTEMPT_FLAGS="$*"
-    "$XVFB" :"$DN" -screen 0 "$RES" -listen tcp -ac "$@" >/tmp/xvfb.log 2>&1 &
+    # v0.2.10 FIELD FIX: -extension MIT-SHM. Xvfb advertises MIT-SHM and xwd
+    # then takes the shared-memory grab path - whose shmget/shmat syscalls
+    # hang under proot's ptrace translation (field v0.2.9: preflight grab
+    # succeeds, every real grab times out silently, "grab retry #10...").
+    # With the extension disabled xwd can only use plain XGetImage, which
+    # needs no shm syscalls at all. Our only clients are xwd/openbox.
+    "$XVFB" :"$DN" -screen 0 "$RES" -listen tcp -ac -extension MIT-SHM "$@" >/tmp/xvfb.log 2>&1 &
     XPID=$!
     i=0
     GONE=0
@@ -547,7 +553,7 @@ if [ "$RC" != 0 ] && [ ! -e /tmp/emux_xvfb_restarted ]; then
   echo "emux-x11: Xvfb died rc=$RC - restarting once${NOSHEM:+ with $NOSHEM}" >&2
   [ -f /tmp/xvfb.log ] && mv -f /tmp/xvfb.log /tmp/xvfb.log.1 2>/dev/null
   kill_stale_x
-  "$XVFB" :"$DN" -screen 0 "$RES" -listen tcp -ac -nolisten unix $NOSHEM >/tmp/xvfb.log 2>&1 &
+  "$XVFB" :"$DN" -screen 0 "$RES" -listen tcp -ac -extension MIT-SHM -nolisten unix $NOSHEM >/tmp/xvfb.log 2>&1 &
   XPID=$!
   i=0
   while ! x_up && [ "$i" -lt 150 ]; do sleep 0.1; i=$((i+1)); done
