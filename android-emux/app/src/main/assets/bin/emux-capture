@@ -146,6 +146,21 @@ if [ -z "$NC" ]; then
 fi
 [ -n "$NC" ] || { echo "emux-capture: no TCP client (nc) available" >&2; exit 1; }
 
+# v0.2.4 FIELD FIX: pick a DISPLAY that xwd can actually OPEN. On the field
+# device the server was up (-ac, tcp 6000 listening, nc -z 127.0.0.1 6000 ok)
+# yet `xwd -root` died with "unable to open display ':0'" - the tcp X
+# handshake is the broken path on this ROM/libX11. Probe every spelling with
+# a throwaway grab and export the winner BEFORE the real pipeline starts,
+# so a unix-socket-less server can still be reached over inet.
+for d in ":0" "127.0.0.1:0" "localhost:0"; do
+  if DISPLAY="$d" "$XWD" -root -silent >/dev/null 2>>/tmp/emux_cap.err; then
+    [ "$d" = ":0" ] || echo "emux-capture: DISPLAY=:0 unusable for xwd - using $d" >&2
+    export DISPLAY="$d"
+    break
+  fi
+done
+echo "emux-capture: display=$DISPLAY after xwd preflight" >&2
+
 TMPF=/tmp/emux_frame.p3
 RAW=/tmp/emux_frame.rgb
 # v0.1.95: native converter (mawk on Debian/Ubuntu drops NUL bytes from awk

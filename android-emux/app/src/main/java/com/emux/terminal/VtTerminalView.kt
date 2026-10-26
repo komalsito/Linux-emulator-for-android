@@ -919,6 +919,14 @@ class VtTerminalView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attr
 
     override fun onKeyDown(keyCode: Int, event: KeyEvent): Boolean {
         val s = session ?: return super.onKeyDown(keyCode, event)
+        // v0.2.4 FIELD REQUEST: Ctrl+V pastes the clipboard. Until now the
+        // ONLY paste path was the long-press trackpad gesture; hardware or
+        // soft Ctrl+V did nothing at all ("ctrl V doesnt work").
+        if (keyCode == KeyEvent.KEYCODE_V && event.isCtrlPressed &&
+            !event.isAltPressed && !event.isShiftPressed) {
+            pasteClipboard()
+            return true
+        }
         // v0.1.84: IN-APP layout switch shortcut - the ROM's external-keyboard
         // layout shortcut never reaches this app (field device), so Alt+Shift
         // (either press order) toggles the terminal layout Auto<->Spanish and
@@ -1063,6 +1071,15 @@ class VtTerminalView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attr
      * the screen ourselves. Skipped entirely when a real PTY is attached — the
      * tty driver echoes natively and double-echo would corrupt the line.
      */
+    // v0.2.4 FIELD REQUEST: the degraded-mode visual erase used to be
+    // UNBOUNDED - holding backspace wiped the `root@localhost:~#` prompt and
+    // every line of earlier output ("make the prompt not deleteable, and
+    // everything past it"). Count what the CURRENT input line echoed and
+    // refuse DEL below that floor. With a real PTY this whole path is
+    // skipped (the tty line discipline echoes and readline guards the
+    // prompt), so PTY sessions keep their native behaviour.
+    private var localLineLen = 0
+
     private fun localEcho(bytes: ByteArray) {
         if (session?.ptyWrapped != false) return
         val out = ByteArray(bytes.size * 3)
@@ -1073,9 +1090,14 @@ class VtTerminalView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attr
                 // v0.1.44: visual erase (back-space, space, back-space) — a bare
                 // cursor-left left the deleted glyph on screen ("cannot delete
                 // the text I typed" in degraded mode).
-                v == 0x7F -> { out[n++] = 0x08; out[n++] = 0x20; out[n++] = 0x08 }
-                v == '\r'.code -> out[n++] = '\n'.code.toByte()
-                v >= 0x20 -> out[n++] = v.toByte()
+                v == 0x7F -> {
+                    if (localLineLen > 0) {
+                        localLineLen--
+                        out[n++] = 0x08; out[n++] = 0x20; out[n++] = 0x08
+                    }
+                }
+                v == '\r'.code -> { out[n++] = '\n'.code.toByte(); localLineLen = 0 }
+                v >= 0x20 -> { out[n++] = v.toByte(); localLineLen++ }
             }
         }
         if (n > 0) feed(out.copyOf(n))

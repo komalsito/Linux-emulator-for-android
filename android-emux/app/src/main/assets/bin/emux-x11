@@ -367,8 +367,23 @@ else
   # falls back from unix to tcp for DISPLAY=:0).
   # v0.1.88: "local" too - on some X builds -nolisten unix alone does not
   # disable the unix transport ("local" is the classic umbrella name).
-  start_xvfb -nolisten unix -nolisten local -nolisten inet6 || rc=$?
+  # v0.2.4 FIELD FIX: attempt 1 WITH the unix socket enabled. The v0.1.86
+  # triple -nolisten made Xvfb tcp-only, and on the field device xwd then
+  # died with "unable to open display ':0'" (emux_cap.err) even though
+  # `nc -z 127.0.0.1 6000` succeeded and the server ran with -ac: on this
+  # ROM/libX11 combo the tcp X HANDSHAKE is the broken path, while the
+  # unix transport provably binds+connects inside the guest (probe
+  # unix-bind rc=124=ok). With /tmp/.X11-unix/X0 present, every client
+  # (xwd, wm, xterm) uses the transport that works. If the unix/inet6
+  # listeners are what kills Xvfb on some other ROM, the ladder falls
+  # through to the old tcp-only flags as attempt 2.
+  start_xvfb || rc=$?
   echo "$(date +%s) attempt $XTRY rc=$rc flags=$ATTEMPT_FLAGS" >> /tmp/emux_attempts 2>/dev/null
+  if [ "$rc" != 0 ]; then
+    echo "emux-x11: plain attempt rc=$rc - falling back to tcp-only listener" >&2
+    start_xvfb -nolisten unix -nolisten local -nolisten inet6 || rc=$?
+    echo "$(date +%s) attempt $XTRY rc=$rc flags=$ATTEMPT_FLAGS" >> /tmp/emux_attempts 2>/dev/null
+  fi
   if [ "$rc" = 2 ]; then
     # server alive, socket slow (first-run font scan under proot): give it
     # 60 s more INSTEAD of killing it - the v0.1.39 logic mistook slow for shm.
