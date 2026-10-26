@@ -10,6 +10,11 @@
 # not exist and Xvfb dies with "Failed to activate virtual core keyboard"
 # (verified). proot's execve/PT_INTERP path translation is exactly the fix.
 WM="${1:-openbox}"
+# v0.2.5 FIELD FIX: display number comes from the app (rotated to a free
+# one; see DesktopService). Everything below (:0, 6000, X0 lock/socket)
+# keys off DN/XP so a stale server on another display cannot block us.
+DN="${3:-0}"
+XP=$((6000 + DN))
 # v0.1.101 MOBILE: Android passes the device geometry as $2
 # (DesktopService.desktopGeometry(): phone 1280x720 landscape, tablet
 # aspect-matched, long side capped at 1280). Manual runs and EMUX_X_RES
@@ -26,7 +31,7 @@ if [ -n "$ROOT" ] && [ -d "$ROOT/lib" ]; then
     LD_LIBRARY_PATH="$NB" HOME=/root PROOT_TMP_DIR="$ROOT/tmp" \
     PROOT_LOADER="$NB/loader" exec "$NB/proot" -0 -r "$ROOT" \
       -b /dev -b /proc -b /sys -w /root \
-      /bin/sh -l -c "unset EMUX_ROOTFS EMUX_ROOT EMUX_NATIVE_BRIDGE; exec /usr/local/bin/emux-x11 $WM \"$RES\""
+      /bin/sh -l -c "unset EMUX_ROOTFS EMUX_ROOT EMUX_NATIVE_BRIDGE; exec /usr/local/bin/emux-x11 $WM \"$RES\" $DN"
   fi
   echo "emux-x11: bundled proot missing at $NB/proot - tap Install to re-seed (or use root chroot mode)." >&2
   exit 1
@@ -34,7 +39,7 @@ fi
 
 # ---------------- inside the distro (proot / chroot) ----------------
 export HOME="${HOME:-/root}"
-export DISPLAY=:0
+export DISPLAY=:$DN
 export TMPDIR=/tmp
 # v0.1.79: PATH sanity. A session that starts mid-dpkg-transaction sources
 # /etc/profile while coreutils files are being swapped ("id: not found" in
@@ -55,7 +60,7 @@ export PATH
 # that only removed the lock file, not the stale X0 socket.
 kill_stale_x() {
   for CMDF in /proc/[0-9]*/cmdline; do
-    if tr "\0" " " < "$CMDF" 2>/dev/null | grep -qE "Xvfb :0|Xorg :0|emux-capture|xwd"; then
+    if tr "\0" " " < "$CMDF" 2>/dev/null | grep -qE "Xvfb :|Xorg :|emux-capture|xwd"; then
       K=${CMDF#/proc/}; K=${K%/cmdline}
       # v0.1.81: TERM then KILL - a half-dead Xvfb stuck in the shm/SIGBUS
       # path ignores TERM and keeps holding :0 until the watchdog fires.
@@ -66,7 +71,7 @@ kill_stale_x() {
   done
   sleep 0.3
   mkdir -p /tmp/.X11-unix
-  rm -f /tmp/.X0-lock /tmp/.X11-unix/X0 2>/dev/null
+  rm -f /tmp/.X$DN-lock /tmp/.X11-unix/X$DN 2>/dev/null
 }
 kill_stale_x
 rm -f /tmp/emux_wm_launched /tmp/emux_xvfb_restarted /tmp/emux_x_up 2>/dev/null
@@ -83,8 +88,8 @@ probe_sockets() {
   pl "probe .X11-unix: $(ls -la /tmp/.X11-unix 2>&1 | tr '\n' ' ')"
   pl "probe tcp6000: $(grep -hi ':1770 ' /proc/net/tcp /proc/net/tcp6 2>/dev/null | tr -s ' ' | cut -d' ' -f2,4,10 | tr '\n' ' ')"
   if command -v nc >/dev/null 2>&1 && command -v timeout >/dev/null 2>&1; then
-    timeout 1 nc -l 6000 >/dev/null 2>&1
-    pl "probe tcp-bind-6000 rc=$? (124=ok, other=failed)"
+    timeout 1 nc -l "$XP" >/dev/null 2>&1
+    pl "probe tcp-bind-$XP rc=$? (124=ok, other=failed)"
     timeout 1 nc -l 6001 >/dev/null 2>&1
     pl "probe tcp-bind-6001 rc=$? (124=ok, other=failed)"
     timeout 1 nc -l -U /tmp/.X11-unix/Xprobe >/dev/null 2>&1
@@ -114,7 +119,7 @@ fi
 # a half-swapped coreutils ("id: not found" pane noise); fake-root is the
 # normal case here, so default to 0 when id is momentarily unavailable.
 if [ "$(id -u 2>/dev/null || echo 0)" = "0" ] && [ -x /usr/bin/Xorg ] && [ -n "$EMUX_USE_XORG" ]; then
-  Xorg :0 -config /etc/X11/emux-xorg.conf &
+  Xorg :"$DN" -config /etc/X11/emux-xorg.conf &
 else
   XVFB=""
   for c in /usr/bin/Xvfb /usr/bin/Xephyr; do
@@ -323,11 +328,11 @@ else
   # xterm / openbox use Xlib, which falls back to tcp for DISPLAY=:0 when
   # the unix socket is unavailable).
   tcp_open() {
-    if command -v nc >/dev/null 2>&1; then nc -z 127.0.0.1 6000 2>/dev/null; return $?; fi
-    if [ -x /bin/bash ]; then /bin/bash -c 'exec 3<>/dev/tcp/127.0.0.1/6000' 2>/dev/null; return $?; fi
+    if command -v nc >/dev/null 2>&1; then nc -z 127.0.0.1 "$XP" 2>/dev/null; return $?; fi
+    if [ -x /bin/bash ]; then /bin/bash -c "exec 3<>/dev/tcp/127.0.0.1/$XP" 2>/dev/null; return $?; fi
     return 1
   }
-  x_up() { [ -e /tmp/.X11-unix/X0 ] || tcp_open; }
+  x_up() { [ -e /tmp/.X11-unix/X$DN ] || tcp_open; }
   XTRY=0
   start_xvfb() { # rc: 0 up, 1 server died, 2 alive but not up yet
     # v0.1.88: keep THREE generations - attempt 1's log was being lost after
@@ -339,7 +344,7 @@ else
     XTRY=$((XTRY + 1))
     echo "emux-x11: Xvfb attempt $XTRY:$*" >&2
     ATTEMPT_FLAGS="$*"
-    "$XVFB" :0 -screen 0 "$RES" -listen tcp -ac "$@" >/tmp/xvfb.log 2>&1 &
+    "$XVFB" :"$DN" -screen 0 "$RES" -listen tcp -ac "$@" >/tmp/xvfb.log 2>&1 &
     XPID=$!
     i=0
     while [ "$i" -lt 450 ]; do
@@ -483,7 +488,7 @@ if [ "$RC" != 0 ] && [ ! -e /tmp/emux_xvfb_restarted ]; then
   echo "emux-x11: Xvfb died rc=$RC - restarting once${NOSHEM:+ with $NOSHEM}" >&2
   [ -f /tmp/xvfb.log ] && mv -f /tmp/xvfb.log /tmp/xvfb.log.1 2>/dev/null
   kill_stale_x
-  "$XVFB" :0 -screen 0 "$RES" -listen tcp -ac -nolisten unix $NOSHEM >/tmp/xvfb.log 2>&1 &
+  "$XVFB" :"$DN" -screen 0 "$RES" -listen tcp -ac -nolisten unix $NOSHEM >/tmp/xvfb.log 2>&1 &
   XPID=$!
   i=0
   while ! x_up && [ "$i" -lt 150 ]; do sleep 0.1; i=$((i+1)); done

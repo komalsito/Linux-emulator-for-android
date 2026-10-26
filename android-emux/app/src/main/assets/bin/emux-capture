@@ -43,14 +43,19 @@ if [ -n "$ROOT" ] && [ -d "$ROOT/lib" ]; then
     LD_LIBRARY_PATH="$NB" HOME=/root PROOT_TMP_DIR="$ROOT/tmp" \
     PROOT_LOADER="$NB/loader" exec "$NB/proot" -0 -r "$ROOT" \
       -b /dev -b /proc -b /sys -w /root \
-      /bin/sh -l -c "unset EMUX_ROOTFS EMUX_ROOT EMUX_NATIVE_BRIDGE; exec /usr/local/bin/emux-capture $HOST:$PORT"
+      /bin/sh -l -c "unset EMUX_ROOTFS EMUX_ROOT EMUX_NATIVE_BRIDGE; exec /usr/local/bin/emux-capture $HOST:$PORT ${2:-0}"
   fi
   echo "emux-capture: bundled proot missing at $NB/proot - tap Install to re-seed (or use root chroot mode)." >&2
   exit 1
 fi
 
 # ---------------- inside the distro (proot / chroot) ----------------
-export DISPLAY="${DISPLAY:-:0}"
+# v0.2.5 FIELD FIX: display number from the app (2nd arg); the preflight
+# below tries the SESSION display FIRST so frames can never be grabbed
+# from a stale zombie server left on :0 by an earlier app life.
+DN="${2:-0}"
+XP=$((6000 + DN))
+export DISPLAY="${DISPLAY:-:$DN}"
 export TMPDIR=/tmp
 
 # wait for the X server (emux-x11 starts it asynchronously).
@@ -61,15 +66,15 @@ export TMPDIR=/tmp
 # a healthy server (v0.1.91 field). 1 s granularity also cuts proot exec
 # overhead 10x while waiting.
 cap_tcp_open() {
-  if command -v nc >/dev/null 2>&1; then nc -z 127.0.0.1 6000 2>/dev/null; return $?; fi
-  if [ -x /bin/bash ]; then /bin/bash -c 'exec 3<>/dev/tcp/127.0.0.1/6000' 2>/dev/null; return $?; fi
+  if command -v nc >/dev/null 2>&1; then nc -z 127.0.0.1 "$XP" 2>/dev/null; return $?; fi
+  if [ -x /bin/bash ]; then /bin/bash -c "exec 3<>/dev/tcp/127.0.0.1/$XP" 2>/dev/null; return $?; fi
   return 1
 }
-cap_x_up() { [ -e /tmp/.X11-unix/X0 ] || cap_tcp_open; }
+cap_x_up() { [ -e /tmp/.X11-unix/X$DN ] || cap_tcp_open; }
 i=0
 while ! cap_x_up && [ "$i" -lt 90 ]; do sleep 1; i=$((i + 1)); done
 if ! cap_x_up; then
-  echo "emux-capture: X never reachable (no /tmp/.X11-unix/X0, tcp 6000 closed)" >&2
+  echo "emux-capture: X never reachable (no /tmp/.X11-unix/X$DN, tcp $XP closed)" >&2
   exit 1
 fi
 echo "emux-capture: X reachable - starting frame pipeline" >&2
@@ -152,7 +157,7 @@ fi
 # handshake is the broken path on this ROM/libX11. Probe every spelling with
 # a throwaway grab and export the winner BEFORE the real pipeline starts,
 # so a unix-socket-less server can still be reached over inet.
-for d in ":0" "127.0.0.1:0" "localhost:0"; do
+for d in ":$DN" "127.0.0.1:$DN" ":0" "127.0.0.1:0"; do
   if DISPLAY="$d" "$XWD" -root -silent >/dev/null 2>>/tmp/emux_cap.err; then
     [ "$d" = ":0" ] || echo "emux-capture: DISPLAY=:0 unusable for xwd - using $d" >&2
     export DISPLAY="$d"

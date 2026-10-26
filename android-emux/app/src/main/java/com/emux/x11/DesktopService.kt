@@ -96,7 +96,12 @@ class DesktopService(
             // the pane ("auto scrolls and only leaves a couple lines"); the
             // pane keeps a longer window now, and the full log lives in the
             // two mirror files below.
-            while (errHistory.size > 24) errHistory.removeFirst()
+            // v0.2.5 FIELD FIX: 24 notes rotate away exactly as fast as new
+            // ones arrive once the pane is full - which is why the v0.2.3
+            // scroll gesture "works until the output goes all along the
+            // screen, that's where the scrolling stops". The pane can scroll
+            // hundreds of lines; keep them (strings only, trivial memory).
+            while (errHistory.size > 400) errHistory.removeFirst()
         }
         runCatching {
             val f = java.io.File(ctx.filesDir, "logs").apply { mkdirs() }
@@ -127,6 +132,8 @@ class DesktopService(
     }
 
     var x11: X11Client? = null; private set
+    // v0.2.5 FIELD FIX: this session's X display number (see startDesktop).
+    @Volatile private var displayNum = 0
     private var xSession: TerminalSession? = null
     private var captureSession: TerminalSession? = null
     private var listener: ServerSocket? = null
@@ -394,9 +401,28 @@ class DesktopService(
                 //     the guest (proot socket translation / SELinux) - the two
                 //     cases need completely different fixes, and the field pane
                 //     could not tell them apart until now.
+                // v0.2.5 FIELD FIX: ROTATE to a free X display instead of
+                // fighting stale holders. Five versions of kill-sweeps could
+                // not reliably reap detached proot tracees from previous app
+                // lives: they keep :0 / tcp 6000 ("_XSERVTransSocketUNIXCreate
+                // Listener failed ... server already running", every ladder
+                // attempt rc=1) while xwd happily grabs frames FROM THE
+                // ZOMBIE - frames that never reach our new capture pipeline.
+                // First free N in 0..3 (host can bind tcp 6000+N AND the
+                // rootfs has no XN socket) becomes this session's display;
+                // every component (emux-x11, emux-capture, X11Client, probes)
+                // is told the number, so a held :0 can no longer black-screen
+                // the tab.
+                displayNum = (0..3).firstOrNull { n ->
+                    val tcpFree = runCatching {
+                        java.net.ServerSocket(6000 + n).close(); true
+                    }.getOrDefault(false)
+                    tcpFree && !java.io.File(rootfs, "tmp/.X11-unix/X$n").exists()
+                } ?: 0
+                noteInfo("desktop display: :$displayNum (tcp ${6000 + displayNum})")
                 runCatching {
                     val tcpOk = runCatching {
-                        java.net.ServerSocket(6000).close(); true
+                        java.net.ServerSocket(6000 + displayNum).close(); true
                     }.getOrElse { false }
                     val absOk = runCatching {
                         android.net.LocalServerSocket("emux-bind-probe").close(); true
@@ -421,7 +447,7 @@ class DesktopService(
                 var free = false
                 var sweeps = 0
                 while (!free && sweeps < 3) {
-                    free = runCatching { java.net.ServerSocket(6000).close(); true }.getOrElse { false }
+                    free = runCatching { java.net.ServerSocket(6000 + displayNum).close(); true }.getOrElse { false }
                     if (!free) {
                         sweeps++
                         noteInfo("port6000 STILL HELD after sweep #$sweeps - re-sweeping")
@@ -439,7 +465,7 @@ class DesktopService(
                 // for THIS device instead (see desktopGeometry()).
                 val desktopGeometry = desktopGeometry()
                 noteInfo("desktop geometry: $desktopGeometry")
-                val cmd = "emux-x11 $wmCommand $desktopGeometry"
+                val cmd = "emux-x11 $wmCommand $desktopGeometry $displayNum"
                 xRespawns = 0
                 // v0.1.80: tell the user WHERE the full log lives - the pane
                 // only shows a scrolling window; the diag file never rotates.
@@ -582,7 +608,7 @@ class DesktopService(
                     noteInfo("capture: X up and toolchain present - starting emux-capture")
                     captureSession = TerminalSession(
                         9002, ctx, root,
-                        "emux-capture 127.0.0.1:$FRAME_PORT",
+                        "emux-capture 127.0.0.1:$FRAME_PORT $displayNum",
                     ).also { it.start() }
                     pumpDiag("capture", captureSession!!)
                 }
@@ -624,7 +650,7 @@ class DesktopService(
                                 if (state.value == State.IDLE || state.value == State.ERROR) break
                                 captureSession = TerminalSession(
                                     9002 + captureRespawns, ctx, root,
-                                    "emux-capture 127.0.0.1:$FRAME_PORT",
+                                    "emux-capture 127.0.0.1:$FRAME_PORT $displayNum",
                                 ).also { it.start() }
                                 pumpedCaptureSession = null
                             } else {
@@ -951,10 +977,10 @@ class DesktopService(
         while (System.currentTimeMillis() < deadline) {
             try {
                 Socket().apply {
-                    connect(java.net.InetSocketAddress("127.0.0.1", 6000), 300)
+                    connect(java.net.InetSocketAddress("127.0.0.1", 6000 + displayNum), 300)
                     close()
                 }
-                val c = X11Client(display = 0)
+                val c = X11Client(display = displayNum)
                 c.connect()
                 x11 = c
                 Log.i(TAG, "X connected: ${c.screenWidth}x${c.screenHeight}@${c.depth} vendor=${c.vendor}")
