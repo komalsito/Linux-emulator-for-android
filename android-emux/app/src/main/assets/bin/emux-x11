@@ -366,10 +366,24 @@ else
     "$XVFB" :"$DN" -screen 0 "$RES" -listen tcp -ac "$@" >/tmp/xvfb.log 2>&1 &
     XPID=$!
     i=0
+    GONE=0
     while [ "$i" -lt 450 ]; do
       x_up && return 0
-      kill -0 "$XPID" 2>/dev/null || return 1
-      sleep 0.1; i=$((i + 1))
+      # v0.2.9 FIELD FIX: one kill -0 miss is NOT death. Under proot the
+      # pid translation races right after fork - the field process table
+      # showed attempt-3's Xvfb ALIVE and serving (pid with -listen tcp
+      # -ac flags) while /tmp/emux_attempts logged rc=1 for all three
+      # attempts: each was declared dead at i=0, the ladder launched a
+      # duplicate, and the duplicate died for real on the first (alive)
+      # server's sockets - "server already running" was us fighting
+      # ourselves. Require three consecutive misses ~1 s apart.
+      if kill -0 "$XPID" 2>/dev/null; then
+        GONE=0
+      else
+        GONE=$((GONE + 1))
+        [ "$GONE" -ge 3 ] && return 1
+      fi
+      sleep 0.3; i=$((i + 1))
     done
     return 2
   }

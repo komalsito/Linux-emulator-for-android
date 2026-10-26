@@ -185,10 +185,14 @@ grab_frame() {
   # v0.1.98 (field audit): grab errors used to go to /dev/null, so the pane
   # never said WHY capture was waiting. Keep them in a file and surface the
   # tail on repeated failures.
+  # v0.2.9 FIELD FIX: bound every stage. A hung X client (server alive
+  # but not servicing, proot socket stall) used to block grab_frame
+  # FOREVER - capture then sat silent after "converter=native" with the
+  # process alive and zero frames (field v0.2.8 process table).
   if [ -n "$X2P" ]; then
-    "$XWD" -root -silent 2>>/tmp/emux_cap.err | "$X2P" 2>>/tmp/emux_cap.err | "$PNM" 2>>/tmp/emux_cap.err > "$TMPF" || return 1
+    timeout 8 "$XWD" -root -silent 2>>/tmp/emux_cap.err | timeout 8 "$X2P" 2>>/tmp/emux_cap.err | timeout 8 "$PNM" 2>>/tmp/emux_cap.err > "$TMPF" || return 1
   else
-    "$XWD" -root -silent 2>>/tmp/emux_cap.err | "$PNM" 2>>/tmp/emux_cap.err > "$TMPF" || return 1
+    timeout 8 "$XWD" -root -silent 2>>/tmp/emux_cap.err | timeout 8 "$PNM" 2>>/tmp/emux_cap.err > "$TMPF" || return 1
   fi
   [ -s "$TMPF" ] || return 1
   if [ -x "$CONV" ]; then
@@ -226,6 +230,9 @@ grab_frame() {
 tries=0
 until grab_frame; do
   tries=$((tries+1))
+  # v0.2.9: never be silent while failing - the pane tail is the field's
+  # only window and a quiet retry loop reads as "hung".
+  [ $((tries % 10)) = 0 ] && echo "emux-capture: grab retry #$tries (grab timed out or empty; DISPLAY=$DISPLAY)" >&2
   [ $tries -ge 100 ] && { echo "emux-capture: initial grab failed 100x - is DISPLAY=$DISPLAY alive?" >&2; exit 1; }
   sleep 0.3
 done
@@ -236,18 +243,15 @@ case "$W$H" in (*[!0-9]*|"") echo "emux-capture: cannot read display geometry fr
 
 # persistent push channel: ONE background nc draining a FIFO (the Android side
 # accepts a SINGLE connection for the whole session)
-FIFO=/tmp/emux_cap.fifo
-rm -f "$FIFO" 2>/dev/null
-mkfifo "$FIFO" 2>/dev/null || FIFO=""
-if [ -n "$FIFO" ]; then
-  "$NC" "$HOST" "$PORT" <"$FIFO" >/dev/null 2>&1 &
-  PUMPID=$!
-  exec 3>"$FIFO"
-  SINK=3
-  echo "emux-capture: push channel open (fifo -> $HOST:$PORT)" >&2
-else
-  SINK=0   # per-frame mode (degraded; the single-accept server may drop frames)
-fi
+# v0.2.9 FIELD FIX: per-frame connections, no FIFO pump. The pump's
+# `exec 3>"$FIFO"` blocks FOREVER when the background nc dies before
+# reading it (connect refused / killed mid-churn) - capture then hung
+# silent right after "converter=native" (field v0.2.8: process alive,
+# no output, no frames). The Android reader re-accepts since v0.2.7, so
+# one short-lived nc per frame is simpler and cannot block anywhere.
+FIFO=""
+SINK=0
+echo "emux-capture: push mode = per-frame nc to $HOST:$PORT" >&2
 
 send_bytes() {
   if [ "$SINK" = 3 ]; then cat >&3; else "$NC" "$HOST" "$PORT" 2>/dev/null; fi
