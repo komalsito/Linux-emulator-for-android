@@ -46,6 +46,17 @@ class DesktopView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attrs) 
     private val bmpPaint = Paint(Paint.FILTER_BITMAP_FLAG)
     private var lastFrameId = -1
 
+    // v0.2.3 FIELD FIX: the frameless pane (the diagnostics surface users
+    // actually screenshot) painted a FIXED last-16-lines window with no way
+    // to move - "I can't move between the desktop errors, it doesn't let me
+    // scroll". While no frames exist there is no X to inject touches into,
+    // so a one-finger drag now scrolls the FULL history instead; clipping
+    // keeps scrolled lines out of the status area. Reset when frames arrive.
+    private var histScrollPx = 0f
+    private var lastHistY = 0f
+    private var histScrollable = false
+    private val frameless: Boolean get() = desktop?.currentFrame == null
+
     private val srcRect = Rect()
     private val dstRect = Rect()
 
@@ -62,7 +73,11 @@ class DesktopView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attrs) 
     }
 
     fun onNewFrame(frameId: Int) {
-        if (frameId != lastFrameId) { lastFrameId = frameId; postInvalidateOnAnimation() }
+        if (frameId != lastFrameId) {
+            lastFrameId = frameId
+            histScrollPx = 0f          // v0.2.3: history scroll is frameless-only
+            postInvalidateOnAnimation()
+        }
     }
 
     override fun onDraw(canvas: Canvas) {
@@ -98,15 +113,35 @@ class DesktopView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attrs) 
                 // lines that prove health, RED for everything else.
                 val pOk = Paint().apply { color = Color.argb(0xE0, 0x66, 0xBB, 0x6A); textSize = sp(11f) }
                 val pBad = Paint().apply { color = Color.argb(0xE0, 0xEF, 0x53, 0x50); textSize = sp(11f) }
-                var y = height / 2f + 36f
-                // v0.1.100: takeLast, not take — the old code painted
-                // the FIRST 16 history lines, i.e. the old green startup
-                // probes, and hid the latest failure entirely.
-                for (line in err.lines().filter { it.isNotBlank() }.takeLast(16)) {
-                    canvas.drawText(line.take(190), 24f, y,
-                        if (DiagColors.healthy(line)) pOk else pBad)
-                    y += 24f
+                // v0.2.3: FULL scrollable history (was: fixed takeLast(16)).
+                val lines = err.lines().filter { it.isNotBlank() }.take(400)
+                val lineH = 24f
+                val startY = height / 2f + 36f
+                val avail = height - startY - sp(14f)
+                val contentH = lines.size * lineH
+                val maxScroll = max(0f, contentH - avail)
+                histScrollPx = histScrollPx.coerceIn(0f, maxScroll)
+                histScrollable = maxScroll > 0f
+                val first = (histScrollPx / lineH).toInt().coerceIn(0, max(0, lines.size - 1))
+                val visible = (avail / lineH).toInt() + 2
+                val last = min(lines.size, first + visible)
+                canvas.save()
+                canvas.clipRect(0, (startY - lineH).toInt(), width, height)
+                var y = startY + (first * lineH - histScrollPx)
+                for (i in first until last) {
+                    canvas.drawText(lines[i].take(190), 24f, y,
+                        if (DiagColors.healthy(lines[i])) pOk else pBad)
+                    y += lineH
                 }
+                canvas.restore()
+                if (histScrollable) {
+                    val hint = Paint().apply { color = Color.argb(0x90, 0xFF, 0xFF, 0xFF); textSize = sp(10f) }
+                    canvas.drawText(
+                        "drag to scroll history - lines ${first + 1}..$last of ${lines.size}",
+                        24f, height - sp(6f), hint)
+                }
+            } else {
+                histScrollable = false
             }
             // keep repainting while frameless so late errorText appears
             postInvalidateOnAnimation()
@@ -160,9 +195,12 @@ class DesktopView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attrs) 
             MotionEvent.ACTION_DOWN -> {
                 downTime = System.currentTimeMillis()
                 downX = event.x; downY = event.y
+                lastHistY = event.y
                 dragging = false; panning = false; longPressFired = false
                 removeCallbacks(longPressRunnable)
-                postDelayed(longPressRunnable, 450)
+                // v0.2.3: no X server behind a frameless pane - a long-press
+                // right-click there injects into nothing, so don't arm it.
+                if (!frameless) postDelayed(longPressRunnable, 450)
                 return true
             }
             MotionEvent.ACTION_POINTER_DOWN -> {
@@ -184,6 +222,15 @@ class DesktopView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attrs) 
                     return true
                 }
                 val dx = event.x - downX; val dy = event.y - downY
+                // v0.2.3: frameless = diagnostics surface; one-finger drag
+                // scrolls the history instead of injecting motion into a
+                // non-existent X server.
+                if (frameless && !multiTouch) {
+                    histScrollPx += lastHistY - event.y
+                    lastHistY = event.y
+                    invalidate()
+                    return true
+                }
                 if (!dragging && (dx * dx + dy * dy) > 18 * 18) {
                     dragging = true
                     removeCallbacks(longPressRunnable)
@@ -226,7 +273,7 @@ class DesktopView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attrs) 
                     return true
                 }
                 val (x, y) = mapToX(event.x, event.y)
-                if (!longPressFired && !panning) {
+                if (!longPressFired && !panning && !frameless) {
                     if (dragging) {
                         // releasing after drag: send button release at final pos
                         desktop?.fakeButtonReleaseOnly(x, y)
