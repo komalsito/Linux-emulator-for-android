@@ -149,6 +149,22 @@ class BootstrapManager(private val ctx: Context) {
          */
         private val aptLockObj = java.util.concurrent.locks.ReentrantLock()
         internal fun aptLock(): java.util.concurrent.locks.ReentrantLock = aptLockObj
+
+        /**
+         * v0.2.1 FIELD FIX: live progress sink for long proot/apt runs. The
+         * v0.2.0 desktop hang was SILENT - desktopPreRepair() can legally run
+         * for minutes (90 s lock wait + dpkg repair + X-core apt install) and
+         * the pane emitted nothing in that window, so the field could not
+         * tell "working" from "wedged". DesktopService wires this to noteInfo.
+         */
+        @Volatile var progressNote: ((String) -> Unit)? = null
+        private var lastProgressAt = 0L
+        internal fun progressThrottled(msg: String, minGapMs: Long = 20_000L) {
+            val now = System.currentTimeMillis()
+            if (now - lastProgressAt < minGapMs) return
+            lastProgressAt = now
+            progressNote?.invoke(msg)
+        }
         // NOTE: Alpine publishes point releases as .0 only (3.20.0, 3.20.3 …);
         // a bare "3.20" produces a 404 URL — that was the bootstrap failure.
         const val ALPINE_VERSION = "3.20.3"
@@ -1744,7 +1760,7 @@ class BootstrapManager(private val ctx: Context) {
      */
     private fun runAptProot(
         proot: File, dest: File, pkgs: List<String>, phase: String, report: (String, Int) -> Unit,
-    ): ApkRun = withAptLock {
+    ): ApkRun = withAptLock(onBusy = { ApkRun(false, "apt lock busy - another apt/dpkg run is in progress") }) {
         val hostTmp = prootTmp(ctx)
         val nb = FsLayout.nativeBridgeDir(ctx)
         // v0.1.52 FIELD FIX: a killed apt run (user closes the app mid
@@ -2202,7 +2218,7 @@ class BootstrapManager(private val ctx: Context) {
         proot: File, dest: File,
         payload: String = APT_REPAIR_PAYLOAD,
         noSeccomp: Boolean = false,
-    ): ApkRun = withAptLock {
+    ): ApkRun = withAptLock(onBusy = { ApkRun(false, "apt lock busy - another apt/dpkg run is in progress") }) {
         val hostTmp = prootTmp(ctx)
         val nb = FsLayout.nativeBridgeDir(ctx)
         val argv = listOf(
@@ -2227,7 +2243,8 @@ class BootstrapManager(private val ctx: Context) {
         // the link(2) breaker on this kernel, every proot run disables it.
         if (noSeccomp || FsLayout.prootNoSeccompFlag(ctx).isFile)
             env["PROOT_NO_SECCOMP"] = "1"
-        runApkProcess(argv, env, listOf("dpkg-repair"), "Repairing package manager", { _, _ -> })
+        runApkProcess(argv, env, listOf("dpkg-repair"), "Repairing package manager",
+            { ph, _ -> Companion.progressThrottled("$ph...") })
     }
 
     /**
@@ -2274,9 +2291,13 @@ class BootstrapManager(private val ctx: Context) {
         // USE, and the desktop cascade then raced the multi-minute install
         // (field pane: "E: dpkg was interrupted ... apt install failed").
         var note: String? = null
+        Companion.progressNote?.invoke("pre-repair: waiting for background apt lock (up to 90 s)...")
         val got = runCatching {
             Companion.aptLock().tryLock(90, java.util.concurrent.TimeUnit.SECONDS)
         }.getOrDefault(true)
+        Companion.progressNote?.invoke(
+            if (got) "pre-repair: apt lock acquired"
+            else "pre-repair: apt lock STILL BUSY after 90 s - proceeding anyway")
         try {
         runCatching {
             val spec = DistroCatalog.requested(ctx)
@@ -2292,6 +2313,7 @@ class BootstrapManager(private val ctx: Context) {
             installLinkFixShim(dest)
             installCaptureConv(dest)
             if (aptJournalDirty(dest) || !File(dest, "var/lib/emux-repair.stamp").isFile) {
+                Companion.progressNote?.invoke("pre-repair: dpkg journal dirty - repairing (usually < 1 min)...")
                 val r = runRepairProot(proot, dest)
                 com.emux.EmuXLog.i("desktopPreRepair: ok=${r.ok} tail=${r.tail.take(200)}")
                 note = "dpkg repair ok=${r.ok}: " + r.tail.take(180)
@@ -2305,6 +2327,8 @@ class BootstrapManager(private val ctx: Context) {
                 // maintainer scripts of EVERY later package fail ("/bin/sh:
                 // 12: id: not found" on the field device).
                 val core = listOf("coreutils", "xvfb", "x11-xkb-utils", "xkb-data", "xfonts-base")
+                Companion.progressNote?.invoke(
+                    "pre-repair: installing X core (coreutils/xvfb/xkb/fonts) - first run can take minutes")
                 val rc = runAptProot(proot, dest, core, "Installing X server core") { _, _ -> }
                 com.emux.EmuXLog.i("desktopPreRepair core install: ok=${rc.ok} tail=${rc.tail.take(200)}")
                 note = (note ?: "") + " | core install ok=${rc.ok}: " + rc.tail.take(180)
@@ -2525,8 +2549,27 @@ class BootstrapManager(private val ctx: Context) {
     /** v0.1.58: bounded-waitable mutex for proot apt/dpkg runs (ReentrantLock
      *  so desktopPreRepair can tryLock instead of blocking the desktop start
      *  forever behind a multi-minute gap install). */
-    private inline fun <T> withAptLock(block: () -> T): T {
-        Companion.aptLock().lock()
+    private inline fun <T> withAptLock(
+        timeoutMs: Long = 12 * 60_000L,
+        onBusy: () -> T,
+        block: () -> T,
+    ): T {
+        // v0.2.1 FIELD FIX: this used to be an UNBOUNDED lock(). A zombie
+        // holder (see runApkProcess: pipe-read that never reached EOF) made
+        // every later apt/dpkg run - including desktopPreRepair on every
+        // Desktop-tab open - wait behind it forever. Runs are now capped
+        // (runApkProcess waitFor), so a bounded wait longer than any single
+        // run cap is always sufficient; past it we bail out instead of
+        // wedging the UI coroutine.
+        Companion.progressThrottled("waiting for apt lock (up to ${timeoutMs / 60_000} min)...")
+        val got = runCatching {
+            Companion.aptLock().tryLock(timeoutMs, java.util.concurrent.TimeUnit.MILLISECONDS)
+        }.getOrDefault(false)
+        if (!got) {
+            com.emux.EmuXLog.e("apt lock still busy after ${timeoutMs / 60_000} min - skipping this run")
+            Companion.progressNote?.invoke("apt lock busy - skipped (another repair still running)")
+            return onBusy()
+        }
         try { return block() } finally { Companion.aptLock().unlock() }
     }
 
@@ -2541,28 +2584,53 @@ class BootstrapManager(private val ctx: Context) {
         pb.environment().clear()
         pb.environment().putAll(env)
         pb.redirectErrorStream(true)
+        // v0.2.1 FIELD FIX (the desktop hang): output goes to a FILE, not a
+        // pipe. The old BufferedReader(p.inputStream).forEachLine only
+        // returns at pipe EOF, i.e. when EVERY writer closes - a stuck or
+        // destroyed proot can leave orphaned tracees holding the write end,
+        // so this read blocked forever, holding aptLock, and every later
+        // apt/dpkg run queued behind the zombie (Desktop tab sat at
+        // "Starting X server..." with zero new lines, forever). A file has
+        // no orphan-EOF problem: the wait below is bounded and orphans just
+        // keep appending harmlessly.
+        val log = File(ctx.cacheDir, "aptrun-" + pkgs.joinToString("_").take(40) + ".log")
+        runCatching { log.parentFile?.mkdirs(); if (log.isFile) log.delete() }
+        pb.redirectOutput(log)
         val p = pb.start()
-        val watchdog = Thread {
-            try { Thread.sleep(15 * 60_000L); if (p.isAlive) p.destroy() } catch (_: Exception) {}
-        }.apply { isDaemon = true; start() }
-        try {
-            val tail = ArrayDeque<String>()
-            var lines = 0
-            BufferedReader(InputStreamReader(p.inputStream)).forEachLine { line ->
-                if (++lines % 2 == 0) report(phase, -1)
-                com.emux.EmuXLog.i("apk: $line")
-                if (line.isNotBlank()) {
-                    tail.addLast(line)
-                    if (tail.size > 15) tail.removeFirst()
-                }
+        // Bounded wait in 3 s slices: keeps progress reporting live and makes
+        // a hung guest incapable of wedging the desktop start path again.
+        val deadline = System.currentTimeMillis() + 10 * 60_000L
+        var exited = false
+        var lastLen = -1L
+        while (!exited && System.currentTimeMillis() < deadline) {
+            exited = p.waitFor(3, java.util.concurrent.TimeUnit.SECONDS)
+            val len = runCatching { log.length() }.getOrDefault(-1L)
+            if (len != lastLen) {
+                lastLen = len
+                report(phase, -1)
+                Companion.progressThrottled("$phase: running...")
             }
-            val code = p.waitFor()
-            ApkRun(code == 0, tail.joinToString("\n"))
-        } finally { watchdog.interrupt() }
+        }
+        if (!exited) {
+            com.emux.EmuXLog.e("apk run TIMEOUT after 10 min: $phase - destroying forcibly")
+            Companion.progressNote?.invoke("$phase: TIMEOUT after 10 min - killed, continuing")
+            p.destroyForcibly()
+            runCatching { p.waitFor(5, java.util.concurrent.TimeUnit.SECONDS) }
+            return ApkRun(false, "TIMEOUT after 10 min\n" + tailOf(log))
+        }
+        val code = p.exitValue()
+        val tail = tailOf(log)
+        tail.lineSequence().forEach { com.emux.EmuXLog.i("apk: $it") }
+        ApkRun(code == 0, tail)
     }.getOrElse { e ->
         com.emux.EmuXLog.e("apk ${pkgs.joinToString(",")} failed to even start", e)
         ApkRun(false, "${e.javaClass.simpleName}: ${e.message}")
     }
+
+    /** Last [n] non-blank lines of a run log ("" if absent/unreadable). */
+    private fun tailOf(f: File, n: Int = 15): String = runCatching {
+        f.readLines().filter { it.isNotBlank() }.takeLast(n).joinToString("\n")
+    }.getOrDefault("")
 
     /**
      * Last-ditch DNS fallback for apk (both inside proot and host-side): resolve

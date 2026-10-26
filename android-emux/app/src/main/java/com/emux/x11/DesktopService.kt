@@ -346,8 +346,18 @@ class DesktopService(
                 if (warmDesktop) {
                     noteInfo("warm start: desktop stack present - skipping pre-repair")
                 } else {
-                    com.emux.core.BootstrapManager(ctx).desktopPreRepair()
-                        ?.let { noteInfo(it) }
+                    // v0.2.1 FIELD FIX: surface pre-repair progress live. The
+                    // v0.2.0 pane went silent for the whole (multi-minute)
+                    // pre-repair window - indistinguishable from the wedged
+                    // state this release fixes - so every step now lands in
+                    // the history while it happens.
+                    com.emux.core.BootstrapManager.progressNote = { m -> noteInfo(m) }
+                    try {
+                        com.emux.core.BootstrapManager(ctx).desktopPreRepair()
+                            ?.let { noteInfo(it) }
+                    } finally {
+                        com.emux.core.BootstrapManager.progressNote = null
+                    }
                 }
                 // v0.1.63: surface the guest dpkg selfcheck (shim loaded? link()
                 // ok? db dir owner/mode?) in the pane history + desktop.log so
