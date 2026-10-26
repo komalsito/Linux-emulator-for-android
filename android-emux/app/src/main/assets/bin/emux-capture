@@ -189,24 +189,38 @@ grab_frame() {
   # but not servicing, proot socket stall) used to block grab_frame
   # FOREVER - capture then sat silent after "converter=native" with the
   # process alive and zero frames (field v0.2.8 process table).
-  # v0.2.10 FIELD FIX: stage-wise grab with per-stage echoes. A piped
-  # triple-timeout hides WHICH stage died (timeout kills are silent), and
-  # the pane tail then reads as a mystery hang. Now each stage writes to
-  # its own file and reports its own failure into cap.err + stderr.
+  # v0.2.11 FIELD FIX: NO timeout(1) in the grab path. Field v0.2.10:
+  # "stage xwd FAILED (rc=0)" with an EMPTY cap.err while the identical
+  # PREFLIGHT xwd - the same binary, same flags, same DISPLAY, but with
+  # NO timeout wrapper - succeeded every time. The wrapper itself was
+  # the silent failure under proot + the linkfix shim (and v0.2.9's
+  # "timeouts" were almost certainly this, misread). Bound stages with a
+  # background killer subshell + wait (plain shell jobs, proot-safe) and
+  # report the REAL exit code (137 = our killer = genuine timeout).
   GX=/tmp/emux_frame.xwd
-  if ! timeout 8 "$XWD" -root -silent >"$GX" 2>>/tmp/emux_cap.err; then
-    echo "emux-capture: stage xwd FAILED (rc=$?, DISPLAY=$DISPLAY) - see cap.err" >&2
-    return 1
+  "$XWD" -root -silent >"$GX" 2>>/tmp/emux_cap.err &
+  GPID=$!
+  ( sleep 8; kill -9 "$GPID" 2>/dev/null ) &
+  KPID=$!
+  wait "$GPID"; GRC=$?
+  kill "$KPID" 2>/dev/null
+  if [ "$GRC" = 137 ]; then
+    echo "emux-capture: stage xwd TIMEOUT >8s (DISPLAY=$DISPLAY)" >&2; return 1
+  fi
+  if [ "$GRC" != 0 ]; then
+    echo "emux-capture: stage xwd FAILED rc=$GRC (DISPLAY=$DISPLAY) - see cap.err" >&2; return 1
   fi
   [ -s "$GX" ] || { echo "emux-capture: stage xwd produced EMPTY file" >&2; return 1; }
   if [ -n "$X2P" ]; then
-    if ! timeout 8 "$X2P" <"$GX" 2>>/tmp/emux_cap.err | timeout 8 "$PNM" 2>>/tmp/emux_cap.err >"$TMPF"; then
-      echo "emux-capture: stage convert (xwdtopnm|pnmtoplainpnm) FAILED" >&2; return 1
-    fi
+    "$X2P" <"$GX" 2>>/tmp/emux_cap.err | "$PNM" 2>>/tmp/emux_cap.err >"$TMPF" &
+    CPID=$!
+    ( sleep 8; kill -9 "$CPID" 2>/dev/null ) &
+    K2=$!
+    wait "$CPID"; CRC=$?
+    kill "$K2" 2>/dev/null
+    [ "$CRC" = 0 ] || { echo "emux-capture: stage convert FAILED rc=$CRC (137=timeout)" >&2; return 1; }
   else
-    if ! timeout 8 "$PNM" <"$GX" 2>>/tmp/emux_cap.err >"$TMPF"; then
-      echo "emux-capture: stage pnmtoplainpnm FAILED" >&2; return 1
-    fi
+    "$PNM" <"$GX" 2>>/tmp/emux_cap.err >"$TMPF" || { echo "emux-capture: stage pnmtoplainpnm FAILED" >&2; return 1; }
   fi
   [ -s "$TMPF" ] || { echo "emux-capture: stage convert produced EMPTY PNM" >&2; return 1; }
   if [ -x "$CONV" ]; then
