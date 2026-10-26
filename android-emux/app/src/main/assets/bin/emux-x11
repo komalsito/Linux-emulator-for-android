@@ -59,14 +59,29 @@ export PATH
 # field pane died with "Cannot establish any listening sockets" on a retry
 # that only removed the lock file, not the stale X0 socket.
 kill_stale_x() {
+  # v0.2.8 FIELD FIX (the rc=137 murder, final layer): this sweep runs on
+  # EVERY Xvfb attempt and its pattern matches emux-capture|xwd - so the
+  # ladder's attempt-2/3 sweep SIGKILLed the CURRENT session's live capture
+  # ~2 s after start ("capture died pre-frame (rc=137)" every cycle since
+  # v0.1.54; v0.2.7's watcher guard removed the other killer). Age filter:
+  # only processes OLDER than this launcher are stale; anything started
+  # after us belongs to the current session and must live. On ROMs where
+  # guest kills cannot reach foreign proot tracees this changes nothing.
+  if [ -z "$MY_START_TICKS" ]; then
+    MY_START_TICKS=$(awk '{print $22}' /proc/self/stat 2>/dev/null)
+    [ -n "$MY_START_TICKS" ] || MY_START_TICKS=0
+  fi
   for CMDF in /proc/[0-9]*/cmdline; do
     if tr "\0" " " < "$CMDF" 2>/dev/null | grep -qE "Xvfb :|Xorg :|emux-capture|xwd"; then
       K=${CMDF#/proc/}; K=${K%/cmdline}
       # v0.1.81: TERM then KILL - a half-dead Xvfb stuck in the shm/SIGBUS
       # path ignores TERM and keeps holding :0 until the watchdog fires.
-      # (also restores the self-pid guard: the shipped line had a collapsed
-      #  "$$" -> "$" which made the guard compare against a literal dollar)
-      if [ "$K" != "$$" ]; then kill "$K" 2>/dev/null; kill -9 "$K" 2>/dev/null; fi
+      if [ "$K" != "$$" ]; then
+        KT=$(awk '{print $22}' "/proc/$K/stat" 2>/dev/null)
+        [ -n "$KT" ] || continue
+        [ "$KT" -lt "$MY_START_TICKS" ] 2>/dev/null || continue
+        kill "$K" 2>/dev/null; kill -9 "$K" 2>/dev/null
+      fi
     fi
   done
   sleep 0.3
@@ -339,6 +354,10 @@ else
     # two rotations, and attempt 1 is where the truth lives.
     [ -f /tmp/xvfb.log.1 ] && mv -f /tmp/xvfb.log.1 /tmp/xvfb.log.2 2>/dev/null
     [ -f /tmp/xvfb.log ] && mv -f /tmp/xvfb.log /tmp/xvfb.log.1 2>/dev/null
+    # v0.2.8: our OWN previous attempt's server is younger than the launcher,
+    # so the age-filtered sweep spares it - kill it explicitly by pid (same
+    # proot instance CAN signal its own tracees) before re-sweeping.
+    if [ -n "${XPID:-}" ]; then kill -9 "$XPID" 2>/dev/null; fi
     # v0.1.80/81: sweep + drop stale sockets on EVERY attempt
     kill_stale_x
     XTRY=$((XTRY + 1))

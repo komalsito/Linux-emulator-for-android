@@ -134,6 +134,9 @@ class DesktopService(
     var x11: X11Client? = null; private set
     // v0.2.5 FIELD FIX: this session's X display number (see startDesktop).
     @Volatile private var displayNum = 0
+    // v0.2.8: /proc/uptime ticks at startDesktop; host-side kills only reap
+    // processes OLDER than this desktop start (see killDesktopGuests).
+    @Volatile private var desktopStartUpTicks = Long.MAX_VALUE
     private var xSession: TerminalSession? = null
     private var captureSession: TerminalSession? = null
     private var listener: ServerSocket? = null
@@ -445,6 +448,9 @@ class DesktopService(
                 // longer existed (then rc=137 in the respawn churn), and
                 // leftover XN socket files make Xvfb's unix listener die with
                 // "server already running" even on a port nobody holds.
+                desktopStartUpTicks = runCatching {
+                    (java.io.File("/proc/uptime").readText().trim().split(" ")[0].toDouble() * 100).toLong() - 50
+                }.getOrDefault(Long.MAX_VALUE)
                 runCatching {
                     listOf("tmp/emux_x_up", "tmp/emux_display_num").forEach {
                         java.io.File(rootfs, it).delete()
@@ -955,6 +961,15 @@ class DesktopService(
                 }.getOrDefault("")
                 val uids = uidLine.split(Regex("\\s+"))
                 if (uids.getOrNull(1) == myUid.toString()) {
+                    // v0.2.8 FIELD FIX: age filter, host side. The sweep also
+                    // matches the CURRENT session's capture/xwd; on ROMs where
+                    // this host kill DOES work it murdered them mid-push.
+                    // Only processes older than this desktop start are stale.
+                    val ticks = runCatching {
+                        val st = java.io.File(d, "stat").readText()
+                        st.substringAfterLast(')').trim().split(Regex("\\s+"))[19].toLong()
+                    }.getOrDefault(Long.MAX_VALUE)
+                    if (ticks >= desktopStartUpTicks) return@forEach
                     com.emux.EmuXLog.i("desktop: host-killing orphan guest pid $pid: ${cmd.take(70)}")
                     android.os.Process.killProcess(pid)
                 }
