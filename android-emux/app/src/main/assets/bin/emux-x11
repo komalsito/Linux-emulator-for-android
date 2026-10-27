@@ -59,31 +59,15 @@ export PATH
 # field pane died with "Cannot establish any listening sockets" on a retry
 # that only removed the lock file, not the stale X0 socket.
 kill_stale_x() {
-  # v0.2.8 FIELD FIX (the rc=137 murder, final layer): this sweep runs on
-  # EVERY Xvfb attempt and its pattern matches emux-capture|xwd - so the
-  # ladder's attempt-2/3 sweep SIGKILLed the CURRENT session's live capture
-  # ~2 s after start ("capture died pre-frame (rc=137)" every cycle since
-  # v0.1.54; v0.2.7's watcher guard removed the other killer). Age filter:
-  # only processes OLDER than this launcher are stale; anything started
-  # after us belongs to the current session and must live. On ROMs where
-  # guest kills cannot reach foreign proot tracees this changes nothing.
-  if [ -z "$MY_START_TICKS" ]; then
-    MY_START_TICKS=$(awk '{print $22}' /proc/self/stat 2>/dev/null)
-    [ -n "$MY_START_TICKS" ] || MY_START_TICKS=0
-  fi
-  for CMDF in /proc/[0-9]*/cmdline; do
-    if tr "\0" " " < "$CMDF" 2>/dev/null | grep -qE "Xvfb :|Xorg :|emux-capture|xwd"; then
-      K=${CMDF#/proc/}; K=${K%/cmdline}
-      # v0.1.81: TERM then KILL - a half-dead Xvfb stuck in the shm/SIGBUS
-      # path ignores TERM and keeps holding :0 until the watchdog fires.
-      if [ "$K" != "$$" ]; then
-        KT=$(awk '{print $22}' "/proc/$K/stat" 2>/dev/null)
-        [ -n "$KT" ] || continue
-        [ "$KT" -lt "$MY_START_TICKS" ] 2>/dev/null || continue
-        kill "$K" 2>/dev/null; kill -9 "$K" 2>/dev/null
-      fi
-    fi
-  done
+  # v0.2.13 FIELD FIX: FILES ONLY - no process killing from the guest
+  # sweep, ever again. Thirteen rounds of evidence: on this ROM it cannot
+  # reach foreign proot tracees (so it never cleaned anything useful),
+  # and whenever it COULD reach something it murdered our own live
+  # capture (v0.1.54-v0.2.7, rc=137) or, via the explicit previous-attempt
+  # kill, our own SERVING X server mid-session (v0.2.12 field: preflight
+  # ok on :0, then every grab "unable to open display" after attempt 3
+  # killed attempt 2's live server). Host-side age-filtered kill at
+  # session start covers healthy ROMs; adoption covers the rest.
   sleep 0.3
   mkdir -p /tmp/.X11-unix
   rm -f /tmp/.X$DN-lock /tmp/.X11-unix/X$DN 2>/dev/null
@@ -354,10 +338,9 @@ else
     # two rotations, and attempt 1 is where the truth lives.
     [ -f /tmp/xvfb.log.1 ] && mv -f /tmp/xvfb.log.1 /tmp/xvfb.log.2 2>/dev/null
     [ -f /tmp/xvfb.log ] && mv -f /tmp/xvfb.log /tmp/xvfb.log.1 2>/dev/null
-    # v0.2.8: our OWN previous attempt's server is younger than the launcher,
-    # so the age-filtered sweep spares it - kill it explicitly by pid (same
-    # proot instance CAN signal its own tracees) before re-sweeping.
-    if [ -n "${XPID:-}" ]; then kill -9 "$XPID" 2>/dev/null; fi
+    # v0.2.13: the explicit previous-attempt kill is GONE - it murdered the
+    # only serving server mid-session (see kill_stale_x note). A live
+    # previous attempt is now ADOPTED instead (below), never killed.
     # v0.1.80/81: sweep + drop stale sockets on EVERY attempt
     kill_stale_x
     XTRY=$((XTRY + 1))
@@ -400,6 +383,17 @@ else
       if x_up; then : > /tmp/emux_x_up 2>/dev/null; break; fi
       sleep 0.5; i=$((i + 1))
     done ) &
+  # v0.2.13 FIELD FIX: ADOPT, DON'T FIGHT. If anything already answers on
+  # this display - an unkillable zombie from a previous app life, or an
+  # earlier attempt this session misreported as dead - it serves clients
+  # perfectly (the capture preflight proved it in every field round),
+  # while every NEW Xvfb we launch either dies on its sockets or gets
+  # killed by our own next attempt. Launch zero servers in that case.
+  if x_up; then
+    echo "emux-x11: adopting already-running X server on :$DN (tcp $XP)" >&2
+    : > /tmp/emux_attempts 2>/dev/null
+    echo "$(date +%s) adopted rc=0 flags=<pre-existing>" >> /tmp/emux_attempts 2>/dev/null
+  else
   rc=0
   : > /tmp/emux_attempts 2>/dev/null
   # v0.1.86: PURE IPv4 TCP first. The v0.1.85 shim selftest proved guest
@@ -476,11 +470,20 @@ else
       echo "$(date +%s) attempt $XTRY rc=$rc flags=$ATTEMPT_FLAGS" >> /tmp/emux_attempts 2>/dev/null
     fi
   done
+  fi
   # v0.2.6: publish the display this session ACTUALLY runs on; emux-capture
   # and the Android control plane read it instead of assuming :0/$2.
   echo "$DN" > /tmp/emux_display_num 2>/dev/null
-  export DISPLAY=:$DN
-  echo "emux-x11: session display :$DN (tcp $XP)" >&2
+  # v0.2.13: a tcp-only server (no unix socket) is NOT reachable as ":N"
+  # on this libX11 stack - it does not fall back to tcp. Export the tcp
+  # form so openbox/xwd connect first try.
+  if [ -e /tmp/.X11-unix/X$DN ]; then
+    export DISPLAY=:$DN
+  else
+    export DISPLAY="127.0.0.1:$DN"
+    echo "emux-x11: no unix socket on :$DN - DISPLAY=$DISPLAY (tcp form)" >&2
+  fi
+  echo "emux-x11: session display $DISPLAY (tcp $XP)" >&2
 fi
 # v0.1.79: REST (WM + capture toolchain) installs NOW that X is up - never
 # under a starting server (see APT_BRANCH note above). When it lands, start
