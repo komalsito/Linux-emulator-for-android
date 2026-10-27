@@ -55,6 +55,15 @@ class DesktopView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attrs) 
     private var histScrollPx = 0f
     private var lastHistY = 0f
     private var histScrollable = false
+    // v0.2.21 FIELD FIX: sticky-bottom history. The v0.2.3 scroll opened at
+    // offset 0 - the TOP of the history. While content fit one screen that
+    // was invisible; once the ring grew past a screen (field v0.2.20:
+    // "this was all i could see" = pages of old selfcheck blocks), every
+    // pane screenshot showed the OLDEST lines and all recent diagnostics
+    // sat below the fold. Terminal-standard behaviour: pinned to newest
+    // unless the user scrolls up; scrolling back to the bottom re-pins.
+    private var histStickBottom = true
+    private var histMaxScroll = 0f
     private val frameless: Boolean get() = desktop?.currentFrame == null
 
     private val srcRect = Rect()
@@ -76,6 +85,7 @@ class DesktopView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attrs) 
         if (frameId != lastFrameId) {
             lastFrameId = frameId
             histScrollPx = 0f          // v0.2.3: history scroll is frameless-only
+            histStickBottom = true     // v0.2.21: next frameless visit starts live
             postInvalidateOnAnimation()
         }
     }
@@ -120,6 +130,8 @@ class DesktopView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attrs) 
                 val avail = height - startY - sp(14f)
                 val contentH = lines.size * lineH
                 val maxScroll = max(0f, contentH - avail)
+                histMaxScroll = maxScroll
+                if (histStickBottom) histScrollPx = maxScroll
                 histScrollPx = histScrollPx.coerceIn(0f, maxScroll)
                 histScrollable = maxScroll > 0f
                 val first = (histScrollPx / lineH).toInt().coerceIn(0, max(0, lines.size - 1))
@@ -137,7 +149,8 @@ class DesktopView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attrs) 
                 if (histScrollable) {
                     val hint = Paint().apply { color = Color.argb(0x90, 0xFF, 0xFF, 0xFF); textSize = sp(10f) }
                     canvas.drawText(
-                        "drag to scroll history - lines ${first + 1}..$last of ${lines.size}",
+                        (if (histStickBottom) "lines ${first + 1}..$last of ${lines.size} - drag up to read history"
+                         else "SCROLLED - drag down to return to live lines ${first + 1}..$last of ${lines.size}"),
                         24f, height - sp(6f), hint)
                 }
             } else {
@@ -228,6 +241,11 @@ class DesktopView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attrs) 
                 if (frameless && !multiTouch) {
                     histScrollPx += lastHistY - event.y
                     lastHistY = event.y
+                    // release the pin when the user reads history; re-pin
+                    // when they scroll back to within one line of bottom.
+                    if (histStickBottom && histScrollPx < histMaxScroll - 24f) histStickBottom = false
+                    if (!histStickBottom && histScrollPx >= histMaxScroll - 24f) histStickBottom = true
+                    histScrollPx = histScrollPx.coerceIn(0f, histMaxScroll)
                     invalidate()
                     return true
                 }
