@@ -1197,7 +1197,7 @@ class BootstrapManager(private val ctx: Context) {
      * so "Installing helper scripts" can never again be held hostage by a
      * wedged AAsset handle on OEM ROMs.
      */
-    private fun stageHelperAssets(): Map<String, ByteArray> {
+    internal fun stageHelperAssets(): Map<String, ByteArray> {
         val names = listOf("emux-init.sh", "emux-x11", "emux-capture", "emux-init-probe.sh", "emux-winsize", "emux-apt-repair")
         val result = java.util.concurrent.ConcurrentHashMap<String, ByteArray>()
         withHardTimeout(4_000L) {
@@ -1214,7 +1214,7 @@ class BootstrapManager(private val ctx: Context) {
         return result
     }
 
-    private fun installHelperScripts(
+    internal fun installHelperScripts(
         dest: File,
         staged: Map<String, ByteArray>,
         report: (String, Int) -> Unit,

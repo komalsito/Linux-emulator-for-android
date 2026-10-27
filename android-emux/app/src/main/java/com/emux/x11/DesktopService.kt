@@ -448,6 +448,28 @@ class DesktopService(
                 // longer existed (then rc=137 in the respawn churn), and
                 // leftover XN socket files make Xvfb's unix listener die with
                 // "server already running" even on a port nobody holds.
+                // v0.2.19 FIELD FIX (the meta-bug): guest helper scripts are
+                // re-seeded ONLY via startupRepairAsync -> reseedHelpersIf-
+                // Needed, which on this ROM never runs - installNativeBridge()
+                // (or staging) throws first and the runCatching swallows it,
+                // so the rootfs kept running v0.2.16's emux-x11/emux-capture
+                // through v0.2.17 AND v0.2.18 (field panes showed adoption
+                // without the v0.2.18 self-heal/instrumentation). Every
+                // guest-script fix since the last successful reseed was
+                // DORMANT. Re-seed straight from APK assets on every desktop
+                // start - a few KB of idempotent file writes - so the guest
+                // can never lag the APK again.
+                runCatching {
+                    val bm = com.emux.core.BootstrapManager(ctx)
+                    val staged = bm.stageHelperAssets()
+                    bm.installHelperScripts(rootfs, staged) { _, _ -> }
+                    bm.installCaptureConv(rootfs)
+                    bm.installLinkFixShim(rootfs)
+                    noteInfo("helpers re-seeded from APK assets (env " +
+                        com.emux.core.FsLayout.ENV_VERSION + ")")
+                }.onFailure {
+                    noteInfo("helper re-seed failed (non-fatal): " + (it.message?.take(80) ?: "?"))
+                }
                 desktopStartUpTicks = runCatching {
                     (java.io.File("/proc/uptime").readText().trim().split(" ")[0].toDouble() * 100).toLong() - 50
                 }.getOrDefault(Long.MAX_VALUE)
