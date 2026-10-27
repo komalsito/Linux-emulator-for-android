@@ -332,6 +332,24 @@ else
     return 1
   }
   x_up() { [ -e /tmp/.X11-unix/X$DN ] || tcp_open; }
+  # v0.2.16 FIELD FIX: socket presence is NOT a server. The v0.2.15 field
+  # round adopted a "pre-existing" server whose sockets answered for a
+  # couple of seconds (a dying zombie's half-closed listener), launched
+  # ZERO Xvfbs, and the session then sat at "X server never came up (no
+  # X0, tcp 6000 closed)" with xvfb.log absent. verify_x demands a REAL
+  # X protocol handshake: xwd -root must succeed, bounded by a killer
+  # subshell (timeout(1) is poison under this proot, see emux-capture).
+  verify_x() {
+    x_up || return 1
+    command -v xwd >/dev/null 2>&1 || return 0
+    xwd -root -silent >/dev/null 2>&1 &
+    VP=$!
+    ( sleep 5; kill -9 "$VP" 2>/dev/null ) &
+    VK=$!
+    wait "$VP"; VR=$?
+    kill "$VK" 2>/dev/null
+    [ "$VR" = 0 ]
+  }
   XTRY=0
   start_xvfb() { # rc: 0 up, 1 server died, 2 alive but not up yet
     # v0.1.88: keep THREE generations - attempt 1's log was being lost after
@@ -380,7 +398,7 @@ else
   # unreliable as a gate on this device) the moment X is reachable.
   ( i=0
     while [ "$i" -lt 600 ]; do
-      if x_up; then : > /tmp/emux_x_up 2>/dev/null; break; fi
+      if verify_x; then : > /tmp/emux_x_up 2>/dev/null; break; fi
       sleep 0.5; i=$((i + 1))
     done ) &
   # v0.2.13 FIELD FIX: ADOPT, DON'T FIGHT. If anything already answers on
@@ -389,8 +407,8 @@ else
   # perfectly (the capture preflight proved it in every field round),
   # while every NEW Xvfb we launch either dies on its sockets or gets
   # killed by our own next attempt. Launch zero servers in that case.
-  if x_up; then
-    echo "emux-x11: adopting already-running X server on :$DN (tcp $XP)" >&2
+  if verify_x; then
+    echo "emux-x11: adopting VERIFIED running X server on :$DN (tcp $XP)" >&2
     : > /tmp/emux_attempts 2>/dev/null
     echo "$(date +%s) adopted rc=0 flags=<pre-existing>" >> /tmp/emux_attempts 2>/dev/null
   else
@@ -470,6 +488,21 @@ else
       echo "$(date +%s) attempt $XTRY rc=$rc flags=$ATTEMPT_FLAGS" >> /tmp/emux_attempts 2>/dev/null
     fi
   done
+  fi
+  # v0.2.16: adoption (or a ladder) can still end up believing in a server
+  # that is gone. Verify with a real handshake; if nothing verifies, rotate
+  # the display and LAUNCH for real instead of waiting on a ghost.
+  if ! verify_x; then
+    DN=$((DN + 1)); XP=$((6000 + DN))
+    echo "emux-x11: no verifiable X server on :$((DN - 1)) - rotating to :$DN and launching" >&2
+    kill_stale_x
+    rc=0
+    start_xvfb || rc=$?
+    echo "$(date +%s) attempt $XTRY rc=$rc flags=$ATTEMPT_FLAGS" >> /tmp/emux_attempts 2>/dev/null
+    if [ "$rc" = 1 ]; then
+      start_xvfb -nolisten unix -nolisten local -nolisten inet6 || rc=$?
+      echo "$(date +%s) attempt $XTRY rc=$rc flags=$ATTEMPT_FLAGS" >> /tmp/emux_attempts 2>/dev/null
+    fi
   fi
   # v0.2.6: publish the display this session ACTUALLY runs on; emux-capture
   # and the Android control plane read it instead of assuming :0/$2.
