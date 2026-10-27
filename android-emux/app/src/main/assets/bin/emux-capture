@@ -362,6 +362,9 @@ stream_header() {
 seq=0
 fails=0
 MM=0
+IDLE=0
+PREV=/tmp/emux_frame.prev
+rm -f "$PREV" 2>/dev/null
 while :; do
   if ! grab_frame; then
     fails=$((fails+1))
@@ -382,18 +385,34 @@ while :; do
     [ "$MM" -le 3 ] && echo "emux-capture: size mismatch raw=$RB want=$((W*H*2)) (W=$W H=$H)" >&2
     sleep 0.3; continue
   fi
-  if [ "$ENC" = native ]; then
-    { stream_header; "$CONV" -F "$seq" "$W" "$H" < "$RAW"; } | send_bytes || {
-      if [ "$SINK" = 3 ]; then echo "emux-capture: push channel closed (Android side gone)" >&2; exit 0;
-      else echo "emux-capture: push of frame $seq FAILED (nc to $HOST:$PORT)" >&2; fi
-    }
-  else
-  { stream_header; u32le "$seq"; u16le "$W"; u16le "$H"; u16le 0; u16le 0; cat "$RAW"; } | send_bytes || {
-    if [ "$SINK" = 3 ]; then echo "emux-capture: push channel closed (Android side gone)" >&2; exit 0;
-    else echo "emux-capture: push of frame $seq FAILED (nc to $HOST:$PORT)" >&2; fi
-  }
-  fi
   if [ "$seq" = 0 ]; then echo "emux-capture: frame 1 pushed ($(wc -c < "$RAW") bytes)" >&2; fi
+  # v0.2.25 FIELD FIX: damage-driven pacing (the header comment promised
+  # it since v0.1.28; the loop never did it). A static desktop used to
+  # grab+encode+push 10x/s FOREVER - on a proot-backed phone that is ten
+  # xwd round-trips and ten tcp connections per second for pixels that
+  # never changed, crowding the very pipeline we spent twenty builds
+  # fixing. Now: unchanged frame -> no push, poll at ~2.5 fps, and one
+  # keepalive push every ~2 s so the Android reader's accept loop (and
+  # any watcher) still sees a live stream.
+  if [ -s "$PREV" ] && cmp -s "$RAW" "$PREV"; then
+    IDLE=$((IDLE + 1))
+  else
+    IDLE=0
+    cp "$RAW" "$PREV" 2>/dev/null
+  fi
+  if [ "$IDLE" = 0 ] || [ $((IDLE % 5)) = 0 ]; then
+    if [ "$ENC" = native ]; then
+      { stream_header; "$CONV" -F "$seq" "$W" "$H" < "$RAW"; } | send_bytes || {
+        if [ "$SINK" = 3 ]; then echo "emux-capture: push channel closed (Android side gone)" >&2; exit 0;
+        else echo "emux-capture: push of frame $seq FAILED (nc to $HOST:$PORT)" >&2; fi
+      }
+    else
+      { stream_header; u32le "$seq"; u16le "$W"; u16le "$H"; u16le 0; u16le 0; cat "$RAW"; } | send_bytes || {
+        if [ "$SINK" = 3 ]; then echo "emux-capture: push channel closed (Android side gone)" >&2; exit 0;
+        else echo "emux-capture: push of frame $seq FAILED (nc to $HOST:$PORT)" >&2; fi
+      }
+    fi
+  fi
   seq=$((seq+1))
-  sleep 0.1   # ~10 fps cap - plenty for a WM desktop, battery-friendly
+  [ "$IDLE" = 0 ] && sleep 0.1 || sleep 0.4
 done
