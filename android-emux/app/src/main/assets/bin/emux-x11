@@ -508,6 +508,14 @@ if x_up && [ "$APT_BRANCH" = 1 ]; then
           break
         fi
       done
+      # v0.2.14: a working desktop with no windows is a pure-black void
+      # (field: "for a moment there was a black desktop with nothing") -
+      # indistinguishable from a broken pipeline. Open one xterm so the
+      # session is visibly alive and input-testable.
+      if [ -x /usr/bin/xterm ] && [ ! -e /tmp/emux_xterm_launched ]; then
+        /usr/bin/xterm -geometry 96x28+60+40 >/tmp/xterm.log 2>&1 &
+        touch /tmp/emux_xterm_launched
+      fi
     fi
   ) >/dev/null 2>&1 &
 fi
