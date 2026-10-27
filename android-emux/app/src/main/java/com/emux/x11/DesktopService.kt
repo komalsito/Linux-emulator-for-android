@@ -458,22 +458,31 @@ class DesktopService(
                     (0..4).forEach { n -> java.io.File(rootfs, "tmp/.X11-unix/X$n").delete() }
                 }
                 killDesktopGuests()
-                // v0.1.89: prove :6000 is actually FREE before investing in a
-                // session; an orphan listener (previous visit's Xvfb) makes
-                // every guest attempt die with EADDRINUSE and poisons the
-                // control plane handshake. Re-sweep until free (12 s cap).
+                // v0.2.17 FIELD FIX: CONNECT, not bind, is the honest liveness
+                // test. A wildcard bind() with SO_REUSEADDR SUCCEEDS over a
+                // loopback-specific listener - which is why the host probe
+                // printed "tcp6000=true / port6000: free" for ten versions
+                // while the guest saw 6000 held, and why v0.2.16's verified
+                // adoption handshook with a zombie our own killDesktopGuests()
+                // was already tearing down (it still served xwd at :37, was
+                // gone by :52, and the session launched ZERO Xvfbs). After the
+                // kills, wait until nothing ANSWERS on the display port:
+                // silence = clean slate for the ladder; still answering = a
+                // live server we cannot kill = legitimate adoption.
                 var free = false
                 var sweeps = 0
-                while (!free && sweeps < 3) {
-                    free = runCatching { java.net.ServerSocket(6000 + displayNum).close(); true }.getOrElse { false }
+                while (!free && sweeps < 5) {
+                    free = !portAnswering(6000 + displayNum)
                     if (!free) {
                         sweeps++
-                        noteInfo("port6000 STILL HELD after sweep #$sweeps - re-sweeping")
+                        noteInfo("port6000 STILL ANSWERING after sweep #$sweeps - re-sweeping")
                         runCatching { killDesktopGuests() }
                         Thread.sleep(2_000)
                     }
                 }
-                noteInfo("port6000 state at session start: " + (if (free) "free" else "HELD (orphan survivor)"))
+                noteInfo("port6000 state at session start: " +
+                    (if (free) "silent (clean slate - ladder will launch)"
+                     else "ANSWERING (live server - adoption path)"))
 
                 // v0.1.101 MOBILE: the desktop geometry used to be
                 // fixed at 720x1280 portrait in emux-x11, whatever the
@@ -1010,6 +1019,16 @@ class DesktopService(
             com.emux.EmuXLog.i("killDesktopGuests done")
         }.onFailure { com.emux.EmuXLog.e("killDesktopGuests failed (non-fatal)", it) }
     }
+
+    /** v0.2.17: does anything actually ANSWER on this port? (connect, not
+     *  bind - bind cannot see loopback-specific listeners, see startDesktop.) */
+    private fun portAnswering(port: Int): Boolean = runCatching {
+        java.net.Socket().apply {
+            connect(java.net.InetSocketAddress("127.0.0.1", port), 300)
+            close()
+        }
+        true
+    }.getOrDefault(false)
 
     /** v0.1.59: one bounded attempt to reach the X server + handshake. */
     private suspend fun connectControlPlane(timeoutMs: Long): Boolean {
