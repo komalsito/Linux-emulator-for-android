@@ -413,6 +413,14 @@ else
   # unreliable as a gate on this device) the moment X is reachable.
   ( i=0
     while [ "$i" -lt 600 ]; do
+      # v0.2.20: follow display rotations/self-heal - re-read the published
+      # display number every tick instead of trusting the fork-time copy
+      # (a watcher pinned to a dead :0 never sets the marker and the
+      # capture gate then waits its full 180 s for nothing).
+      DNW=$(tr -dc '0-9' < /tmp/emux_display_num 2>/dev/null)
+      if [ -n "$DNW" ] && [ "$DNW" != "$DN" ]; then
+        DN="$DNW"; XP=$((6000 + DN))
+      fi
       if verify_x; then
         echo "watcher: X verified up at $(date +%T) on :$DN" >&2
         : > /tmp/emux_x_up 2>/dev/null; break
@@ -590,6 +598,22 @@ if ! verify_x; then
   echo "$DN" > /tmp/emux_display_num 2>/dev/null
   if [ -e /tmp/.X11-unix/X$DN ]; then export DISPLAY=:$DN; else export DISPLAY="127.0.0.1:$DN"; fi
   echo "emux-x11: session display now $DISPLAY (tcp $XP)" >&2
+  # v0.2.20: a server alone is not a desktop. The WM/xterm launches earlier
+  # in this script ran against the ghost display and died; relaunch them
+  # against the new one, and set the X-up marker so the capture gate does
+  # not wait 180 s for a watcher forked against the old display.
+  if verify_x; then
+    : > /tmp/emux_x_up 2>/dev/null
+    rm -f /tmp/emux_wm_launched /tmp/emux_xterm_launched 2>/dev/null
+    for c in "/usr/bin/$WM" /usr/bin/openbox; do
+      if [ -x "$c" ]; then "$c" >/tmp/wm.log 2>&1 & touch /tmp/emux_wm_launched; break; fi
+    done
+    if [ -x /usr/bin/xterm ] && [ ! -e /tmp/emux_xterm_launched ]; then
+      /usr/bin/xterm -geometry 96x28+60+40 >/tmp/xterm.log 2>&1 &
+      touch /tmp/emux_xterm_launched
+    fi
+    echo "emux-x11: self-heal complete - WM/xterm launched on $DISPLAY" >&2
+  fi
 fi
 # fail loudly with the captured log
 if ! x_up; then
