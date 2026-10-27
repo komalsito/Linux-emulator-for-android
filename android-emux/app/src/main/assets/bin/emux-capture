@@ -178,37 +178,49 @@ RAW=/tmp/emux_frame.rgb
 # v0.1.95: native converter (mawk on Debian/Ubuntu drops NUL bytes from awk
 # %c - black pixels are NULs - so the awk path desyncs the stream silently).
 CONV=/usr/local/lib/emux/emux-rgb565
-echo "emux-capture: converter=$([ -x "$CONV" ] && echo native || echo awk-fallback)" >&2
+echo "emux-capture: converter=$([ -x "$CONV" ] && echo native || echo fallback-chain)" >&2
 # v0.2.12 FIELD FIX: selftest the native converter at start, and fall back
-# LOUDLY. Field v0.2.11: grab+convert succeeded but the conv stage (or the
-# size check after it) failed with ZERO output - stderr went to /dev/null
-# and both paths returned silently, so the pane showed "grab retry #10"
-# with no stage line at all. Now: an 8-byte header selftest; on failure
-# prefer busybox awk (NUL-safe, verified v0.1.28 against busybox 1.36),
-# installing busybox on demand; mawk only as a last, loudly-warned resort
-# (it drops NUL bytes -> stream desync).
+# LOUDLY. v0.2.14 field round showed WHY the fallback matters even more
+# than expected: with the native converter dead, busybox awk encodes a
+# 1280x840 P3 (~3.2 M pixel tokens) in MANY SECONDS per frame - the
+# "black desktop for a moment" was a real frame arriving at ~0.05 fps.
+# v0.2.15: perl (perl-base is essential on Ubuntu/Debian, NUL-safe via
+# pack("v"), ~10x faster) becomes the middle fallback, and the native
+# selftest goes VERBOSE (rc + bytes + stderr) so the freestanding
+# binary's on-device failure can finally be diagnosed.
 AWKCMD="awk"
+ENC=none
+perl_encode() {
+  perl -e 'my $d=do{local $/;<STDIN>}; $d=~s/#[^\n]*//g; my @t=split /\s+/, $d; shift @t if @t and $t[0] eq "P3"; my($w,$h,$mx)=splice @t,0,3; $mx=255 unless $mx; my $o=""; for(my $i=0;$i+2<@t;$i+=3){ my $v=int($t[$i]*31/$mx)*2048+int($t[$i+1]*63/$mx)*32+int($t[$i+2]*31/$mx); $o.=pack("v",$v);} print $o;'
+}
 if [ -x "$CONV" ]; then
-  CS=$("$CONV" -s 4 4 2>/dev/null | wc -c)
+  CS=$("$CONV" -s 4 4 2>>/tmp/emux_cap.err | wc -c)
   echo "emux-capture: conv selftest header=$CS bytes (want 8)" >&2
-  if [ "$CS" != 8 ]; then
-    echo "emux-capture: conv selftest FAILED - dropping native converter" >&2
+  if [ "$CS" = 8 ]; then
+    ENC=native
+  else
+    "$CONV" -s 4 4 >/tmp/conv_probe.bin 2>/tmp/conv_probe.err
+    PRC=$?
+    echo "emux-capture: conv probe rc=$PRC bytes=$(wc -c < /tmp/conv_probe.bin 2>/dev/null) err=$(head -c 120 /tmp/conv_probe.err 2>/dev/null)" >&2
     CONV=""
   fi
 fi
-if [ ! -x "$CONV" ]; then
-  if command -v busybox >/dev/null 2>&1 && [ "$(busybox awk 'BEGIN{printf "%c",0}' | wc -c)" = 1 ]; then
-    AWKCMD="busybox awk"
-    echo "emux-capture: encoder = busybox awk (NUL-safe)" >&2
+if [ "$ENC" = none ]; then
+  if command -v perl >/dev/null 2>&1; then
+    ENC=perl
+    echo "emux-capture: encoder = perl (NUL-safe, fast)" >&2
+  elif command -v busybox >/dev/null 2>&1 && [ "$(busybox awk 'BEGIN{printf "%c",0}' | wc -c)" = 1 ]; then
+    ENC=busyboxawk; AWKCMD="busybox awk"
+    echo "emux-capture: encoder = busybox awk (NUL-safe, SLOW)" >&2
   else
-    echo "emux-capture: installing busybox for a NUL-safe awk encoder" >&2
     [ -x /usr/local/bin/emux-apt-repair ] && emux-apt-repair >&2 || true
     DEBIAN_FRONTEND=noninteractive apt-get install -y busybox >&2 || apk add --no-cache busybox >&2 || true
     if command -v busybox >/dev/null 2>&1; then
-      AWKCMD="busybox awk"
-      echo "emux-capture: encoder = busybox awk (installed)" >&2
+      ENC=busyboxawk; AWKCMD="busybox awk"
+      echo "emux-capture: encoder = busybox awk (installed, SLOW)" >&2
     else
-      echo "emux-capture: WARNING - mawk awk fallback (NUL pixels may desync)" >&2
+      ENC=awk
+      echo "emux-capture: WARNING - mawk fallback (NUL pixels may desync)" >&2
     fi
   fi
 fi
@@ -256,13 +268,15 @@ grab_frame() {
     "$PNM" <"$GX" 2>>/tmp/emux_cap.err >"$TMPF" || { echo "emux-capture: stage pnmtoplainpnm FAILED" >&2; return 1; }
   fi
   [ -s "$TMPF" ] || { echo "emux-capture: stage convert produced EMPTY PNM" >&2; return 1; }
-  if [ -x "$CONV" ]; then
+  if [ "$ENC" = native ]; then
     "$CONV" < "$TMPF" > "$RAW" 2>>/tmp/emux_cap.err
     VRC=$?
     if [ "$VRC" != 0 ]; then
       echo "emux-capture: stage conv (emux-rgb565) FAILED rc=$VRC" >&2
       return 1
     fi
+  elif [ "$ENC" = perl ]; then
+    perl_encode < "$TMPF" > "$RAW" 2>>/tmp/emux_cap.err || { echo "emux-capture: stage perl-conv FAILED" >&2; return 1; }
   else
   $AWKCMD '
     BEGIN{ st=0; hn=0; px=0; MX=255 }
@@ -342,7 +356,7 @@ stream_header() {
   # EXACTLY 8 bytes. v0.1.96: from C when available - dash printf TRUNCATES
   # the format string at the first NUL (1280 = 0x0500 -> u16le starts with
   # 0x00), so the shell path sent a 6-byte header and desynced the reader.
-  if [ -x "$CONV" ]; then "$CONV" -s "$W" "$H"; else printf EMUX; u16le "$W"; u16le "$H"; fi
+  if [ "$ENC" = native ]; then "$CONV" -s "$W" "$H"; else printf EMUX; u16le "$W"; u16le "$H"; fi
 }
 
 seq=0
@@ -368,7 +382,7 @@ while :; do
     [ "$MM" -le 3 ] && echo "emux-capture: size mismatch raw=$RB want=$((W*H*2)) (W=$W H=$H)" >&2
     sleep 0.3; continue
   fi
-  if [ -x "$CONV" ]; then
+  if [ "$ENC" = native ]; then
     { stream_header; "$CONV" -F "$seq" "$W" "$H" < "$RAW"; } | send_bytes || {
       if [ "$SINK" = 3 ]; then echo "emux-capture: push channel closed (Android side gone)" >&2; exit 0;
       else echo "emux-capture: push of frame $seq FAILED (nc to $HOST:$PORT)" >&2; fi
