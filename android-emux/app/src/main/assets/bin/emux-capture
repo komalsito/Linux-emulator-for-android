@@ -179,6 +179,39 @@ RAW=/tmp/emux_frame.rgb
 # %c - black pixels are NULs - so the awk path desyncs the stream silently).
 CONV=/usr/local/lib/emux/emux-rgb565
 echo "emux-capture: converter=$([ -x "$CONV" ] && echo native || echo awk-fallback)" >&2
+# v0.2.12 FIELD FIX: selftest the native converter at start, and fall back
+# LOUDLY. Field v0.2.11: grab+convert succeeded but the conv stage (or the
+# size check after it) failed with ZERO output - stderr went to /dev/null
+# and both paths returned silently, so the pane showed "grab retry #10"
+# with no stage line at all. Now: an 8-byte header selftest; on failure
+# prefer busybox awk (NUL-safe, verified v0.1.28 against busybox 1.36),
+# installing busybox on demand; mawk only as a last, loudly-warned resort
+# (it drops NUL bytes -> stream desync).
+AWKCMD="awk"
+if [ -x "$CONV" ]; then
+  CS=$("$CONV" -s 4 4 2>/dev/null | wc -c)
+  echo "emux-capture: conv selftest header=$CS bytes (want 8)" >&2
+  if [ "$CS" != 8 ]; then
+    echo "emux-capture: conv selftest FAILED - dropping native converter" >&2
+    CONV=""
+  fi
+fi
+if [ ! -x "$CONV" ]; then
+  if command -v busybox >/dev/null 2>&1 && [ "$(busybox awk 'BEGIN{printf "%c",0}' | wc -c)" = 1 ]; then
+    AWKCMD="busybox awk"
+    echo "emux-capture: encoder = busybox awk (NUL-safe)" >&2
+  else
+    echo "emux-capture: installing busybox for a NUL-safe awk encoder" >&2
+    [ -x /usr/local/bin/emux-apt-repair ] && emux-apt-repair >&2 || true
+    DEBIAN_FRONTEND=noninteractive apt-get install -y busybox >&2 || apk add --no-cache busybox >&2 || true
+    if command -v busybox >/dev/null 2>&1; then
+      AWKCMD="busybox awk"
+      echo "emux-capture: encoder = busybox awk (installed)" >&2
+    else
+      echo "emux-capture: WARNING - mawk awk fallback (NUL pixels may desync)" >&2
+    fi
+  fi
+fi
 
 grab_frame() {
   # v0.1.60: XWD -> (xwdtopnm) -> plain PNM; the middle step is mandatory
@@ -224,9 +257,14 @@ grab_frame() {
   fi
   [ -s "$TMPF" ] || { echo "emux-capture: stage convert produced EMPTY PNM" >&2; return 1; }
   if [ -x "$CONV" ]; then
-    "$CONV" < "$TMPF" > "$RAW" 2>/dev/null || return 1
+    "$CONV" < "$TMPF" > "$RAW" 2>>/tmp/emux_cap.err
+    VRC=$?
+    if [ "$VRC" != 0 ]; then
+      echo "emux-capture: stage conv (emux-rgb565) FAILED rc=$VRC" >&2
+      return 1
+    fi
   else
-  awk '
+  $AWKCMD '
     BEGIN{ st=0; hn=0; px=0; MX=255 }
     /^#/{ next }
     {
@@ -247,9 +285,9 @@ grab_frame() {
           px=0
         }
       }
-    }' "$TMPF" > "$RAW" 2>/dev/null || return 1
+    }' "$TMPF" > "$RAW" 2>>/tmp/emux_cap.err || { echo "emux-capture: stage awk-conv FAILED" >&2; return 1; }
   fi
-  [ -s "$RAW" ] || return 1
+  [ -s "$RAW" ] || { echo "emux-capture: stage conv produced EMPTY rgb" >&2; return 1; }
   return 0
 }
 
@@ -303,6 +341,7 @@ fi
 
 seq=0
 fails=0
+MM=0
 while :; do
   if ! grab_frame; then
     fails=$((fails+1))
@@ -314,14 +353,24 @@ while :; do
     sleep 0.3; continue
   fi
   fails=0
-  if [ "$(wc -c < "$RAW")" -ne $((W*H*2)) ]; then sleep 0.3; continue; fi
+  # v0.2.12: the old size check `continue`d SILENTLY - a second way a
+  # bad conv could read as a mystery retry loop. First three mismatches
+  # now say so with both sizes.
+  RB=$(wc -c < "$RAW")
+  if [ "$RB" -ne $((W*H*2)) ]; then
+    MM=$((MM + 1))
+    [ "$MM" -le 3 ] && echo "emux-capture: size mismatch raw=$RB want=$((W*H*2)) (W=$W H=$H)" >&2
+    sleep 0.3; continue
+  fi
   if [ -x "$CONV" ]; then
     "$CONV" -F "$seq" "$W" "$H" < "$RAW" | send_bytes || {
-      [ "$SINK" = 3 ] && { echo "emux-capture: push channel closed (Android side gone)" >&2; exit 0; }
+      if [ "$SINK" = 3 ]; then echo "emux-capture: push channel closed (Android side gone)" >&2; exit 0;
+      else echo "emux-capture: push of frame $seq FAILED (nc to $HOST:$PORT)" >&2; fi
     }
   else
   { u32le "$seq"; u16le "$W"; u16le "$H"; u16le 0; u16le 0; cat "$RAW"; } | send_bytes || {
-    [ "$SINK" = 3 ] && { echo "emux-capture: push channel closed (Android side gone)" >&2; exit 0; }
+    if [ "$SINK" = 3 ]; then echo "emux-capture: push channel closed (Android side gone)" >&2; exit 0;
+    else echo "emux-capture: push of frame $seq FAILED (nc to $HOST:$PORT)" >&2; fi
   }
   fi
   if [ "$seq" = 0 ]; then echo "emux-capture: frame 1 pushed ($(wc -c < "$RAW") bytes)" >&2; fi
