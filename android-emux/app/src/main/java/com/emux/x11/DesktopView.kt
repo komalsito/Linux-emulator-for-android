@@ -124,15 +124,20 @@ class DesktopView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attrs) 
                 val pOk = Paint().apply { color = Color.argb(0xE0, 0x66, 0xBB, 0x6A); textSize = sp(11f) }
                 val pBad = Paint().apply { color = Color.argb(0xE0, 0xEF, 0x53, 0x50); textSize = sp(11f) }
                 // v0.2.3: FULL scrollable history (was: fixed takeLast(16)).
-                val lines = err.lines().filter { it.isNotBlank() }.take(400)
+                // v0.2.26 FIELD FIX: NEWEST FIRST. Sticky-bottom still lost
+                // to trackpad drags in the field - every screenshot kept
+                // showing the session-top selfcheck blocks while the live
+                // lines hid below. Reversing the order makes scroll offset 0
+                // (the default, any drag state, any screenshot) show the
+                // freshest diagnostics; scrolling walks back in time.
+                val lines = err.lines().filter { it.isNotBlank() }.take(400).asReversed()
                 val lineH = 24f
                 val startY = height / 2f + 36f
                 val avail = height - startY - sp(14f)
                 val contentH = lines.size * lineH
                 val maxScroll = max(0f, contentH - avail)
                 histMaxScroll = maxScroll
-                if (histStickBottom) histScrollPx = maxScroll
-                histScrollPx = histScrollPx.coerceIn(0f, maxScroll)
+                histScrollPx = histScrollPx.coerceIn(0f, maxScroll)   // 0 = newest
                 histScrollable = maxScroll > 0f
                 val first = (histScrollPx / lineH).toInt().coerceIn(0, max(0, lines.size - 1))
                 val visible = (avail / lineH).toInt() + 2
@@ -149,8 +154,7 @@ class DesktopView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attrs) 
                 if (histScrollable) {
                     val hint = Paint().apply { color = Color.argb(0x90, 0xFF, 0xFF, 0xFF); textSize = sp(10f) }
                     canvas.drawText(
-                        (if (histStickBottom) "lines ${first + 1}..$last of ${lines.size} - drag up to read history"
-                         else "SCROLLED - drag down to return to live lines ${first + 1}..$last of ${lines.size}"),
+                        "NEWEST first (lines ${first + 1}..$last of ${lines.size}) - drag to walk back in time",
                         24f, height - sp(6f), hint)
                 }
             } else {
@@ -241,10 +245,6 @@ class DesktopView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attrs) 
                 if (frameless && !multiTouch) {
                     histScrollPx += lastHistY - event.y
                     lastHistY = event.y
-                    // release the pin when the user reads history; re-pin
-                    // when they scroll back to within one line of bottom.
-                    if (histStickBottom && histScrollPx < histMaxScroll - 24f) histStickBottom = false
-                    if (!histStickBottom && histScrollPx >= histMaxScroll - 24f) histStickBottom = true
                     histScrollPx = histScrollPx.coerceIn(0f, histMaxScroll)
                     invalidate()
                     return true

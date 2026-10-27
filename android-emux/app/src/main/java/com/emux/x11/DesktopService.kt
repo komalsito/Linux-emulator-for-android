@@ -740,28 +740,28 @@ class DesktopService(
                 // loudly instead of sitting at "waiting for X frames"
                 // forever. The tab can then be retried (IDLE/ERROR restart).
                 scope.launch {
-                    var seenAwaiting = false
+                    // v0.2.26 FIELD FIX: count frameless time FROM SESSION
+                    // START, not from AWAITING_FRAMES. The old coroutine only
+                    // ticked once the 60 s control-plane wait had finished,
+                    // so a session stuck in STARTING_X never armed the dump
+                    // or the deadline (field v0.2.25: Terminal showed no
+                    // auto-dump at ~80 s because the timer had not begun).
                     var waited = 0L
                     while (isActive && state.value != State.IDLE &&
                         state.value != State.ERROR && state.value != State.CONNECTED) {
-                        if (state.value == State.AWAITING_FRAMES) {
-                            seenAwaiting = true
-                            waited += 1_000
-                            if (frameId > 0) return@launch
-                            // v0.2.22 FIELD FIX: the pane history outgrew the
-                            // screen and users could only ever screenshot its
-                            // top, so session outcomes kept hiding below the
-                            // fold. Mirror the diagnostics into the TERMINAL
-                            // tab (which reads linearly) at 60 s and on give-
-                            // up - no typing, no scrolling, one screenshot.
-                            if (waited == 60_000L) dumpDiagBundleToTerminal()
-                            if (waited >= 120_000) {
-                                dumpDiagBundleToTerminal()
-                                setError("no desktop frames in 120s after X was ready — capture may have died; tap Desktop again to retry (diag dumped to Terminal)")
-                                state.value = State.ERROR
-                                return@launch
-                            }
-                        } else if (seenAwaiting) {
+                        waited += 1_000
+                        if (frameId > 0) return@launch
+                        // v0.2.22: mirror the diagnostics into the TERMINAL
+                        // tab (which reads linearly) - no typing, no
+                        // scrolling, one screenshot.
+                        if (waited == 60_000L) {
+                            noteInfo("diag: 60s frameless - bundle dumped to Terminal tab")
+                            dumpDiagBundleToTerminal()
+                        }
+                        if (waited >= 150_000L) {
+                            dumpDiagBundleToTerminal()
+                            setError("no desktop frames in 150s - full diagnostics auto-dumped to the Terminal tab; tap Desktop to retry")
+                            state.value = State.ERROR
                             return@launch
                         }
                         delay(1_000)
