@@ -609,6 +609,7 @@ class DesktopService(
                                 " | log1: " + first3("tmp/xvfb.log.1") +
                                 " | log: " + first3("tmp/xvfb.log")).take(500)
                             noteInfo(pm)
+                            dumpDiagBundleToTerminal()   // v0.2.22: mirror to Terminal
                             setError(
                                 ("X server exited (code ${xSession?.exitCode}). " + tails +
                                     if (xlog.isNotBlank()) " || xvfb.log: $xlog" else "").take(500))
@@ -725,6 +726,7 @@ class DesktopService(
                                 val tails = diag["capture"]?.toString()?.lineSequence()
                                     ?.filter { it.isNotBlank() }?.toList()?.takeLast(4)
                                     ?.joinToString(" | ") ?: ""
+                                dumpDiagBundleToTerminal()   // v0.2.22: mirror to Terminal
                                 setError(("capture helper exited (code ${cur.exitCode}). " + tails).take(500))
                                 state.value = State.ERROR
                                 break
@@ -746,8 +748,16 @@ class DesktopService(
                             seenAwaiting = true
                             waited += 1_000
                             if (frameId > 0) return@launch
+                            // v0.2.22 FIELD FIX: the pane history outgrew the
+                            // screen and users could only ever screenshot its
+                            // top, so session outcomes kept hiding below the
+                            // fold. Mirror the diagnostics into the TERMINAL
+                            // tab (which reads linearly) at 60 s and on give-
+                            // up - no typing, no scrolling, one screenshot.
+                            if (waited == 60_000L) dumpDiagBundleToTerminal()
                             if (waited >= 120_000) {
-                                setError("no desktop frames in 120s after X was ready — capture may have died; tap Desktop again to retry")
+                                dumpDiagBundleToTerminal()
+                                setError("no desktop frames in 120s after X was ready — capture may have died; tap Desktop again to retry (diag dumped to Terminal)")
                                 state.value = State.ERROR
                                 return@launch
                             }
