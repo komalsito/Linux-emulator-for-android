@@ -122,7 +122,17 @@ int raise(int sig) { (void)sig; return 0; }
 
 /* freestanding entry: pull argc/argv off the stack per ABI, then call C. */
 #if defined(__aarch64__)
-__asm__(".globl _start\n_start:\n\tldp x0, x1, [sp]\n\tb _start_c\n");
+/* v0.2.23 CRITICAL FIX: the old aarch64 _start did `ldp x0, x1, [sp]`,
+ * which loads x1 = [sp+8] = argv[0] - the FIRST ELEMENT - instead of the
+ * address of the argv array (&argv[0] = sp+8). Every argv[1..] access
+ * then dereferenced the argument STRINGS as a pointer table, so the
+ * -s/-F header modes SIGSEGV'd on every arm64 device (qemu-verified:
+ * si_addr was the ASCII bytes "565\0-s\0" of the command line itself),
+ * while the no-arg convert mode worked because it never touches argv.
+ * This is why the native converter selftest failed on the field device
+ * since the day it shipped and the frame path fell back to slow awk.
+ * Matches the arm32/x86_64/i386 forms, which were always correct. */
+__asm__(".globl _start\n_start:\n\tldr x0, [sp]\n\tadd x1, sp, #8\n\tb _start_c\n");
 #elif defined(__arm__)
 __asm__(".globl _start\n_start:\n\tldr r0, [sp]\n\tadd r1, sp, #4\n\tb _start_c\n");
 #elif defined(__x86_64__)
