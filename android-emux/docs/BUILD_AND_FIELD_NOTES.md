@@ -28,3 +28,21 @@
 - **v0.2.20 / vc120** — watcher re-reads `/tmp/emux_display_num` every tick (follows
   rotations/self-heal); self-heal completes the desktop: sets the X-up marker and
   relaunches WM + xterm against the new display (earlier launches died on the ghost).
+- **v0.2.21 / vc121** — sticky-bottom pane: the v0.2.3 scroll opened at the TOP of the
+  history, so once the ring outgrew the screen every screenshot showed ancient lines.
+  Now pinned to newest by default; drag up to read, back down to re-pin.
+- **v0.2.22 / vc122** — auto diag dumps: the diagnostics bundle is mirrored into the
+  Terminal tab at 60 s of frameless waiting, at the 120 s give-up, and on x11/capture
+  post-mortems. No typing or scrolling needed to collect field evidence.
+- **v0.2.23 / vc123** — THE signal 11, root-caused offline under qemu-user: the aarch64
+  `emux-rgb565` `_start` did `ldp x0, x1, [sp]`, loading argv[0] (the first element)
+  instead of &argv[0]; every argv[1..] access dereferenced the argument strings as a
+  pointer table (fault address = ASCII `565\0-s\0` of its own cmdline). Only -s/-F
+  modes touch argv, so the no-arg convert worked while the selftest and frame headers
+  SIGSEGV'd on every arm64 device since day one - the native encoder was dead on
+  arrival and all rounds fell back to slow awk/perl. Fixed to
+  `ldr x0, [sp]; add x1, sp, #8`; all four ABIs rebuilt and qemu-verified byte-exact.
+- **v0.2.24 / vc124** — per-frame EOF is normal: in per-frame nc mode every frame ends
+  its connection; the v0.2.7 re-accept catch logged a note and slept 500 ms per EOF
+  (~2 fps cap + flooded pane once the native encoder runs at 10 fps). EOF after >=1
+  decoded frame now re-accepts immediately and silently.

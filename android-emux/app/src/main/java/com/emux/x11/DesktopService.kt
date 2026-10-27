@@ -1164,6 +1164,15 @@ class DesktopService(
           // closes and the next helper connection is accepted, until stop.
           while (isActive) {
             var sock: Socket? = null
+            // v0.2.24 FIELD FIX: count frames per connection. In per-frame
+            // nc mode (the only mode since the v0.2.9 FIFO removal) EVERY
+            // frame ends its connection with EOF, and the v0.2.7 re-accept
+            // catch treated each of those as a stream death: a history
+            // note PLUS a 500 ms pause per frame - ~2 fps and a flooded
+            // pane the instant the (v0.2.23-fixed) native encoder starts
+            // pushing at 10 fps. EOF after >=1 frame is now the NORMAL
+            // per-frame handshake: re-accept immediately, stay silent.
+            var framesOnConn = 0
             try {
                 sock = listener!!.accept()          // blocks until helper connects
                 activeSock = sock                   // v0.1.54: closable from stop()
@@ -1207,6 +1216,7 @@ class DesktopService(
                     }
                     writeDirtyRegion(dx, dy, dw, dh, rows)
                     frameId++
+                    framesOnConn++
                     // v0.1.100: CONNECTED means "a frame was decoded",
                     // not "the reader was launched".
                     if (state.value == State.AWAITING_FRAMES) state.value = State.CONNECTED
@@ -1230,8 +1240,10 @@ class DesktopService(
                 runCatching { sock?.close() }
                 if (activeSock === sock) activeSock = null
                 if (!isActive || state.value == State.IDLE || state.value == State.ERROR) break
-                noteInfo("frame stream ended - waiting for the next capture connection")
-                kotlinx.coroutines.delay(500)
+                if (framesOnConn == 0) {
+                    noteInfo("frame stream ended - waiting for the next capture connection")
+                    kotlinx.coroutines.delay(500)
+                }
                 continue
             } finally {
                 runCatching { sock?.close() }
