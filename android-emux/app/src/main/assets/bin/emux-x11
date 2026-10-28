@@ -65,6 +65,7 @@ running() {
 # the REST pass right after install AND from the visibility watchdog, so
 # panel/icons/menu appear live without waiting for a session restart.
 start_furniture() {
+  seed_desktop_config
   if [ -x /usr/bin/tint2 ] && ! running tint2; then
     echo "emux-x11: starting tint2 panel" >&2
     nohup /usr/bin/tint2 >/tmp/tint2.log 2>&1 </dev/null &
@@ -73,11 +74,296 @@ start_furniture() {
     echo "emux-x11: starting pcmanfm desktop (icons)" >&2
     nohup /usr/bin/pcmanfm --desktop >/tmp/pcmanfm.log 2>&1 </dev/null &
   fi
-  if [ -e /var/lib/openbox/debian-menu.xml ] && [ ! -e /tmp/emux_obx_reconf ]; then
-    echo "emux-x11: menu db present - openbox --reconfigure" >&2
+  if [ -e "$HOME/.config/openbox/menu.xml" ] && [ ! -e /tmp/emux_obx_reconf ]; then
+    echo "emux-x11: menu present - openbox --reconfigure" >&2
     touch /tmp/emux_obx_reconf
     command -v openbox >/dev/null 2>&1 && openbox --reconfigure >/dev/null 2>&1 &
   fi
+  # v0.2.45: first-run welcome, once ever. A GUI desktop needs an on-screen
+  # explanation, not a terminal prompt: how to double-click icons, use the
+  # bottom bar, and right-click for the full menu. Mousepad only; if the
+  # editor is missing, skip silently rather than falling back to a terminal.
+  if [ ! -e "$HOME/.config/emux-desktop-welcomed" ] && [ -x /usr/bin/mousepad ] \
+     && [ -e "$HOME/Desktop/Welcome.txt" ]; then
+    touch "$HOME/.config/emux-desktop-welcomed" 2>/dev/null
+    nohup /usr/bin/mousepad "$HOME/Desktop/Welcome.txt" >/tmp/mousepad.log 2>&1 </dev/null &
+  fi
+}
+# v0.2.45: FULL VISUAL DESKTOP CONFIG, seeded by the script itself.
+# Why this exists: v0.2.37-0.2.44 installed tint2 + pcmanfm but shipped
+# NO config for them, so what the user actually got depended on distro
+# defaults: a bare tint2 panel (or none, if the REST apt pass failed),
+# an empty pcmanfm desktop (~/Desktop had no icons), and a Debian
+# openbox menu that was often empty. That is exactly the field report:
+# "some versions show a terminal, others a black screen" - the only
+# window guaranteed on every version was the forced xterm, and a bare
+# openbox root window with no panel/icons reads as a black screen.
+# This function writes, idempotently, the four pieces that make it a
+# desktop instead of a root window: (1) .desktop launchers for the apps
+# that are actually installed, in ~/.local/share/applications and on
+# ~/Desktop, (2) a tint2 panel config: bottom bar, app launchers on the
+# left, running tasks in the middle, tray + clock on the right,
+# (3) an Openbox right-click menu with the same apps, and (4) an
+# openbox autostart that brings the panel + icons up with the WM.
+# Launchers/menu entries are built ONLY for binaries present on disk,
+# and the tint2 config is rewritten only when the installed-app set
+# changes, so a later REST install adds its icons live (start_furniture
+# calls this) without clobbering a hand-edited config on every open.
+seed_desktop_config() {
+  mkdir -p "$HOME/.local/share/applications" "$HOME/Desktop" \
+    "$HOME/.config/tint2" "$HOME/.config/openbox" "$HOME/.config/pcmanfm/default" 2>/dev/null
+  # --- .desktop launchers (only for installed apps) ---
+  APPS=""
+  if [ -x /usr/bin/xterm ]; then
+    cat > "$HOME/.local/share/applications/emux-terminal.desktop" <<'EOF'
+[Desktop Entry]
+Type=Application
+Name=Terminal
+Comment=Terminal (only if you need it - the desktop itself is graphical)
+Exec=xterm
+Icon=utilities-terminal
+Categories=System;TerminalEmulator;
+EOF
+    APPS="$APPS terminal"
+  fi
+  if [ -x /usr/bin/pcmanfm ]; then
+    cat > "$HOME/.local/share/applications/emux-files.desktop" <<'EOF'
+[Desktop Entry]
+Type=Application
+Name=Files
+Comment=Browse files, folders and drives
+Exec=pcmanfm
+Icon=system-file-manager
+Categories=System;FileManager;
+EOF
+    APPS="$APPS files"
+  fi
+  if [ -x /usr/bin/mousepad ]; then
+    cat > "$HOME/.local/share/applications/emux-editor.desktop" <<'EOF'
+[Desktop Entry]
+Type=Application
+Name=Text Editor
+Comment=Write and edit text files
+Exec=mousepad
+Icon=accessories-text-editor
+Categories=Utility;TextEditor;
+EOF
+    APPS="$APPS editor"
+  fi
+  if [ -x /usr/bin/galculator ]; then
+    cat > "$HOME/.local/share/applications/emux-calculator.desktop" <<'EOF'
+[Desktop Entry]
+Type=Application
+Name=Calculator
+Exec=galculator
+Icon=accessories-calculator
+Categories=Utility;Calculator;
+EOF
+    APPS="$APPS calculator"
+  fi
+  BROWSER=""
+  for b in firefox chromium chromium-browser google-chrome; do
+    if command -v "$b" >/dev/null 2>&1; then BROWSER="$b"; break; fi
+  done
+  if [ -n "$BROWSER" ]; then
+    cat > "$HOME/.local/share/applications/emux-browser.desktop" <<EOF
+[Desktop Entry]
+Type=Application
+Name=Web Browser
+Exec=$BROWSER
+Icon=web-browser
+Categories=Network;WebBrowser;
+EOF
+    APPS="$APPS browser"
+  fi
+  for f in "$HOME"/.local/share/applications/emux-*.desktop; do
+    [ -e "$f" ] || continue
+    cp "$f" "$HOME/Desktop/" 2>/dev/null
+    chmod +x "$f" "$HOME/Desktop/$(basename "$f")" 2>/dev/null
+  done
+  # --- Welcome text (desktop icon, opened once by start_furniture) ---
+  if [ ! -e "$HOME/Desktop/Welcome.txt" ]; then
+    cat > "$HOME/Desktop/Welcome.txt" <<'EOF'
+Welcome to your EmuX desktop!
+
+This is a visual desktop, not just a terminal:
+- Double-click an icon on the desktop to open it (Files, Text Editor,
+  Calculator, Web Browser if one is installed).
+- The bar at the bottom is the taskbar: app icons on the left, your
+  open windows in the middle, the clock on the right.
+- Right-click anywhere on the desktop for the full menu (all apps,
+  Restart Openbox if a window ever misbehaves).
+- Tap the Terminal icon only when you actually want a terminal.
+  Closing it does not close the desktop - the bar and icons stay.
+
+If the bar or icons are ever missing, close the Desktop tab and
+open it again: the desktop re-seeds its panel, menu and icons on
+every start, and the log is in the Terminal tab.
+EOF
+  fi
+  # --- tint2 panel config (bottom bar, launchers + tasks + tray + clock) ---
+  STAMP="$HOME/.config/tint2/.emux-apps"
+  OLD_APPS=""
+  [ -e "$STAMP" ] && OLD_APPS=$(cat "$STAMP" 2>/dev/null)
+  if [ ! -e "$HOME/.config/tint2/tint2rc" ] || [ "$APPS" != "$OLD_APPS" ]; then
+    if [ -e "$HOME/.config/tint2/tint2rc" ] && ! grep -q "EmuX" "$HOME/.config/tint2/tint2rc" 2>/dev/null; then
+      cp "$HOME/.config/tint2/tint2rc" "$HOME/.config/tint2/tint2rc.emux-bak" 2>/dev/null
+    fi
+    {
+      echo "# EmuX tint2 panel (v0.2.45) - bottom taskbar"
+      echo "rounded = 0"
+      echo "border_width = 0"
+      echo "background_color = #222222 100"
+      echo "border_color = #222222 100"
+      echo "rounded = 0"
+      echo "border_width = 0"
+      echo "background_color = #3a6ea5 100"
+      echo "border_color = #3a6ea5 100"
+      echo "panel_items = LTSBC"
+      echo "panel_monitor = all"
+      echo "panel_position = bottom center horizontal"
+      echo "panel_size = 100% 40"
+      echo "panel_margin = 0 0"
+      echo "panel_padding = 2 2 4"
+      echo "panel_background_id = 1"
+      echo "wm_menu = 1"
+      echo "panel_layer = top"
+      echo "taskbar_mode = single_desktop"
+      echo "taskbar_padding = 2 2 2"
+      echo "taskbar_background_id = 0"
+      echo "task_icon = 1"
+      echo "task_text = 1"
+      echo "task_maximum_size = 200 40"
+      echo "task_padding = 6 2"
+      echo "task_font = sans 10"
+      echo "task_font_color = #ffffff 100"
+      echo "task_active_font_color = #ffffff 100"
+      echo "task_background_id = 0"
+      echo "task_active_background_id = 2"
+      echo "launcher_padding = 2 2 2"
+      echo "launcher_background_id = 0"
+      echo "launcher_icon_size = 28"
+      echo "launcher_icon_theme = hicolor"
+      for a in $APPS; do
+        case "$a" in
+          terminal) echo "launcher_item_app = $HOME/.local/share/applications/emux-terminal.desktop" ;;
+          files) echo "launcher_item_app = $HOME/.local/share/applications/emux-files.desktop" ;;
+          editor) echo "launcher_item_app = $HOME/.local/share/applications/emux-editor.desktop" ;;
+          calculator) echo "launcher_item_app = $HOME/.local/share/applications/emux-calculator.desktop" ;;
+          browser) echo "launcher_item_app = $HOME/.local/share/applications/emux-browser.desktop" ;;
+        esac
+      done
+      echo "systray = 1"
+      echo "systray_padding = 2 4 2"
+      echo "systray_background_id = 0"
+      echo "systray_icon_size = 20"
+      echo "time1_format = %H:%M"
+      echo "time1_font = sans 11"
+      echo "time2_format = %a %d %b"
+      echo "time2_font = sans 8"
+      echo "clock_font_color = #ffffff 100"
+      echo "clock_padding = 6 0"
+    } > "$HOME/.config/tint2/tint2rc" 2>/dev/null
+    echo "$APPS" > "$STAMP" 2>/dev/null
+  fi
+  # --- Openbox right-click menu (same apps, plus WM controls) ---
+  if [ ! -e "$HOME/.config/openbox/menu.xml" ] || grep -q "EmuX" "$HOME/.config/openbox/menu.xml" 2>/dev/null; then
+    {
+      echo '<?xml version="1.0" encoding="UTF-8"?>'
+      echo '<openbox_menu xmlns="http://openbox.org/3.4/menu">'
+      echo '<menu id="root-menu" label="EmuX">'
+      [ -x /usr/bin/xterm ] && echo '  <item label="Terminal"><action name="Execute"><command>xterm</command></action></item>'
+      [ -x /usr/bin/pcmanfm ] && echo '  <item label="Files"><action name="Execute"><command>pcmanfm</command></action></item>'
+      [ -x /usr/bin/mousepad ] && echo '  <item label="Text Editor"><action name="Execute"><command>mousepad</command></action></item>'
+      [ -x /usr/bin/galculator ] && echo '  <item label="Calculator"><action name="Execute"><command>galculator</command></action></item>'
+      [ -n "$BROWSER" ] && echo "  <item label=\"Web Browser\"><action name=\"Execute\"><command>$BROWSER</command></action></item>"
+      [ -x /usr/bin/mousepad ] && echo "  <item label=\"Desktop Help\"><action name=\"Execute\"><command>mousepad $HOME/Desktop/Welcome.txt</command></action></item>"
+      echo '  <separator/>'
+      echo '  <item label="Restart Openbox"><action name="Restart"/></item>'
+      echo '  <item label="Reconfigure Openbox"><action name="Reconfigure"/></item>'
+      echo '</menu>'
+      echo '</openbox_menu>'
+    } > "$HOME/.config/openbox/menu.xml" 2>/dev/null
+  elif [ -e "$HOME/.config/openbox/menu.xml" ]; then
+    cp "$HOME/.config/openbox/menu.xml" "$HOME/.config/openbox/menu.xml.emux-bak" 2>/dev/null
+    {
+      echo '<?xml version="1.0" encoding="UTF-8"?>'
+      echo '<!-- EmuX menu (v0.2.45): previous menu backed up to menu.xml.emux-bak -->'
+      echo '<openbox_menu xmlns="http://openbox.org/3.4/menu">'
+      echo '<menu id="root-menu" label="EmuX">'
+      [ -x /usr/bin/xterm ] && echo '  <item label="Terminal"><action name="Execute"><command>xterm</command></action></item>'
+      [ -x /usr/bin/pcmanfm ] && echo '  <item label="Files"><action name="Execute"><command>pcmanfm</command></action></item>'
+      [ -x /usr/bin/mousepad ] && echo '  <item label="Text Editor"><action name="Execute"><command>mousepad</command></action></item>'
+      [ -x /usr/bin/galculator ] && echo '  <item label="Calculator"><action name="Execute"><command>galculator</command></action></item>'
+      [ -n "$BROWSER" ] && echo "  <item label=\"Web Browser\"><action name=\"Execute\"><command>$BROWSER</command></action></item>"
+      echo '  <separator/>'
+      echo '  <item label="Restart Openbox"><action name="Restart"/></item>'
+      echo '</menu>'
+      echo '</openbox_menu>'
+    } > "$HOME/.config/openbox/menu.xml" 2>/dev/null
+  fi
+  # --- pcmanfm desktop background (only if pcmanfm has never run: a
+  # non-black background is the cheapest proof the desktop, not just X,
+  # is up; if pcmanfm later fails, xsetroot below still colours it) ---
+  if [ ! -e "$HOME/.config/pcmanfm/default/pcmanfm.conf" ]; then
+    {
+      echo "[desktop]"
+      echo "wallpaper_mode=0"
+      echo "desktop_bg=#20344d"
+      echo "desktop_fg=#ffffff"
+      echo "desktop_shadow=1"
+    } > "$HOME/.config/pcmanfm/default/pcmanfm.conf" 2>/dev/null
+  fi
+  # --- Openbox autostart: panel + icons with the WM, once per version ---
+  OBX="$HOME/.config/openbox"
+  if [ ! -e "$OBX/autostart" ]; then
+    {
+      echo "# EmuX desktop v0.2.45"
+      echo "(command -v xsetroot >/dev/null 2>&1 && xsetroot -solid \"#20344d\") &"
+      echo "tint2 >/dev/null 2>&1 &"
+      echo "pcmanfm --desktop >/dev/null 2>&1 &"
+    } > "$OBX/autostart" 2>/dev/null
+  elif ! grep -q "EmuX desktop v0.2.45" "$OBX/autostart" 2>/dev/null; then
+    if grep -q "EmuX seeded autostart" "$OBX/autostart" 2>/dev/null; then
+      # Old seeded autostart already launches tint2 + pcmanfm: only add
+      # the coloured background, never a second panel/desktop.
+      {
+        echo "# EmuX desktop v0.2.45"
+        echo "(command -v xsetroot >/dev/null 2>&1 && xsetroot -solid \"#20344d\") &"
+      } >> "$OBX/autostart" 2>/dev/null
+    else
+      {
+        echo "# EmuX desktop v0.2.45"
+        echo "(command -v xsetroot >/dev/null 2>&1 && xsetroot -solid \"#20344d\") &"
+        echo "tint2 >/dev/null 2>&1 &"
+        echo "pcmanfm --desktop >/dev/null 2>&1 &"
+      } >> "$OBX/autostart" 2>/dev/null
+    fi
+  fi
+}
+# v0.2.45: self-check the desktop, not just the X server. A streaming
+# black frame used to be "proof" the pipeline worked while the desktop
+# itself had zero windows. This logs, a few seconds after launch, which
+# furniture processes are alive and which windows exist, so the next
+# field report can say "panel up, icons missing" instead of "black".
+verify_desktop() {
+  sleep 6
+  {
+    echo "emux-x11: desktop check: openbox=$(running openbox && echo yes || echo no) tint2=$(running tint2 && echo yes || echo no) pcmanfm=$(running pcmanfm && echo yes || echo no) xterm=$(running xterm && echo yes || echo no)"
+    if command -v wmctrl >/dev/null 2>&1; then
+      echo "emux-x11: desktop check windows (wmctrl):"
+      wmctrl -l 2>&1 || echo "emux-x11: desktop check: wmctrl failed"
+    elif command -v xwininfo >/dev/null 2>&1; then
+      echo "emux-x11: desktop check windows (xwininfo -root -tree):"
+      xwininfo -root -tree 2>&1 | grep -E "0x[0-9a-f]+ " | head -30 || echo "emux-x11: desktop check: xwininfo failed"
+    elif command -v xlsclients >/dev/null 2>&1; then
+      echo "emux-x11: desktop check clients (xlsclients):"
+      xlsclients 2>&1 || echo "emux-x11: desktop check: xlsclients failed"
+    else
+      echo "emux-x11: desktop check: no wmctrl/xwininfo/xlsclients - install x11-utils + wmctrl for window lists"
+    fi
+  } > /tmp/emux_desktop_check 2>&1
+  cat /tmp/emux_desktop_check >&2
 }
 # v0.2.36 FIELD FIX (the thirty-five-round bug): emux-x11 EXITS by design
 # once X+WM are launched - and when its PTY session closes, the kernel
@@ -281,7 +567,11 @@ else
     # (desktop icons + graphical file manager), mousepad (GUI editor).
     # Best-effort REST pass as before; the visibility chain does not
     # depend on any of these.
-    REST="x11-xserver-utils openbox xterm menu tint2 pcmanfm mousepad"
+    # v0.2.45: + galculator (a clickable Calculator app - a desktop
+    # without one is not a visual interface), wmctrl + x11-utils (the
+    # window list verify_desktop reports, so "black screen" can be
+    # diagnosed from the log instead of a screenshot).
+    REST="x11-xserver-utils openbox xterm menu tint2 pcmanfm mousepad galculator wmctrl x11-utils"
       # v0.2.42 FIELD FIX: NO apt transaction unless something is actually
       # missing. Every desktop open used to run the CORE install (and the
       # REST pass) even on a complete rootfs; while dpkg swaps libraries,
@@ -349,11 +639,18 @@ else
       # the 15 s window expired, and the retry died on -noshmem).
       APT_BRANCH=1
     elif command -v pacman >/dev/null 2>&1; then
-      pacman -Sy --noconfirm --needed xorg-server-xvfb xorg-xkbcomp xkeyboard-config xorg-xwd netpbm openbox xterm >&2
+      # v0.2.45: previously this branch installed NO desktop furniture at
+      # all (no tint2/pcmanfm/mousepad) - on Arch the desktop could never
+      # be more than Xvfb + a terminal, if that.
+      pacman -Sy --noconfirm --needed xorg-server-xvfb xorg-xkbcomp xkeyboard-config xorg-xwd netpbm openbox xterm tint2 pcmanfm mousepad galculator wmctrl >&2
     elif command -v dnf >/dev/null 2>&1; then
-      dnf -y --skip-broken install xorg-x11-server-Xvfb xkbcomp xkeyboard-config xorg-x11-apps netpbm nmap-ncat openbox xterm >&2
+      dnf -y --skip-broken install xorg-x11-server-Xvfb xkbcomp xkeyboard-config xorg-x11-apps netpbm nmap-ncat openbox xterm tint2 pcmanfm mousepad galculator wmctrl >&2
     else
-      apk add --no-cache xvfb xkbcomp xkeyboard-config xwd netpbm >&2
+      # v0.2.45: previously Alpine got Xvfb + xwd only - no WM, no panel,
+      # no file manager, no terminal: a black screen by construction.
+      # Alpine is also the app's DEFAULT_DISTRO, so this branch is the
+      # likeliest explanation for "other versions only show a black screen".
+      apk add --no-cache xvfb xkbcomp xkeyboard-config xwd netpbm openbox xterm tint2 pcmanfm mousepad galculator wmctrl >&2
     fi
     [ -x /usr/bin/Xvfb ] && XVFB=/usr/bin/Xvfb
   fi
@@ -630,18 +927,11 @@ fi
 # v0.2.38 FIELD FIX: openbox IMMEDIATELY too (it used to launch only
 # inside the REST subshell, behind an apt loop that can chew for minutes
 # or wait on a previous session's now-SIGHUP-immortal apt - field v0.2.37:
-# live stream, zero windows). Seed the autostart first so the WM brings
-# the panel + desktop icons with it.
+# live stream, zero windows). Seed the full desktop config first
+# (v0.2.45: panel config, menu, icons, autostart) so the WM brings a
+# real desktop with it, not just a root window.
 if [ -x /usr/bin/openbox ] || [ -x "/usr/bin/$WM" ]; then
-  OBX=/root/.config/openbox
-  mkdir -p "$OBX" 2>/dev/null
-  if ! grep -q "EmuX seeded autostart" "$OBX/autostart" 2>/dev/null; then
-    {
-      echo "# EmuX seeded autostart (v0.2.37)"
-      echo "tint2 >/dev/null 2>&1 &"
-      echo "pcmanfm --desktop >/dev/null 2>&1 &"
-    } >> "$OBX/autostart" 2>/dev/null
-  fi
+  seed_desktop_config
   command -v update-menus >/dev/null 2>&1 && update-menus >/dev/null 2>&1 &
 fi
 if [ ! -e /tmp/emux_wm_launched ]; then
@@ -656,13 +946,19 @@ if [ ! -e /tmp/emux_wm_launched ]; then
 fi
 # v0.2.38: visibility watchdog - if no window client is alive (killed,
 # crashed, or never installed), relaunch one, for the first ~10 min.
+# v0.2.45: a running WM / panel / file manager IS a live desktop, so
+# they count as "has" too. Before, only xterm/xclock/xeyes counted, so
+# closing the terminal on a healthy GUI desktop made the watchdog
+# resurrect a terminal window - the desktop could never stop looking
+# like a terminal. Now the watchdog only forces a terminal when the
+# whole desktop (WM + panel + icons) is gone.
 ( trap '' HUP
   i=0
   while [ "$i" -lt 120 ]; do
     sleep 5
     has=0
     for f in /proc/[0-9]*/cmdline; do
-      tr '\0' ' ' < "$f" 2>/dev/null | grep -qE 'xterm|xclock|xeyes' && { has=1; break; }
+      tr '\0' ' ' < "$f" 2>/dev/null | grep -qE 'openbox|tint2|pcmanfm|xterm|xclock|xeyes' && { has=1; break; }
     done
     if [ "$has" = 0 ]; then
       for vc in /usr/bin/xterm /usr/bin/xclock /usr/bin/xeyes; do
@@ -690,21 +986,32 @@ fi
 # a missing one is the entire failure mode. Launch the first available
 # client every session, then confirm it survived one second and say so
 # in the diag - the next field screenshot answers itself.
-for vc in /usr/bin/xterm /usr/bin/xclock /usr/bin/xeyes; do
-  if [ -x "$vc" ]; then
-    echo "emux-x11: launching visibility client $vc on $DISPLAY (immediate)" >&2
-    nohup "$vc" >/tmp/vis.log 2>&1 </dev/null &
-    VPID=$!
-    sleep 1
-    if kill -0 "$VPID" 2>/dev/null; then
-      echo "emux-x11: visibility client alive (pid $VPID, $vc)" >&2
-    else
-      echo "emux-x11: visibility client DEAD on launch ($vc); vis.log:" >&2
-      tail -3 /tmp/vis.log >&2 2>/dev/null
+# v0.2.45: ...unless the visual desktop is already up. On a complete
+# rootfs, start_furniture just launched tint2 + pcmanfm, so forcing an
+# xterm on top of them is what made every "desktop" look like a
+# terminal. Skip the forced terminal when panel/desktop are running;
+# keep it as the fallback when they are not installed yet (first run,
+# while REST is still installing them).
+start_furniture
+if running tint2 || running pcmanfm; then
+  echo "emux-x11: desktop furniture up (panel/desktop) - skipping forced terminal window" >&2
+else
+  for vc in /usr/bin/xterm /usr/bin/xclock /usr/bin/xeyes; do
+    if [ -x "$vc" ]; then
+      echo "emux-x11: launching visibility client $vc on $DISPLAY (immediate)" >&2
+      nohup "$vc" >/tmp/vis.log 2>&1 </dev/null &
+      VPID=$!
+      sleep 1
+      if kill -0 "$VPID" 2>/dev/null; then
+        echo "emux-x11: visibility client alive (pid $VPID, $vc)" >&2
+      else
+        echo "emux-x11: visibility client DEAD on launch ($vc); vis.log:" >&2
+        tail -3 /tmp/vis.log >&2 2>/dev/null
+      fi
+      break
     fi
-    break
-  fi
-done
+  done
+fi
 # v0.1.79: REST (WM + capture toolchain) installs NOW that X is up - never
 # under a starting server (see APT_BRANCH note above). When it lands, start
 # the WM if none runs yet.
@@ -714,7 +1021,7 @@ if x_up && [ "$APT_BRANCH" = 1 ]; then
     # v0.2.42: furniture loop only while furniture is missing - same
     # transaction-window reasoning as NEEDCORE.
     NEEDREST=0
-    for b in /usr/bin/tint2 /usr/bin/pcmanfm /usr/bin/mousepad; do
+    for b in /usr/bin/tint2 /usr/bin/pcmanfm /usr/bin/mousepad /usr/bin/galculator; do
       [ -x "$b" ] || NEEDREST=1
     done
     if [ "$NEEDREST" = 1 ]; then
@@ -733,22 +1040,10 @@ if x_up && [ "$APT_BRANCH" = 1 ]; then
     fi
     start_furniture   # v0.2.39: panel/icons/menu as soon as they land
     if [ ! -e /tmp/emux_wm_launched ]; then
-      # v0.2.37: seed an openbox autostart (panel + desktop icons) so the
-      # session looks like a desktop, not a void. Append-only with a
-      # marker: never clobber user edits.
-      if command -v openbox >/dev/null 2>&1 || [ -x /usr/bin/openbox ]; then
-        OBX=/root/.config/openbox
-        mkdir -p "$OBX" 2>/dev/null
-        if ! grep -q "EmuX seeded autostart" "$OBX/autostart" 2>/dev/null; then
-          {
-            echo "# EmuX seeded autostart (v0.2.37)"
-            echo "tint2 >/dev/null 2>&1 &"
-            echo "pcmanfm --desktop >/dev/null 2>&1 &"
-          } >> "$OBX/autostart" 2>/dev/null
-        fi
-        # refresh the openbox menu database if the menu pkg landed
-        command -v update-menus >/dev/null 2>&1 && update-menus >/dev/null 2>&1 &
-      fi
+      # v0.2.45: full desktop config (panel, menu, icons, autostart) -
+      # seed_desktop_config already ran inside start_furniture above;
+      # just refresh the openbox menu database if the menu pkg landed.
+      command -v update-menus >/dev/null 2>&1 && update-menus >/dev/null 2>&1 &
       for c in "/usr/bin/$WM" /usr/bin/openbox; do
         if [ -x "$c" ]; then
           nohup "$c" >/tmp/wm.log 2>&1 </dev/null &
@@ -774,7 +1069,10 @@ if x_up && [ "$APT_BRANCH" = 1 ]; then
       # the synchronous CORE install - so a streaming desktop can never
       # again be a windowless black void. xeyes even proves input (the
       # eyes follow your finger).
-      if [ ! -e /tmp/emux_xterm_launched ]; then
+      # v0.2.45: only as a last resort - if start_furniture already
+      # brought the panel/desktop up, a forced terminal just hides
+      # the GUI desktop again.
+      if [ ! -e /tmp/emux_xterm_launched ] && ! running tint2 && ! running pcmanfm; then
         for vc in /usr/bin/xterm /usr/bin/uxterm /usr/bin/rxvt /usr/bin/xclock /usr/bin/xeyes; do
           if [ -x "$vc" ]; then
             echo "emux-x11: launching visibility client $vc" >&2
@@ -852,10 +1150,18 @@ run_wm "$WM" || run_wm openbox || run_wm twm || run_wm icewm || {
 # interface". Launch one xterm once the WM is up, so SOMETHING visible
 # is on screen. The fallback branch above already launched xterm and
 # touched emux_xterm_launched, so this never launches a second one.
-if [ -e /tmp/emux_wm_launched ] && [ ! -e /tmp/emux_xterm_launched ] && [ -x /usr/bin/xterm ]; then
+# v0.2.45: ...but NOT when the visual desktop is already up. Panel +
+# desktop icons are the visible thing now; a forced terminal on top
+# of them is the bug the user reported, not the fix.
+if [ -e /tmp/emux_wm_launched ] && [ ! -e /tmp/emux_xterm_launched ] \
+   && [ -x /usr/bin/xterm ] && ! running tint2 && ! running pcmanfm; then
   /usr/bin/xterm >/tmp/xterm.log 2>&1 &
   touch /tmp/emux_xterm_launched
 fi
+# v0.2.45: report the desktop, not just the server, a few seconds in.
+# Runs in the background so the launcher can go on waiting on Xvfb;
+# its output lands in the pane log and in /tmp/emux_desktop_check.
+( verify_desktop ) &
 # v0.1.43: never exit silently — the Android side paints this on the desktop
 # pane, so a dying X server now names its own reason in the field.
 wait $XPID
