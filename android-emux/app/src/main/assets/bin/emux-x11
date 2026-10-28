@@ -44,7 +44,7 @@ fi
 # WM AND the visibility xterm (field v0.2.31: a perfectly streaming,
 # pure-black desktop = X root window with zero clients). Markers are
 # per-session by definition: clear them at every launcher start.
-rm -f /tmp/emux_wm_launched /tmp/emux_xterm_launched /tmp/emux_vis_launched 2>/dev/null
+rm -f /tmp/emux_wm_launched /tmp/emux_xterm_launched /tmp/emux_vis_launched /tmp/emux_obx_reconf 2>/dev/null
 export HOME="${HOME:-/root}"
 export DISPLAY=:$DN
 export TMPDIR=/tmp
@@ -53,6 +53,32 @@ export TMPDIR=/tmp
 # the v0.1.78 pane) and can inherit a garbled PATH; pin the distro dirs.
 PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$PATH"
 export PATH
+# v0.2.39: is a process with $1 in its cmdline alive? (procps not
+# guaranteed; /proc scan like kill_stale_x)
+running() {
+  for f in /proc/[0-9]*/cmdline; do
+    tr '\0' ' ' < "$f" 2>/dev/null | grep -q "$1" && return 0
+  done
+  return 1
+}
+# v0.2.39: bring desktop furniture up the moment it exists - called from
+# the REST pass right after install AND from the visibility watchdog, so
+# panel/icons/menu appear live without waiting for a session restart.
+start_furniture() {
+  if [ -x /usr/bin/tint2 ] && ! running tint2; then
+    echo "emux-x11: starting tint2 panel" >&2
+    nohup /usr/bin/tint2 >/tmp/tint2.log 2>&1 </dev/null &
+  fi
+  if [ -x /usr/bin/pcmanfm ] && ! running pcmanfm; then
+    echo "emux-x11: starting pcmanfm desktop (icons)" >&2
+    nohup /usr/bin/pcmanfm --desktop >/tmp/pcmanfm.log 2>&1 </dev/null &
+  fi
+  if [ -e /var/lib/openbox/debian-menu.xml ] && [ ! -e /tmp/emux_obx_reconf ]; then
+    echo "emux-x11: menu db present - openbox --reconfigure" >&2
+    touch /tmp/emux_obx_reconf
+    command -v openbox >/dev/null 2>&1 && openbox --reconfigure >/dev/null 2>&1 &
+  fi
+}
 # v0.2.36 FIELD FIX (the thirty-five-round bug): emux-x11 EXITS by design
 # once X+WM are launched - and when its PTY session closes, the kernel
 # SIGHUPs the entire process group: the WM, every visibility client and
@@ -631,6 +657,7 @@ fi
         fi
       done
     fi
+    start_furniture   # v0.2.39: catches furniture the moment REST installs it
     i=$((i + 1))
   done ) &
 # v0.2.35 FIELD FIX: launch a visibility client IMMEDIATELY once the
@@ -667,6 +694,7 @@ if x_up && [ "$APT_BRANCH" = 1 ]; then
     i=0
     while [ "$i" -lt 2 ]; do dpkg --configure -a >&2 && break; i=$((i + 1)); done
     sleep 1
+    start_furniture   # v0.2.39: panel/icons/menu as soon as they land
     if [ ! -e /tmp/emux_wm_launched ]; then
       # v0.2.37: seed an openbox autostart (panel + desktop icons) so the
       # session looks like a desktop, not a void. Append-only with a
