@@ -350,6 +350,10 @@ verify_desktop() {
   sleep 6
   {
     echo "emux-x11: desktop check: openbox=$(running openbox && echo yes || echo no) tint2=$(running tint2 && echo yes || echo no) pcmanfm=$(running pcmanfm && echo yes || echo no) xterm=$(running xterm && echo yes || echo no)"
+    if ! running tint2 && [ -e /tmp/emux_rest.log ]; then
+      echo "emux-x11: desktop check: REST log tail (furniture missing):"
+      tail -6 /tmp/emux_rest.log 2>/dev/null
+    fi
     if command -v wmctrl >/dev/null 2>&1; then
       echo "emux-x11: desktop check windows (wmctrl):"
       wmctrl -l 2>&1 || echo "emux-x11: desktop check: wmctrl failed"
@@ -1039,6 +1043,13 @@ if x_up && [ "$APT_BRANCH" = 1 ]; then
       echo "emux-x11: furniture present - skipping REST apt transaction" >&2
     fi
     start_furniture   # v0.2.39: panel/icons/menu as soon as they land
+    # v0.2.46: if the furniture still is not on disk, say WHY with the apt
+    # tail - forty rounds of silent furniture failures happened because
+    # this subshell's output went to /dev/null (see below).
+    if [ ! -x /usr/bin/tint2 ] || [ ! -x /usr/bin/pcmanfm ]; then
+      echo "emux-x11: REST install incomplete - tail of /tmp/emux_rest.log:" >&2
+      tail -6 /tmp/emux_rest.log >&2 2>/dev/null
+    fi
     if [ ! -e /tmp/emux_wm_launched ]; then
       # v0.2.45: full desktop config (panel, menu, icons, autostart) -
       # seed_desktop_config already ran inside start_furniture above;
@@ -1083,7 +1094,7 @@ if x_up && [ "$APT_BRANCH" = 1 ]; then
         done
       fi
     fi
-  ) >/dev/null 2>&1 &
+  ) >/tmp/emux_rest.log 2>&1 &   # v0.2.46: was /dev/null - silent failures
 fi
 [ -n "$XPID" ] || XPID=$!
 
