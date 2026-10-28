@@ -417,15 +417,15 @@ class MainActivity : AppCompatActivity() {
             com.emux.x11.DesktopService.State.IDLE -> ""
             com.emux.x11.DesktopService.State.STARTING_X -> getString(R.string.x_starting)
             com.emux.x11.DesktopService.State.AWAITING_FRAMES ->
-                colored(getString(R.string.x_awaiting_frames) + "\n" + d.errorHistoryText())
+                colored(getString(R.string.x_awaiting_frames) + "\n" + d.errorHistoryTextNewestFirst())
             com.emux.x11.DesktopService.State.CONNECTED ->
                 if (d.frameId == 0)
-                    colored(getString(R.string.x_connected, 0, 0) + "\n" + d.errorHistoryText())
+                    colored(getString(R.string.x_connected, 0, 0) + "\n" + d.errorHistoryTextNewestFirst())
                 else
                     getString(R.string.x_connected, d.x11?.screenWidth ?: 0, d.x11?.screenHeight ?: 0) +
                         (d.errorText.value?.let { "\n" + it } ?: "")
             com.emux.x11.DesktopService.State.ERROR ->
-                colored(getString(R.string.x_error, d.errorHistoryText()))
+                colored(getString(R.string.x_error, d.errorHistoryTextNewestFirst()))
         }
     }
 

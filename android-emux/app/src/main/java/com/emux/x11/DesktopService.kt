@@ -121,6 +121,23 @@ class DesktopService(
         noteInfo(msg)
         errorText.value = msg
     }
+    /**
+     * v0.2.27 FIELD FIX: newest-NOTE-first rendering for the status
+     * TextView - the surface users actually read. Twenty-six rounds of
+     * pane screenshots were the TextView (full-height, oldest-first);
+     * every canvas-side visibility fix (scroll, sticky-bottom,
+     * newest-first) touched a layer nobody was looking at. Note order is
+     * reversed; lines INSIDE each note stay chronological so multi-line
+     * diagnostics still read top-down.
+     */
+    fun errorHistoryTextNewestFirst(maxNotes: Int = 60): String = synchronized(errHistory) {
+        val live = errorText.value
+        val base = if (errHistory.isEmpty()) mutableListOf<String>() else errHistory.toMutableList()
+        if (live != null && base.none { it.endsWith(live) }) base.add(live)
+        if (base.isEmpty()) return "?"
+        base.takeLast(maxNotes).asReversed().joinToString("\n")
+    }
+
     fun errorHistoryText(): String = synchronized(errHistory) {
         // v0.1.68: always include the LIVE error line - transient messages
         // set via errorText.value directly never entered the history, so a
