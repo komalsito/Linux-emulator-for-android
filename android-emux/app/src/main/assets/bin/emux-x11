@@ -39,6 +39,12 @@ fi
 
 # ---------------- inside the distro (proot / chroot) ----------------
 : > /tmp/emux_sess_marker 2>/dev/null   # v0.2.28: freshness baseline for X0
+# v0.2.32 FIELD FIX: launch markers live in the rootfs /tmp and SURVIVED
+# across sessions - so every session after the first silently skipped the
+# WM AND the visibility xterm (field v0.2.31: a perfectly streaming,
+# pure-black desktop = X root window with zero clients). Markers are
+# per-session by definition: clear them at every launcher start.
+rm -f /tmp/emux_wm_launched /tmp/emux_xterm_launched 2>/dev/null
 export HOME="${HOME:-/root}"
 export DISPLAY=:$DN
 export TMPDIR=/tmp
@@ -592,6 +598,14 @@ if x_up && [ "$APT_BRANCH" = 1 ]; then
       # (field: "for a moment there was a black desktop with nothing") -
       # indistinguishable from a broken pipeline. Open one xterm so the
       # session is visibly alive and input-testable.
+      # v0.2.32: and if xterm is not even installed (half-configured REST
+      # pass on the field device), install it now - a streaming black
+      # desktop is worse than useless as proof of life.
+      if [ ! -x /usr/bin/xterm ]; then
+        echo "emux-x11: xterm missing - installing for visibility" >&2
+        DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends xterm >&2 || true
+        dpkg --configure -a >&2 || true
+      fi
       if [ -x /usr/bin/xterm ] && [ ! -e /tmp/emux_xterm_launched ]; then
         /usr/bin/xterm -geometry 96x28+60+40 >/tmp/xterm.log 2>&1 &
         touch /tmp/emux_xterm_launched
