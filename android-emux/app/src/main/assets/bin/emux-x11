@@ -282,6 +282,19 @@ else
     # Best-effort REST pass as before; the visibility chain does not
     # depend on any of these.
     REST="x11-xserver-utils openbox xterm menu tint2 pcmanfm mousepad"
+      # v0.2.42 FIELD FIX: NO apt transaction unless something is actually
+      # missing. Every desktop open used to run the CORE install (and the
+      # REST pass) even on a complete rootfs; while dpkg swaps libraries,
+      # every NEW guest exec (shell, xterm, xeyes) can SIGSEGV - the field
+      # signal-11 wave that killed terminals and clients ("terminal works
+      # when I don't open the desktop tab"). A complete rootfs now opens
+      # with zero transaction window.
+      NEEDCORE=0
+      for b in /usr/bin/Xvfb /usr/bin/xkbcomp /usr/bin/xwd /usr/bin/xwdtopnm \
+               /usr/bin/pnmtoplainpnm /bin/nc /usr/bin/nc /usr/bin/openbox /usr/bin/id; do
+        [ -x "$b" ] || NEEDCORE=1
+      done
+      if [ "$NEEDCORE" = 1 ]; then
       TRIES=0
       while [ "$TRIES" -lt 30 ]; do
         if apt_busy; then
@@ -305,6 +318,9 @@ else
         dpkg --configure -a >&2 && break
         i=$((i + 1))
       done
+      else
+        echo "emux-x11: core stack complete - skipping CORE apt transaction" >&2
+      fi
       # v0.1.78 LAST RESORT: if the X server binary STILL is not on disk after
       # the retry loop (ghost db entry that survived healing, stale mirror
       # cache, ...), force the db entry out and reinstall exactly what the
@@ -684,6 +700,13 @@ fi
 if x_up && [ "$APT_BRANCH" = 1 ]; then
   (
     trap '' HUP   # v0.2.36: survive the launcher's PTY close
+    # v0.2.42: furniture loop only while furniture is missing - same
+    # transaction-window reasoning as NEEDCORE.
+    NEEDREST=0
+    for b in /usr/bin/tint2 /usr/bin/pcmanfm /usr/bin/mousepad; do
+      [ -x "$b" ] || NEEDREST=1
+    done
+    if [ "$NEEDREST" = 1 ]; then
     TRIES=0
     while [ "$TRIES" -lt 30 ]; do
       if apt_busy; then TRIES=$((TRIES + 1)); sleep 10; continue; fi
@@ -694,6 +717,9 @@ if x_up && [ "$APT_BRANCH" = 1 ]; then
     i=0
     while [ "$i" -lt 2 ]; do dpkg --configure -a >&2 && break; i=$((i + 1)); done
     sleep 1
+    else
+      echo "emux-x11: furniture present - skipping REST apt transaction" >&2
+    fi
     start_furniture   # v0.2.39: panel/icons/menu as soon as they land
     if [ ! -e /tmp/emux_wm_launched ]; then
       # v0.2.37: seed an openbox autostart (panel + desktop icons) so the

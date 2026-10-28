@@ -2328,7 +2328,11 @@ class BootstrapManager(private val ctx: Context) {
         var note: String? = null
         Companion.progressNote?.invoke("pre-repair: waiting for background apt lock (up to 90 s)...")
         val got = runCatching {
-            Companion.aptLock().tryLock(90, java.util.concurrent.TimeUnit.SECONDS)
+            // v0.2.42: 90 s was too short to out-wait a running background
+            // repair; proceeding unlocked launched clients INTO the repair's
+            // library swaps (the signal-11 wave). Four minutes of narrated
+            // waiting beats a segfaulted session.
+            Companion.aptLock().tryLock(240, java.util.concurrent.TimeUnit.SECONDS)
         }.getOrDefault(true)
         Companion.progressNote?.invoke(
             if (got) "pre-repair: apt lock acquired"
