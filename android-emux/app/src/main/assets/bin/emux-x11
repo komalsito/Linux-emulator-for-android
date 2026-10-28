@@ -38,6 +38,7 @@ if [ -n "$ROOT" ] && [ -d "$ROOT/lib" ]; then
 fi
 
 # ---------------- inside the distro (proot / chroot) ----------------
+: > /tmp/emux_sess_marker 2>/dev/null   # v0.2.28: freshness baseline for X0
 export HOME="${HOME:-/root}"
 export DISPLAY=:$DN
 export TMPDIR=/tmp
@@ -87,8 +88,13 @@ probe_sockets() {
   pl "probe .X11-unix: $(ls -la /tmp/.X11-unix 2>&1 | tr '\n' ' ')"
   pl "probe tcp6000: $(grep -hi ':1770 ' /proc/net/tcp /proc/net/tcp6 2>/dev/null | tr -s ' ' | cut -d' ' -f2,4,10 | tr '\n' ' ')"
   if command -v nc >/dev/null 2>&1 && command -v timeout >/dev/null 2>&1; then
-    timeout 1 nc -l "$XP" >/dev/null 2>&1
-    pl "probe tcp-bind-$XP rc=$? (124=ok, other=failed)"
+    # v0.2.28: the old probe ran `nc -l` whose stdin was the session's
+    # (closed) stdin - openbsd nc then exits 0 IMMEDIATELY, and the
+    # "(124=ok, other=failed)" semantics read that as "port held" for
+    # ten versions. A CONNECT test is what we actually care about:
+    # rc=0 = something really listens; rc!=0 = free.
+    nc -z 127.0.0.1 "$XP" >/dev/null 2>&1
+    pl "probe tcp-connect-$XP rc=$? (0=HELD, other=free)"
     timeout 1 nc -l 6001 >/dev/null 2>&1
     pl "probe tcp-bind-6001 rc=$? (124=ok, other=failed)"
     timeout 1 nc -l -U /tmp/.X11-unix/Xprobe >/dev/null 2>&1
@@ -331,7 +337,19 @@ else
     if [ -x /bin/bash ]; then /bin/bash -c "exec 3<>/dev/tcp/127.0.0.1/$XP" 2>/dev/null; return $?; fi
     return 1
   }
-  x_up() { [ -e /tmp/.X11-unix/X$DN ] || tcp_open; }
+  # v0.2.28 FIELD FIX: a stale X0 socket FILE is not a server. SIGKILLed
+  # Xvfbs never unlink it, and the v0.2.16/2.18 gates (x_up leg 1) trusted
+  # mere existence - field v0.2.27: "leg=X0-file present" with "xwd
+  # handshake rc=1" twice, i.e. the file outlived its server and every
+  # gate after it lied. Require the socket to be NEWER than this session's
+  # start marker; files from previous lives are ignored. tcp leg unchanged
+  # (connect-based, honest).
+  x_up() {
+    if [ -e /tmp/.X11-unix/X$DN ] && [ /tmp/.X11-unix/X$DN -nt /tmp/emux_sess_marker ]; then
+      return 0
+    fi
+    tcp_open
+  }
   # v0.2.16 FIELD FIX: socket presence is NOT a server. The v0.2.15 field
   # round adopted a "pre-existing" server whose sockets answered for a
   # couple of seconds (a dying zombie's half-closed listener), launched
