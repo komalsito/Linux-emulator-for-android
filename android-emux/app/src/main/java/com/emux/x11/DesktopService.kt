@@ -149,6 +149,9 @@ class DesktopService(
     }
 
     var x11: X11Client? = null; private set
+    // v0.2.30: last connectControlPlane failure, for the expiry note -
+    // it used to die silently in logcat while the pane guessed.
+    @Volatile private var lastCtrlError: String? = null
     // v0.2.5 FIELD FIX: this session's X display number (see startDesktop).
     @Volatile private var displayNum = 0
     // v0.2.8: /proc/uptime ticks at startDesktop; host-side kills only reap
@@ -661,8 +664,30 @@ class DesktopService(
                     // toolchain files land with the REST pass. Narrate every
                     // 15 s so the pane is never silent while waiting.
                     var up = false; var tools = false; var w = 0
+                    var gateNoted = false
                     while ((!(up && tools)) && w < 180 && state.value != State.IDLE) {
                         up = up or java.io.File(rootfs, "tmp/emux_x_up").isFile
+                        // v0.2.30 FIELD FIX: the marker never appeared in the
+                        // field (watcher subshell race) and the gate starved
+                        // capture for 180 s BESIDE A LIVING SERVER (pane:
+                        // "verify_x: UP ... xwd-rc0" above "marker=false
+                        // (60/180)"). Since v0.2.6 deletes X0..X4 at session
+                        // start, any XN socket file present now was created
+                        // by THIS session's server - accept it as liveness
+                        // and take the display number from it.
+                        if (!up) {
+                            val live = (0..4).firstOrNull { n ->
+                                java.io.File(rootfs, "tmp/.X11-unix/X$n").isFile
+                            }
+                            if (live != null) {
+                                up = true
+                                displayNum = live
+                                if (!gateNoted) {
+                                    gateNoted = true
+                                    noteInfo("capture gate: live X socket X$live found (marker absent) - using display :$live")
+                                }
+                            }
+                        }
                         tools = listOf("usr/bin/xwd", "usr/bin/pnmtoplainpnm", "bin/nc.openbsd")
                             .all { java.io.File(rootfs, it).isFile }
                         if (!(up && tools)) {
@@ -868,7 +893,7 @@ class DesktopService(
                         val xt = diag["x11"]?.toString()?.lineSequence()
                             ?.filter { it.isNotBlank() }?.toList()?.takeLast(3)?.joinToString(" | ") ?: ""
                         val xl = java.io.File(rootfs, "tmp/xvfb.log")
-                        noteInfo("ctrl-wait expired. x11: " + xt.take(250) +
+                        noteInfo("ctrl-wait expired (ctrlErr=$lastCtrlError). x11: " + xt.take(250) +
                             " || " + hostProbeNote + " | guest: " + guestProbeTail(rootfs) +
                             " | xvfb.log: " + (if (xl.isFile) xl.readText().lineSequence()
                                 .filter { it.isNotBlank() }.toList().takeLast(4).joinToString(" | ").take(400)
@@ -1113,6 +1138,7 @@ class DesktopService(
                 return true
             } catch (e: Exception) {
                 last = e
+                lastCtrlError = "${e.javaClass.simpleName}: ${e.message?.take(120)}"
                 kotlinx.coroutines.delay(2_000)
             }
         }
