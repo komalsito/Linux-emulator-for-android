@@ -1172,6 +1172,8 @@ class DesktopService(
                         "tmp/.X11-unix/X$displayNum").absolutePath)
                 c.connect()
                 x11 = c
+                inputDroppedNoted = false
+                noteInfo("control plane UP via ${c.transport} :$displayNum - touch + keyboard live")
                 Log.i(TAG, "X connected: ${c.screenWidth}x${c.screenHeight}@${c.depth} vendor=${c.vendor}")
                 return true
             } catch (e: Exception) {
@@ -1394,6 +1396,29 @@ class DesktopService(
     }
 
     fun injectKeycode(keycode: Int, press: Boolean) { x11?.fakeKey(keycode, press) }
+
+    // v0.2.44: keyboard injection for the Desktop tab (it never had any:
+    // DesktopView had no InputConnection and no key routing, so typing on
+    // the desktop went nowhere even with a live control plane).
+    private var inputDroppedNoted = false
+    private fun noteInputDropped() {
+        if (!inputDroppedNoted) {
+            inputDroppedNoted = true
+            noteInfo("input dropped: control plane not connected (lastCtrlErr=$lastCtrlError)")
+        }
+    }
+    fun injectKeysymTap(ks: Int): Boolean {
+        val c = x11
+        if (c == null) { noteInputDropped(); return false }
+        return runCatching { c.typeKeysymTap(ks) }
+            .getOrElse { noteInputDropped(); false }
+    }
+    fun injectChar(ch: Char): Boolean {
+        val c = x11
+        if (c == null) { noteInputDropped(); return false }
+        return runCatching { c.typeChar(ch) }
+            .getOrElse { noteInputDropped(); false }
+    }
 
     // -------------------------------------------------------------------- stop
     fun stop() {

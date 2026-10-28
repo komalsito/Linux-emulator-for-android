@@ -78,6 +78,15 @@ class X11Client(
     var xtestOpcode = -1; private set
 
     @Volatile var connected = false; private set
+    // v0.2.44: which transport connect() used, for the pane note.
+    @Volatile var transport: String = "none"; private set
+    // v0.2.44: keyboard injection support - keysym -> (keycode, shift level)
+    // built from the server's own keyboard mapping (GetKeyboardMapping),
+    // so layout differences never matter.
+    private var minKeyCode = 8
+    private var maxKeyCode = 255
+    private val keysymKey = HashMap<Int, IntArray>()
+    private var shiftKeycode = 50
 
     private var sock: Socket? = null
     private var lsock: android.net.LocalSocket? = null
@@ -135,9 +144,11 @@ class X11Client(
         bb.putShort(0)   // v0.2.31: the 2 padding bytes of the setup request
         synchronized(writeLock) { outp!!.write(bb.array()); outp!!.flush() }
 
+        transport = if (viaUnix) "unix" else "tcp"
         parseSetupReply()
         // Discover XTEST (our input injection path).
         runCatching { queryExtension("XTEST") }
+        buildKeymap()   // v0.2.44: keyboard injection map
         connected = true
     }
 
@@ -173,6 +184,14 @@ class X11Client(
         val extraUnits = ((h.get(6).toInt() and 0xFF) shl 8) or (h.get(7).toInt() and 0xFF)
         val rest = ByteArray(extraUnits * 4)
         ins.readFully(rest)
+        // v0.2.44: min/max keycode live at fixed offsets 26/27 of this
+        // segment (release..maxReq, nScreens, nFormats, 4 order bytes, then
+        // the two keycodes). Read them positionally - independent of the
+        // stream cursor below.
+        if (rest.size > 28) {
+            minKeyCode = rest[26].toInt() and 0xFF
+            maxKeyCode = rest[27].toInt() and 0xFF
+        }
         val b = ByteBuffer.wrap(rest).order(order)
 
         val release = b.int
@@ -334,6 +353,41 @@ class X11Client(
 
     fun fakeKey(keycode: Int, press: Boolean) =
         xtestFake(if (press) 2 else 3, keycode, 0, 0)
+
+    /** v0.2.44: server keyboard mapping -> keysym lookup table. */
+    private fun buildKeymap() = runCatching {
+        val count = (maxKeyCode - minKeyCode + 1).coerceIn(1, 248)
+        val body = ByteBuffer.allocate(4).order(order)
+        body.put(minKeyCode.toByte()); body.put(count.toByte()); body.put(0); body.put(0)
+        send(buildRequest(101, 0, body.array()))   // GetKeyboardMapping
+        val r = readReply() ?: return@runCatching
+        val rb = ByteBuffer.wrap(r).order(order)
+        val ksPer = rb.get(1).toInt() and 0xFF
+        if (ksPer <= 0) return@runCatching
+        for (kc in minKeyCode..minKeyCode + count - 1) {
+            for (j in 0 until ksPer) {
+                val off = 32 + ((kc - minKeyCode) * ksPer + j) * 4
+                if (off + 4 > r.size) break
+                val sym = rb.getInt(off)
+                if (sym == 0xFFE1) shiftKeycode = kc
+                if (sym != 0 && !keysymKey.containsKey(sym)) keysymKey[sym] = intArrayOf(kc, j)
+            }
+        }
+    }
+
+    /** v0.2.44: tap a keysym (press+release), handling shift-level 1. */
+    fun typeKeysymTap(ks: Int): Boolean {
+        val e = keysymKey[ks] ?: return false
+        val kc = e[0]; val lvl = e[1]
+        if (lvl == 1) fakeKey(shiftKeycode, true)
+        fakeKey(kc, true); fakeKey(kc, false)
+        if (lvl == 1) fakeKey(shiftKeycode, false)
+        return true
+    }
+
+    /** v0.2.44: type one character (Latin-1 direct, else Unicode keysym). */
+    fun typeChar(c: Char): Boolean =
+        typeKeysymTap(if (c.code < 0x100) c.code else 0x01000000 + c.code)
 
     fun fakeButton(button: Int, x: Int, y: Int, press: Boolean) {
         // Motion first so the click lands under the finger, then press/release.

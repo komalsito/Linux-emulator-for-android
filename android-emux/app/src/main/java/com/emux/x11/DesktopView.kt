@@ -75,7 +75,80 @@ class DesktopView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attrs) 
     private val srcRect = Rect()
     private val dstRect = Rect()
 
-    init { keepScreenOn = false /* activity decides; view never holds locks */ }
+    init {
+        keepScreenOn = false /* activity decides; view never holds locks */
+        // v0.2.44: the Desktop tab must accept keys/IME to type into X
+        isFocusable = true
+        isFocusableInTouchMode = true
+    }
+
+    // v0.2.44 FIELD FIX: keyboard input for the desktop. Hardware keys and
+    // the soft keyboard (via InputConnection) are translated to X keysyms
+    // and injected through XTEST - before this, the Desktop tab silently
+    // swallowed every keystroke ("the little terminal on the desktop
+    // doesnt work").
+    override fun onKeyDown(keyCode: Int, event: android.view.KeyEvent): Boolean {
+        val d = desktop
+        if (d != null) {
+            val ks = when (keyCode) {
+                android.view.KeyEvent.KEYCODE_ENTER,
+                android.view.KeyEvent.KEYCODE_NUMPAD_ENTER -> 0xFF0D
+                android.view.KeyEvent.KEYCODE_DEL -> 0xFF08
+                android.view.KeyEvent.KEYCODE_FORWARD_DEL -> 0xFFFF
+                android.view.KeyEvent.KEYCODE_TAB -> 0xFF09
+                android.view.KeyEvent.KEYCODE_ESCAPE -> 0xFF1B
+                android.view.KeyEvent.KEYCODE_DPAD_UP -> 0xFF52
+                android.view.KeyEvent.KEYCODE_DPAD_DOWN -> 0xFF54
+                android.view.KeyEvent.KEYCODE_DPAD_LEFT -> 0xFF51
+                android.view.KeyEvent.KEYCODE_DPAD_RIGHT -> 0xFF53
+                android.view.KeyEvent.KEYCODE_PAGE_UP -> 0xFF55
+                android.view.KeyEvent.KEYCODE_PAGE_DOWN -> 0xFF56
+                android.view.KeyEvent.KEYCODE_MOVE_HOME -> 0xFF50
+                android.view.KeyEvent.KEYCODE_MOVE_END -> 0xFF57
+                else -> {
+                    val uc = event.unicodeChar
+                    if (uc != 0) { d.injectChar(uc.toChar()); return true }
+                    return super.onKeyDown(keyCode, event)
+                }
+            }
+            d.injectKeysymTap(ks)
+            return true
+        }
+        return super.onKeyDown(keyCode, event)
+    }
+
+    override fun onCreateInputConnection(
+        outAttrs: android.view.inputmethod.EditorInfo,
+    ): android.view.inputmethod.InputConnection {
+        outAttrs.inputType = android.text.InputType.TYPE_CLASS_TEXT or
+            android.text.InputType.TYPE_TEXT_VARIATION_VISIBLE_PASSWORD or
+            android.text.InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
+        outAttrs.imeOptions = android.view.inputmethod.EditorInfo.IME_FLAG_NO_EXTRACT_UI or
+            android.view.inputmethod.EditorInfo.IME_FLAG_NO_FULLSCREEN
+        return object : android.view.inputmethod.BaseInputConnection(this, false) {
+            override fun commitText(text: CharSequence?, newCursorPosition: Int): Boolean {
+                text?.forEach { desktop?.injectChar(it) }
+                return true
+            }
+            override fun deleteSurroundingText(before: Int, after: Int): Boolean {
+                repeat(before) { desktop?.injectKeysymTap(0xFF08) }
+                return true
+            }
+            override fun sendKeyEvent(event: android.view.KeyEvent): Boolean {
+                if (event.action == android.view.KeyEvent.ACTION_DOWN) {
+                    when {
+                        event.keyCode == android.view.KeyEvent.KEYCODE_DEL ->
+                            desktop?.injectKeysymTap(0xFF08)
+                        event.keyCode == android.view.KeyEvent.KEYCODE_ENTER ->
+                            desktop?.injectKeysymTap(0xFF0D)
+                        event.unicodeChar != 0 ->
+                            desktop?.injectChar(event.unicodeChar.toChar())
+                    }
+                }
+                return true
+            }
+        }
+    }
 
     // v0.1.25 DIAGNOSTIC: one-shot red flash so a permanently black pane can
     // be split into "view never draws" (no red at all -> layout/z-order/size)
@@ -318,6 +391,12 @@ class DesktopView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attrs) 
                     } else {
                         desktop?.injectClick(x, y, button = 1, press = true)
                         postDelayed({ desktop?.injectClick(x, y, button = 1, press = false) }, 40)
+                        // v0.2.44: tapping the desktop focuses the view and
+                        // raises the soft keyboard so typing reaches X.
+                        requestFocus()
+                        val imm = context.getSystemService(
+                            android.view.inputmethod.InputMethodManager::class.java)
+                        imm?.showSoftInput(this, android.view.inputmethod.InputMethodManager.SHOW_IMPLICIT)
                     }
                 }
                 dragging = false; panning = false
