@@ -1061,7 +1061,13 @@ class DesktopService(
         runCatching {
             val me = android.os.Process.myPid()
             val myUid = android.os.Process.myUid()
-            val pat = Regex("Xvfb|Xorg|emux-capture|/xwd|emux-x11")
+            // v0.2.40: sweep EVERY desktop client, not just the capture
+            // chain. Orphaned xterms/openboxes from previous sessions sat
+            // on dead displays (or worse, drew on a display a new session
+            // was not capturing), while fresh sessions streamed an empty
+            // root window. Age filter still protects this session's own
+            // launches (they start after desktopStartUpTicks).
+            val pat = Regex("Xvfb|Xorg|emux-capture|/xwd|emux-x11|openbox|tint2|pcmanfm|xterm|xclock|xeyes")
             val proc = java.io.File("/proc")
             proc.listFiles()?.forEach { d ->
                 val pid = d.name.toIntOrNull() ?: return@forEach
