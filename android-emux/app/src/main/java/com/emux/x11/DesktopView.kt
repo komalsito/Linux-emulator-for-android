@@ -64,6 +64,12 @@ class DesktopView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attrs) 
     // unless the user scrolls up; scrolling back to the bottom re-pins.
     private var histStickBottom = true
     private var histMaxScroll = 0f
+    // v0.2.37: double-tap toggles letterbox-fit <-> fill-screen (cover).
+    // Field: the old double-tap 2.5x zoom read as a bug ("enters full
+    // screen but zooms in"); what was wanted is the no-bars view at
+    // natural scale. Cover fills both axes (cropping overflow); two-
+    // finger pan reaches cropped edges; pinch still zooms.
+    private var coverMode = false
     private val frameless: Boolean get() = desktop?.currentFrame == null
 
     private val srcRect = Rect()
@@ -173,9 +179,10 @@ class DesktopView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attrs) 
             postInvalidateOnAnimation()
             return
         }
-        // fit once, then honor user zoom/pan
-        val fitScale = min(width.toFloat() / f.width, height.toFloat() / f.height)
-        val s = max(fitScale, fitScale * scale.coerceIn(1f, 6f))
+        // fit once, then honor user zoom/pan (v0.2.37: cover fills screen)
+        val fitScale = if (coverMode) max(width.toFloat() / f.width, height.toFloat() / f.height)
+                       else min(width.toFloat() / f.width, height.toFloat() / f.height)
+        val s = fitScale * scale.coerceIn(1f, 6f)
         val w = f.width * s; val h = f.height * s
         val left = (width - w) / 2 + tx
         val top = (height - h) / 2 + ty
@@ -193,8 +200,9 @@ class DesktopView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attrs) 
     /** screen px → X px (clamped into server geometry). */
     private fun mapToX(sx: Float, sy: Float): Pair<Int, Int> {
         val f = desktop?.currentFrame ?: return 0 to 0
-        val fitScale = min(width.toFloat() / f.width, height.toFloat() / f.height)
-        val s = max(fitScale, fitScale * scale.coerceIn(1f, 6f))
+        val fitScale = if (coverMode) max(width.toFloat() / f.width, height.toFloat() / f.height)
+                       else min(width.toFloat() / f.width, height.toFloat() / f.height)
+        val s = fitScale * scale.coerceIn(1f, 6f)
         val w = f.width * s; val h = f.height * s
         val left = (width - w) / 2 + tx
         val top = (height - h) / 2 + ty
@@ -288,20 +296,10 @@ class DesktopView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attrs) 
                     abs(event.x - lastTapUpX) < 40 && abs(event.y - lastTapUpY) < 40
                 lastTapUpMs = nowMs; lastTapUpX = event.x; lastTapUpY = event.y
                 if (isDoubleTap) {
-                    val f = desktop?.currentFrame
-                    if (f != null) {
-                        val (zx, zy) = mapToX(event.x, event.y)
-                        if (scale <= 1.01f) {
-                            scale = 2.5f
-                            val fitScale = min(width.toFloat() / f.width, height.toFloat() / f.height)
-                            val s = max(fitScale, fitScale * scale)
-                            tx = event.x - zx * s - (width - f.width * s) / 2
-                            ty = event.y - zy * s - (height - f.height * s) / 2
-                        } else {
-                            scale = 1f; tx = 0f; ty = 0f
-                        }
-                        invalidate()
-                    }
+                    // v0.2.37: fill-screen toggle (was 2.5x zoom).
+                    coverMode = !coverMode
+                    scale = 1f; tx = 0f; ty = 0f
+                    invalidate()
                     dragging = false; panning = false
                     return true
                 }

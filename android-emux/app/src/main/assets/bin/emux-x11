@@ -250,7 +250,12 @@ else
       # the capture helper on slow devices (the "desktop running but
       # invisible" rounds). Only the WM half stays backgrounded now.
       CORE="coreutils xvfb x11-xkb-utils xkb-data xfonts-base x11-apps netpbm netcat-openbsd"
-      REST="x11-xserver-utils openbox xterm"
+      # v0.2.37: desktop furniture, not just a terminal: menu (fixes the
+    # empty openbox right-click menu), tint2 (taskbar+clock), pcmanfm
+    # (desktop icons + graphical file manager), mousepad (GUI editor).
+    # Best-effort REST pass as before; the visibility chain does not
+    # depend on any of these.
+    REST="x11-xserver-utils openbox xterm menu tint2 pcmanfm mousepad"
       TRIES=0
       while [ "$TRIES" -lt 30 ]; do
         if apt_busy; then
@@ -615,6 +620,22 @@ if x_up && [ "$APT_BRANCH" = 1 ]; then
     while [ "$i" -lt 2 ]; do dpkg --configure -a >&2 && break; i=$((i + 1)); done
     sleep 1
     if [ ! -e /tmp/emux_wm_launched ]; then
+      # v0.2.37: seed an openbox autostart (panel + desktop icons) so the
+      # session looks like a desktop, not a void. Append-only with a
+      # marker: never clobber user edits.
+      if command -v openbox >/dev/null 2>&1 || [ -x /usr/bin/openbox ]; then
+        OBX=/root/.config/openbox
+        mkdir -p "$OBX" 2>/dev/null
+        if ! grep -q "EmuX seeded autostart" "$OBX/autostart" 2>/dev/null; then
+          {
+            echo "# EmuX seeded autostart (v0.2.37)"
+            echo "tint2 >/dev/null 2>&1 &"
+            echo "pcmanfm --desktop >/dev/null 2>&1 &"
+          } >> "$OBX/autostart" 2>/dev/null
+        fi
+        # refresh the openbox menu database if the menu pkg landed
+        command -v update-menus >/dev/null 2>&1 && update-menus >/dev/null 2>&1 &
+      fi
       for c in "/usr/bin/$WM" /usr/bin/openbox; do
         if [ -x "$c" ]; then
           nohup "$c" >/tmp/wm.log 2>&1 </dev/null &
