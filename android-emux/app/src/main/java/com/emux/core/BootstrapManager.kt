@@ -2210,6 +2210,19 @@ class BootstrapManager(private val ctx: Context) {
     }.getOrDefault(false)
 
     /**
+     * v0.2.34 FIELD FIX: half-configured WITHOUT a dirty journal. The field
+     * rootfs sat at "status half-configured openbox/libc-bin" with an EMPTY
+     * updates/ dir - aptJournalDirty() said clean, the warm gate skipped the
+     * repair forever, and every later `apt-get install` (xterm!) died on the
+     * half-configured packages. Streamed desktop, zero windows, forever.
+     */
+    internal fun dpkgHalfConfigured(dest: File): Boolean = runCatching {
+        File(dest, "var/lib/dpkg/status").useLines { ls ->
+            ls.any { it == "Status: install ok half-configured" }
+        }
+    }.getOrDefault(false)
+
+    /**
      * One guest-side repair run inside the bundled proot — the same steps as
      * assets/bin/emux-apt-repair (inlined so it also works on rootfs trees
      * seeded by older APKs that lack the helper script).
@@ -2312,7 +2325,8 @@ class BootstrapManager(private val ctx: Context) {
             // only the journal repair; always heal missing CORE packages.
             installLinkFixShim(dest)
             installCaptureConv(dest)
-            if (aptJournalDirty(dest) || !File(dest, "var/lib/emux-repair.stamp").isFile) {
+            if (aptJournalDirty(dest) || dpkgHalfConfigured(dest) ||
+                !File(dest, "var/lib/emux-repair.stamp").isFile) {
                 Companion.progressNote?.invoke("pre-repair: dpkg journal dirty - repairing (usually < 1 min)...")
                 val r = runRepairProot(proot, dest)
                 com.emux.EmuXLog.i("desktopPreRepair: ok=${r.ok} tail=${r.tail.take(200)}")

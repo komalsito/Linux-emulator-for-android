@@ -606,9 +606,21 @@ if x_up && [ "$APT_BRANCH" = 1 ]; then
         DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends xterm >&2 || true
         dpkg --configure -a >&2 || true
       fi
-      if [ -x /usr/bin/xterm ] && [ ! -e /tmp/emux_xterm_launched ]; then
-        /usr/bin/xterm -geometry 96x28+60+40 >/tmp/xterm.log 2>&1 &
-        touch /tmp/emux_xterm_launched
+      # v0.2.34: visibility client fallback chain. If apt is too broken to
+      # ever install xterm (half-configured rootfs), launch a client that
+      # is ALREADY on disk: xclock/xeyes ship in x11-apps, which is part of
+      # the synchronous CORE install - so a streaming desktop can never
+      # again be a windowless black void. xeyes even proves input (the
+      # eyes follow your finger).
+      if [ ! -e /tmp/emux_xterm_launched ]; then
+        for vc in /usr/bin/xterm /usr/bin/uxterm /usr/bin/rxvt /usr/bin/xclock /usr/bin/xeyes; do
+          if [ -x "$vc" ]; then
+            echo "emux-x11: launching visibility client $vc" >&2
+            "$vc" >/tmp/xterm.log 2>&1 &
+            touch /tmp/emux_xterm_launched
+            break
+          fi
+        done
       fi
     fi
   ) >/dev/null 2>&1 &
