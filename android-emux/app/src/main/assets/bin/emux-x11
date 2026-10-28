@@ -684,16 +684,27 @@ fi
 # the synchronous CORE install, so one of them is already on disk even
 # with apt completely broken. xeyes follows the pointer: capture,
 # stream, display and input injection proven in one widget.
-if [ ! -e /tmp/emux_vis_launched ]; then
-  for vc in /usr/bin/xterm /usr/bin/xclock /usr/bin/xeyes; do
-    if [ -x "$vc" ]; then
-      echo "emux-x11: launching visibility client $vc (immediate)" >&2
-      nohup "$vc" >/tmp/vis.log 2>&1 </dev/null &
-      touch /tmp/emux_vis_launched
-      break
+# v0.2.43: unconditional + self-verifying. Marker gating lost a race
+# somewhere in the respawn/sweep interplay (field v0.2.39-42: live
+# stream, zero windows, vis.log empty); a duplicate window is harmless,
+# a missing one is the entire failure mode. Launch the first available
+# client every session, then confirm it survived one second and say so
+# in the diag - the next field screenshot answers itself.
+for vc in /usr/bin/xterm /usr/bin/xclock /usr/bin/xeyes; do
+  if [ -x "$vc" ]; then
+    echo "emux-x11: launching visibility client $vc on $DISPLAY (immediate)" >&2
+    nohup "$vc" >/tmp/vis.log 2>&1 </dev/null &
+    VPID=$!
+    sleep 1
+    if kill -0 "$VPID" 2>/dev/null; then
+      echo "emux-x11: visibility client alive (pid $VPID, $vc)" >&2
+    else
+      echo "emux-x11: visibility client DEAD on launch ($vc); vis.log:" >&2
+      tail -3 /tmp/vis.log >&2 2>/dev/null
     fi
-  done
-fi
+    break
+  fi
+done
 # v0.1.79: REST (WM + capture toolchain) installs NOW that X is up - never
 # under a starting server (see APT_BRANCH note above). When it lands, start
 # the WM if none runs yet.
