@@ -2223,6 +2223,28 @@ class BootstrapManager(private val ctx: Context) {
     }.getOrDefault(false)
 
     /**
+     * v0.2.41 FIELD FIX: libc-bin not fully installed => guest userspace
+     * SIGSEGVs (field v0.2.40: "proot warning: signal 11" where the shell
+     * prompt should be; terminal unusable; every new X client dies into
+     * the half-swapped library set while old processes keep running).
+     * The half-configured scan can miss it (status can read e.g.
+     * "install reinstreq half-installed"), so check libc-bin's own
+     * Status line explicitly: anything but "install ok installed" means
+     * the rootfs must be healed BEFORE any shell or client launches.
+     */
+    internal fun dpkgLibcBroken(dest: File): Boolean = runCatching {
+        var pkg = ""
+        File(dest, "var/lib/dpkg/status").useLines { ls ->
+            for (l in ls) {
+                if (l.startsWith("Package: ")) pkg = l.substring(9).trim()
+                else if (l.startsWith("Status: ") && pkg == "libc-bin" &&
+                    l != "Status: install ok installed") return@runCatching true
+            }
+            false
+        }
+    }.getOrDefault(false)
+
+    /**
      * One guest-side repair run inside the bundled proot — the same steps as
      * assets/bin/emux-apt-repair (inlined so it also works on rootfs trees
      * seeded by older APKs that lack the helper script).
@@ -2325,7 +2347,7 @@ class BootstrapManager(private val ctx: Context) {
             // only the journal repair; always heal missing CORE packages.
             installLinkFixShim(dest)
             installCaptureConv(dest)
-            if (aptJournalDirty(dest) || dpkgHalfConfigured(dest) ||
+            if (aptJournalDirty(dest) || dpkgHalfConfigured(dest) || dpkgLibcBroken(dest) ||
                 !File(dest, "var/lib/emux-repair.stamp").isFile) {
                 Companion.progressNote?.invoke("pre-repair: dpkg journal dirty - repairing (usually < 1 min)...")
                 val r = runRepairProot(proot, dest)

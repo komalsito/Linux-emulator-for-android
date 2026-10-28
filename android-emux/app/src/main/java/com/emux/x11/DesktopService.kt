@@ -396,7 +396,8 @@ class DesktopService(
                 // background REST pass could never install xterm, and the
                 // (perfectly streaming) desktop stayed windowless black.
                 val journalDirty = com.emux.core.BootstrapManager(ctx).aptJournalDirty(rootfs) ||
-                    com.emux.core.BootstrapManager(ctx).dpkgHalfConfigured(rootfs)
+                    com.emux.core.BootstrapManager(ctx).dpkgHalfConfigured(rootfs) ||
+                    com.emux.core.BootstrapManager(ctx).dpkgLibcBroken(rootfs)
                 val warmDesktop = stackPresent && !journalDirty
                 if (warmDesktop) {
                     noteInfo("warm start: desktop stack present - skipping pre-repair")
