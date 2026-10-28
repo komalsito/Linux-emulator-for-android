@@ -518,6 +518,34 @@ class DesktopService(
                 }.onFailure {
                     noteInfo("helper re-seed failed (non-fatal): " + (it.message?.take(80) ?: "?"))
                 }
+                // v0.2.47 FIELD FIX: opening the Desktop tab used to kill the
+                // Terminal tab on ~1 GB devices - Android's low-memory killer
+                // reaped the terminal's proot (a background process once the
+                // user switched tabs), and a tracee whose tracer dies prints
+                // "proot warning: signal 11" (the pid-29008 ghost seen in
+                // every round). Bias the LMK: terminal shells get protected
+                // scores, desktop guests (self-healing, respawnable) become
+                // the preferred sacrifice.
+                runCatching {
+                    val myUid = android.os.Process.myUid().toString()
+                    java.io.File("/proc").listFiles()?.forEach { d ->
+                        val pid = d.name.toIntOrNull() ?: return@forEach
+                        val cmd = runCatching {
+                            java.io.File(d, "cmdline").readBytes().decodeToString().replace('\u0000', ' ')
+                        }.getOrDefault("")
+                        if (!cmd.contains("proot")) return@forEach
+                        val uidLine = runCatching {
+                            java.io.File(d, "status").readLines().firstOrNull { it.startsWith("Uid:") } ?: ""
+                        }.getOrDefault("")
+                        if (uidLine.split(Regex("\\s+")).getOrNull(1) != myUid) return@forEach
+                        val adj = when {
+                            cmd.contains("emux-x11") || cmd.contains("emux-capture") -> "100"
+                            cmd.contains("bash") || cmd.contains("/bin/sh") || cmd.contains("script") -> "-300"
+                            else -> return@forEach
+                        }
+                        runCatching { java.io.File(d, "oom_score_adj").writeText(adj) }
+                    }
+                }
                 desktopStartUpTicks = runCatching {
                     (java.io.File("/proc/uptime").readText().trim().split(" ")[0].toDouble() * 100).toLong() - 50
                 }.getOrDefault(Long.MAX_VALUE)
