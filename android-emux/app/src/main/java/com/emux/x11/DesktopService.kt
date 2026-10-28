@@ -369,13 +369,24 @@ class DesktopService(
                 // is pure overhead on every tab open — skip it. The
                 // background startup repair still runs at app start, and
                 // a missing file falls through to the full pre-repair.
-                val warmDesktop = listOf(
+                val stackPresent = listOf(
                     "usr/bin/Xvfb", "usr/bin/openbox", "usr/bin/xwd",
                     "usr/bin/pnmtoplainpnm", "bin/nc.openbsd",
                 ).all { java.io.File(rootfs, it).isFile }
+                // v0.2.33 FIELD FIX: "warm" must also mean a CLEAN dpkg
+                // journal. The field rootfs carries half-configured
+                // openbox/libc-bin from the old kill-cycles; half-configured
+                // still puts files on disk, so the stack check passed and the
+                // pre-repair was skipped FOREVER - apt stayed broken, the
+                // background REST pass could never install xterm, and the
+                // (perfectly streaming) desktop stayed windowless black.
+                val journalDirty = com.emux.core.BootstrapManager(ctx).aptJournalDirty(rootfs)
+                val warmDesktop = stackPresent && !journalDirty
                 if (warmDesktop) {
                     noteInfo("warm start: desktop stack present - skipping pre-repair")
                 } else {
+                    if (stackPresent) noteInfo(
+                        "stack present but dpkg journal DIRTY - repairing before session (apt was unusable)")
                     // v0.2.1 FIELD FIX: surface pre-repair progress live. The
                     // v0.2.0 pane went silent for the whole (multi-minute)
                     // pre-repair window - indistinguishable from the wedged

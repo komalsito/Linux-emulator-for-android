@@ -81,11 +81,20 @@ class DesktopView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attrs) 
         postDelayed({ postInvalidateOnAnimation() }, 1300)
     }
 
+    // v0.2.33: host-side LIVE badge. A streaming but windowless desktop is
+    // pure black - indistinguishable from death (field v0.2.31/32). Count
+    // frame arrivals over a 2 s window and paint the rate on the bitmap so
+    // "frames are flowing" is visible proof independent of guest windows.
+    private val frameTimes = ArrayDeque<Long>()
+
     fun onNewFrame(frameId: Int) {
         if (frameId != lastFrameId) {
             lastFrameId = frameId
             histScrollPx = 0f          // v0.2.3: history scroll is frameless-only
             histStickBottom = true     // v0.2.21: next frameless visit starts live
+            val now = System.currentTimeMillis()
+            frameTimes.addLast(now)
+            while (frameTimes.isNotEmpty() && now - frameTimes.first() > 2_000) frameTimes.removeFirst()
             postInvalidateOnAnimation()
         }
     }
@@ -173,6 +182,12 @@ class DesktopView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attrs) 
         srcRect.set(0, 0, f.width, f.height)
         dstRect.set(left.toInt(), top.toInt(), (left + w).toInt(), (top + h).toInt())
         canvas.drawBitmap(f, srcRect, dstRect, bmpPaint)
+        // v0.2.33 LIVE badge (see onNewFrame)
+        val fps = frameTimes.size / 2f
+        if (fps > 0f) {
+            val badge = Paint().apply { color = Color.argb(0xC0, 0x66, 0xBB, 0x6A); textSize = sp(10f) }
+            canvas.drawText("LIVE %.1f fps".format(fps), 16f, sp(16f), badge)
+        }
     }
 
     /** screen px → X px (clamped into server geometry). */
