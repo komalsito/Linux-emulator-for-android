@@ -36,6 +36,12 @@ import kotlin.math.ceil
 class X11Client(
     private val host: String = "127.0.0.1",
     private val display: Int = 0,
+    // v0.2.29 FIELD FIX: absolute path of the rootfs unix socket
+    // (<rootfs>/tmp/.X11-unix/XN). The field ROM's Xvfb binds unix but
+    // never tcp (28 rounds of tcp gates failing against a healthy
+    // server; xwd over unix :1 returned a valid XWD header rc=0), so
+    // the control plane must speak unix first. tcp stays as fallback.
+    private val unixSocketPath: String? = null,
 ) {
     companion object {
         const val PORT_BASE = 6000
@@ -74,6 +80,7 @@ class X11Client(
     @Volatile var connected = false; private set
 
     private var sock: Socket? = null
+    private var lsock: android.net.LocalSocket? = null
     private var inp: DataInputStream? = null
     private var outp: BufferedOutputStream? = null
     private var order: ByteOrder = ByteOrder.LITTLE_ENDIAN
@@ -84,14 +91,33 @@ class X11Client(
 
     // ============================================================ connect/setup
     fun connect(timeoutMs: Int = 5_000) {
-        val s = Socket()
-        s.connect(InetSocketAddress(host, PORT_BASE + display), timeoutMs)
-        s.tcpNoDelay = true
-        s.receiveBufferSize = 256 * 1024
-        s.sendBufferSize = 128 * 1024
-        sock = s
-        inp = DataInputStream(s.inputStream.buffered(128 * 1024))
-        outp = BufferedOutputStream(s.outputStream, 64 * 1024)
+        var viaUnix = false
+        val usp = unixSocketPath
+        if (usp != null && java.io.File(usp).exists()) {
+            try {
+                val ls = android.net.LocalSocket()
+                ls.connect(android.net.LocalSocketAddress(
+                    usp, android.net.LocalSocketAddress.Namespace.FILESYSTEM))
+                ls.receiveBufferSize = 256 * 1024
+                lsock = ls
+                inp = DataInputStream(ls.inputStream.buffered(128 * 1024))
+                outp = BufferedOutputStream(ls.outputStream, 64 * 1024)
+                viaUnix = true
+            } catch (_: Exception) {
+                runCatching { lsock?.close() }
+                lsock = null
+            }
+        }
+        if (!viaUnix) {
+            val s = Socket()
+            s.connect(InetSocketAddress(host, PORT_BASE + display), timeoutMs)
+            s.tcpNoDelay = true
+            s.receiveBufferSize = 256 * 1024
+            s.sendBufferSize = 128 * 1024
+            sock = s
+            inp = DataInputStream(s.inputStream.buffered(128 * 1024))
+            outp = BufferedOutputStream(s.outputStream, 64 * 1024)
+        }
         order = ByteOrder.nativeOrder()
 
         // Client handshake header = exactly 8 bytes (+ padded auth fields):
@@ -190,6 +216,7 @@ class X11Client(
     /** Read one reply packet (fixed 32B + variable). Null on timeout/EOF. */
     fun readReply(timeoutMs: Int = 3_000): ByteArray? {
         sock?.soTimeout = timeoutMs
+        runCatching { lsock?.soTimeout = timeoutMs }
         return try {
             synchronized(readLock) {
                 val head = ByteArray(32)
@@ -308,6 +335,7 @@ class X11Client(
     /** Blocking 32-byte event read; null on timeout. */
     fun readEvent(timeoutMs: Int = 100): ByteBuffer? {
         sock?.soTimeout = timeoutMs
+        runCatching { lsock?.soTimeout = timeoutMs }
         return try {
             val ev = ByteArray(32)
             synchronized(readLock) { inp!!.readFully(ev) }
@@ -319,6 +347,7 @@ class X11Client(
     fun close() {
         connected = false
         runCatching { sock?.close() }
-        sock = null; inp = null; outp = null
+        runCatching { lsock?.close() }
+        sock = null; lsock = null; inp = null; outp = null
     }
 }

@@ -358,30 +358,33 @@ else
   # X protocol handshake: xwd -root must succeed, bounded by a killer
   # subshell (timeout(1) is poison under this proot, see emux-capture).
   verify_x() {
-    # v0.2.18 INSTRUMENTATION: say WHICH leg believes what, and dump the
-    # raw kernel tcp table for the display port when the tcp leg passes.
-    # Field v0.2.17: the connect-sweep said "silent" at :15, adoption
-    # verified a real handshake at :16, and by :30 nothing existed and
-    # xvfb.log was ABSENT - a ghost listener inside the first second.
-    # The pane now carries the evidence to catch it red-handed.
-    if [ -e /tmp/.X11-unix/X$DN ]; then
-      echo "verify_x: leg=X0-file present" >&2
-    elif tcp_open; then
-      echo "verify_x: leg=tcp $XP answering; kernel tcp table:" >&2
-      grep -i ":$(printf '%X' "$XP") " /proc/net/tcp /proc/net/tcp6 2>/dev/null | head -3 >&2
-    else
-      echo "verify_x: leg=none (nothing listening on $XP)" >&2
+    # v0.2.29: (a) unix leg now requires the socket file to be NEWER than
+    # the session marker (a stale X0 from a SIGKILLed server claimed
+    # liveness in the v0.2.28 field round: "leg=X0-file present" + "xwd
+    # handshake rc=1"); (b) transition-only logging - the watcher polls
+    # twice a second and unconditional echoes flooded diag and the pane
+    # with identical leg/rc walls.
+    local detail res=1 VR
+    if ! x_up; then
+      detail="DOWN leg=none(no fresh X$DN, tcp $XP not answering)"
+      if [ "$detail" != "$LAST_VERIFY" ]; then echo "verify_x: $detail" >&2; LAST_VERIFY="$detail"; fi
       return 1
     fi
-    command -v xwd >/dev/null 2>&1 || { echo "verify_x: no xwd in PATH - trusting socket leg" >&2; return 0; }
+    detail="UP leg=fresh-X$DN-or-tcp"
+    if ! command -v xwd >/dev/null 2>&1; then
+      detail="$detail no-xwd(trust sockets)"
+      if [ "$detail" != "$LAST_VERIFY" ]; then echo "verify_x: $detail" >&2; LAST_VERIFY="$detail"; fi
+      return 0
+    fi
     xwd -root -silent >/dev/null 2>&1 &
     VP=$!
     ( sleep 5; kill -9 "$VP" 2>/dev/null ) &
     VK=$!
     wait "$VP"; VR=$?
     kill "$VK" 2>/dev/null
-    echo "verify_x: xwd handshake rc=$VR" >&2
-    [ "$VR" = 0 ]
+    if [ "$VR" = 0 ]; then res=0; detail="$detail xwd-rc0"; else detail="$detail xwd-rc$VR"; fi
+    if [ "$detail" != "$LAST_VERIFY" ]; then echo "verify_x: $detail" >&2; LAST_VERIFY="$detail"; fi
+    return $res
   }
   XTRY=0
   start_xvfb() { # rc: 0 up, 1 server died, 2 alive but not up yet

@@ -1096,11 +1096,17 @@ class DesktopService(
                     java.io.File(com.emux.core.FsLayout.linuxRoot(ctx), "tmp/emux_display_num")
                         .readText().trim().toIntOrNull()
                 }.getOrNull()?.let { displayNum = it }
-                Socket().apply {
-                    connect(java.net.InetSocketAddress("127.0.0.1", 6000 + displayNum), 300)
-                    close()
-                }
-                val c = X11Client(display = displayNum)
+                // v0.2.29: the old tcp pre-connect could NEVER succeed
+                // against a unix-only server (the field ROM's Xvfb binds
+                // unix, never tcp), so it threw every retry and the
+                // control plane expired beside a perfectly live display.
+                // X11Client now tries the unix socket first and throws
+                // only if both transports fail.
+                val c = X11Client(
+                    display = displayNum,
+                    unixSocketPath = java.io.File(
+                        com.emux.core.FsLayout.linuxRoot(ctx),
+                        "tmp/.X11-unix/X$displayNum").absolutePath)
                 c.connect()
                 x11 = c
                 Log.i(TAG, "X connected: ${c.screenWidth}x${c.screenHeight}@${c.depth} vendor=${c.vendor}")
