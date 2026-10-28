@@ -676,8 +676,12 @@ class DesktopService(
                         // by THIS session's server - accept it as liveness
                         // and take the display number from it.
                         if (!up) {
+                            // v0.2.31: exists(), NOT isFile() - a unix socket
+                            // is not a regular file, so isFile() was blind to
+                            // the very X1 socket this gate was added to see
+                            // (field v0.2.30: marker=false beside a live :1).
                             val live = (0..4).firstOrNull { n ->
-                                java.io.File(rootfs, "tmp/.X11-unix/X$n").isFile
+                                java.io.File(rootfs, "tmp/.X11-unix/X$n").exists()
                             }
                             if (live != null) {
                                 up = true

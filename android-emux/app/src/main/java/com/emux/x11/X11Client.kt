@@ -120,13 +120,19 @@ class X11Client(
         }
         order = ByteOrder.nativeOrder()
 
-        // Client handshake header = exactly 8 bytes (+ padded auth fields):
-        // BYTE byte-order, BYTE unused, CARD16 major=11, CARD16 minor=0,
-        // CARD16 authNameLen=0, CARD16 authDataLen=0. Loopback-only server ⇒ no cookie.
-        val bb = ByteBuffer.allocate(8).order(order)
+        // v0.2.31 FIELD FIX (thirty rounds late): the X11 connection setup
+        // request is 12 bytes - byte-order(1) unused(1) major(2) minor(2)
+        // authNameLen(2) authDataLen(2) PLUS 2 padding bytes. The old code
+        // allocated 8 and put 10, so EVERY connect threw
+        // BufferOverflowException before a byte reached the wire: the
+        // XTEST control plane (touch input) has been dead since v0.1.x on
+        // every device, tcp and unix alike. Field v0.2.30 finally surfaced
+        // it: "ctrlErr=BufferOverflowException: null".
+        val bb = ByteBuffer.allocate(12).order(order)
         bb.put(if (order == ByteOrder.LITTLE_ENDIAN) 'l'.code.toByte() else 'B'.code.toByte())
         bb.put(0)
         bb.putShort(11); bb.putShort(0); bb.putShort(0); bb.putShort(0)
+        bb.putShort(0)   // v0.2.31: the 2 padding bytes of the setup request
         synchronized(writeLock) { outp!!.write(bb.array()); outp!!.flush() }
 
         parseSetupReply()
@@ -280,7 +286,10 @@ class X11Client(
 
     /** GetProperty (CARD32 arrays e.g. _NET_SUPPORTING_WM_CHECK). */
     fun getProperty(prop: Int, type: Int, longOffset: Int = 0, longLength: Int = 1024): IntArray {
-        val body = ByteBuffer.allocate(24).order(order)
+        // v0.2.31: body is 20 bytes (delete+3 pad+4 CARD32); the old 24-byte
+        // array went to the wire verbatim and would desync the protocol the
+        // first time this path ran (it never could - connect always threw).
+        val body = ByteBuffer.allocate(20).order(order)
         body.put(0); body.put(0); body.put(0); body.put(0)   // delete-after BYTE + pad
         body.putInt(prop); body.putInt(type)
         body.putInt(longOffset); body.putInt(longLength)
@@ -307,7 +316,10 @@ class X11Client(
      */
     private fun xtestFake(kind: Int, detail: Int, x: Int, y: Int) {
         check(xtestOpcode >= 0) { "XTEST unavailable" }
-        val body = ByteBuffer.allocate(20).order(order)
+        // v0.2.31: XTestFakeInput body is 24 bytes; allocate(20) overflowed on
+        // the trailing pad put - every tap/drag would have thrown
+        // BufferOverflowException the moment connect() stopped throwing.
+        val body = ByteBuffer.allocate(24).order(order)
         body.put(XTEST_FAKE_INPUT.toByte())   // ext request number
         body.put(0); body.put(0)              // pad
         body.put(kind.toByte())
