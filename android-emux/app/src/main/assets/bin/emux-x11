@@ -53,6 +53,14 @@ export TMPDIR=/tmp
 # the v0.1.78 pane) and can inherit a garbled PATH; pin the distro dirs.
 PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$PATH"
 export PATH
+# v0.2.36 FIELD FIX (the thirty-five-round bug): emux-x11 EXITS by design
+# once X+WM are launched - and when its PTY session closes, the kernel
+# SIGHUPs the entire process group: the WM, every visibility client and
+# the REST install subshell all died at launcher exit (wm.log with one
+# openbox line then silence; xterm never installed; windowless black
+# desktop beside a perfect stream). Ignored signals are INHERITED across
+# fork+exec, so one trap here makes every child we launch SIGHUP-proof.
+trap '' HUP
 # v0.1.52 FIELD FIX: a leftover Xvfb/Xorg from an earlier desktop session
 # still holds :0 and tcp/6000 — a fresh Xvfb then dies with EADDRINUSE and
 # the Android pane waits for frames forever. Kill stale servers (proc scan:
@@ -438,7 +446,8 @@ else
   }
   # v0.1.97: tell the Android side (via a FILE - socket waits proved
   # unreliable as a gate on this device) the moment X is reachable.
-  ( i=0
+  ( trap '' HUP   # v0.2.36: watcher must outlive the launcher too
+    i=0
     while [ "$i" -lt 600 ]; do
       # v0.2.20: follow display rotations/self-heal - re-read the published
       # display number every tick instead of trusting the fork-time copy
@@ -583,7 +592,7 @@ if [ ! -e /tmp/emux_vis_launched ]; then
   for vc in /usr/bin/xterm /usr/bin/xclock /usr/bin/xeyes; do
     if [ -x "$vc" ]; then
       echo "emux-x11: launching visibility client $vc (immediate)" >&2
-      "$vc" >/tmp/vis.log 2>&1 &
+      nohup "$vc" >/tmp/vis.log 2>&1 </dev/null &
       touch /tmp/emux_vis_launched
       break
     fi
@@ -594,6 +603,7 @@ fi
 # the WM if none runs yet.
 if x_up && [ "$APT_BRANCH" = 1 ]; then
   (
+    trap '' HUP   # v0.2.36: survive the launcher's PTY close
     TRIES=0
     while [ "$TRIES" -lt 30 ]; do
       if apt_busy; then TRIES=$((TRIES + 1)); sleep 10; continue; fi
@@ -607,7 +617,7 @@ if x_up && [ "$APT_BRANCH" = 1 ]; then
     if [ ! -e /tmp/emux_wm_launched ]; then
       for c in "/usr/bin/$WM" /usr/bin/openbox; do
         if [ -x "$c" ]; then
-          "$c" >/tmp/wm.log 2>&1 &
+          nohup "$c" >/tmp/wm.log 2>&1 </dev/null &
           touch /tmp/emux_wm_launched
           break
         fi
@@ -671,10 +681,10 @@ if ! verify_x; then
     : > /tmp/emux_x_up 2>/dev/null
     rm -f /tmp/emux_wm_launched /tmp/emux_xterm_launched 2>/dev/null
     for c in "/usr/bin/$WM" /usr/bin/openbox; do
-      if [ -x "$c" ]; then "$c" >/tmp/wm.log 2>&1 & touch /tmp/emux_wm_launched; break; fi
+      if [ -x "$c" ]; then nohup "$c" >/tmp/wm.log 2>&1 </dev/null & touch /tmp/emux_wm_launched; break; fi
     done
     if [ -x /usr/bin/xterm ] && [ ! -e /tmp/emux_xterm_launched ]; then
-      /usr/bin/xterm -geometry 96x28+60+40 >/tmp/xterm.log 2>&1 &
+      nohup /usr/bin/xterm -geometry 96x28+60+40 >/tmp/xterm.log 2>&1 </dev/null &
       touch /tmp/emux_xterm_launched
     fi
     echo "emux-x11: self-heal complete - WM/xterm launched on $DISPLAY" >&2
