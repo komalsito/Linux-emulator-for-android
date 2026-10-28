@@ -93,6 +93,13 @@ class DesktopView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attrs) 
     // "frames are flowing" is visible proof independent of guest windows.
     private val frameTimes = ArrayDeque<Long>()
 
+    // v0.2.38: report the live view aspect so the next desktop start
+    // sizes Xvfb to THIS pane (no letterbox bars by default).
+    override fun onSizeChanged(w: Int, h: Int, oldw: Int, oldh: Int) {
+        super.onSizeChanged(w, h, oldw, oldh)
+        if (h > 0) desktop?.viewAspect = w.toFloat() / h.toFloat()
+    }
+
     fun onNewFrame(frameId: Int) {
         if (frameId != lastFrameId) {
             lastFrameId = frameId

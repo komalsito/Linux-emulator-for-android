@@ -585,6 +585,54 @@ else
   fi
   echo "emux-x11: session display $DISPLAY (tcp $XP)" >&2
 fi
+# v0.2.38 FIELD FIX: openbox IMMEDIATELY too (it used to launch only
+# inside the REST subshell, behind an apt loop that can chew for minutes
+# or wait on a previous session's now-SIGHUP-immortal apt - field v0.2.37:
+# live stream, zero windows). Seed the autostart first so the WM brings
+# the panel + desktop icons with it.
+if [ -x /usr/bin/openbox ] || [ -x "/usr/bin/$WM" ]; then
+  OBX=/root/.config/openbox
+  mkdir -p "$OBX" 2>/dev/null
+  if ! grep -q "EmuX seeded autostart" "$OBX/autostart" 2>/dev/null; then
+    {
+      echo "# EmuX seeded autostart (v0.2.37)"
+      echo "tint2 >/dev/null 2>&1 &"
+      echo "pcmanfm --desktop >/dev/null 2>&1 &"
+    } >> "$OBX/autostart" 2>/dev/null
+  fi
+  command -v update-menus >/dev/null 2>&1 && update-menus >/dev/null 2>&1 &
+fi
+if [ ! -e /tmp/emux_wm_launched ]; then
+  for c in "/usr/bin/$WM" /usr/bin/openbox; do
+    if [ -x "$c" ]; then
+      echo "emux-x11: launching WM $c (immediate)" >&2
+      nohup "$c" >/tmp/wm.log 2>&1 </dev/null &
+      touch /tmp/emux_wm_launched
+      break
+    fi
+  done
+fi
+# v0.2.38: visibility watchdog - if no window client is alive (killed,
+# crashed, or never installed), relaunch one, for the first ~10 min.
+( trap '' HUP
+  i=0
+  while [ "$i" -lt 120 ]; do
+    sleep 5
+    has=0
+    for f in /proc/[0-9]*/cmdline; do
+      tr '\0' ' ' < "$f" 2>/dev/null | grep -qE 'xterm|xclock|xeyes' && { has=1; break; }
+    done
+    if [ "$has" = 0 ]; then
+      for vc in /usr/bin/xterm /usr/bin/xclock /usr/bin/xeyes; do
+        if [ -x "$vc" ]; then
+          echo "emux-x11: watchdog relaunching visibility client $vc" >&2
+          nohup "$vc" >>/tmp/vis.log 2>&1 </dev/null &
+          break
+        fi
+      done
+    fi
+    i=$((i + 1))
+  done ) &
 # v0.2.35 FIELD FIX: launch a visibility client IMMEDIATELY once the
 # server is up - not behind the REST apt loop (field v0.2.34: the loop
 # spends minutes in apt_busy waits/downloads on this rootfs, so the

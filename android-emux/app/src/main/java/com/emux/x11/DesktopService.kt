@@ -154,6 +154,11 @@ class DesktopService(
     @Volatile private var lastCtrlError: String? = null
     // v0.2.5 FIELD FIX: this session's X display number (see startDesktop).
     @Volatile private var displayNum = 0
+    // v0.2.38: the DesktopView's live aspect (w/h), reported from
+    // onSizeChanged, so Xvfb geometry matches the VIEW and the letterbox
+    // bars disappear by default (field request: "auto-detect the best fit
+    // without bars at the sides").
+    @Volatile var viewAspect: Float? = null
     // v0.2.8: /proc/uptime ticks at startDesktop; host-side kills only reap
     // processes OLDER than this desktop start (see killDesktopGuests).
     @Volatile private var desktopStartUpTicks = Long.MAX_VALUE
@@ -237,6 +242,16 @@ class DesktopService(
      * frame in DesktopView until the next desktop start.
      */
     private fun desktopGeometry(): String {
+        // v0.2.38: prefer the VIEW's measured aspect - the X geometry then
+        // matches the pane exactly and the contain-fit has no bars at all,
+        // no double-tap needed. Pixel budget stays capped at the old
+        // 720x1280 (921,600 px) so capture cost never grows.
+        viewAspect?.takeIf { it in 0.4f..2.8f }?.let { a ->
+            val longSide = 1280
+            val shortSide = ((longSide / a).coerceIn(360f, 1280f).toInt() / 2 * 2)
+            val px = longSide * shortSide
+            if (px <= 921_600 * 2) return if (a >= 1f) "${longSide}x${shortSide}x24" else "${shortSide}x${longSide}x24"
+        }
         val cfg = ctx.resources.configuration
         if (cfg.smallestScreenWidthDp in 1 until 600) return "1280x720x24"
         val dm = ctx.resources.displayMetrics
