@@ -504,7 +504,7 @@ else
         return 1
       }
       heal_dpkg() {
-        rm -f /var/lib/dpkg/status-old
+        rm -f /var/lib/dpkg/status-old /etc/passwd.lock /etc/shadow.lock /etc/group.lock /etc/gshadow.lock 2>/dev/null
         if ! dpkg --configure -a >&2; then
           mkdir -p /var/lib/dpkg/updates.emux-broken 2>/dev/null
           for f in /var/lib/dpkg/updates/*; do
@@ -958,8 +958,24 @@ fi
 # whole desktop (WM + panel + icons) is gone.
 ( trap '' HUP
   i=0
-  while [ "$i" -lt 120 ]; do
+  APTTRIED=0
+  # v0.2.50: ~20 min window + self-furnishing: on a fresh device the first
+  # desktop open must install tint2/pcmanfm/mousepad with ZERO manual
+  # terminal steps (user request: "make the apk auto do these installs -
+  # I want to use it on another device"). If the binaries are missing and
+  # no apt is running, the governor installs them itself (logged to
+  # /tmp/emux_rest.log); start_furniture launches them the tick they land.
+  while [ "$i" -lt 240 ]; do
     sleep 5
+    if { [ ! -x /usr/bin/tint2 ] || [ ! -x /usr/bin/pcmanfm ]; } && [ "$APTTRIED" = 0 ]; then
+      if ! apt_busy; then
+        APTTRIED=1
+        echo "emux-x11: governor installing missing furniture (tint2/pcmanfm/mousepad)" >&2
+        ( DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            tint2 pcmanfm mousepad x11-xserver-utils >>/tmp/emux_rest.log 2>&1
+          dpkg --configure -a >>/tmp/emux_rest.log 2>&1 ) &
+      fi
+    fi
     has=0
     for f in /proc/[0-9]*/cmdline; do
       tr '\0' ' ' < "$f" 2>/dev/null | grep -qE 'openbox|tint2|pcmanfm|xterm|xclock|xeyes' && { has=1; break; }

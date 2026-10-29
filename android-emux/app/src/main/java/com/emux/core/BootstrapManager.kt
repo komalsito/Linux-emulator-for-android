@@ -63,14 +63,14 @@ class BootstrapManager(private val ctx: Context) {
             // - proves the device carries the v6 blob, not a stale one.
             "grep -a -o 'emux-linkfix-v[0-9]*' /usr/local/lib/emux/libemux-linkfix.so 2>/dev/null | head -1; " +
             "if grep -q libemux-linkfix /proc/self/maps; then echo SHIM_LOADED; else echo SHIM_NOT_LOADED; fi; " +
-            "rm -f /var/lib/dpkg/status-old; " +
+            "rm -f /var/lib/dpkg/status-old /etc/passwd.lock /etc/shadow.lock /etc/group.lock /etc/gshadow.lock; " +
             // v0.1.71: the ln-based probe needs coreutils... which is what we
             // are trying to install; report its absence instead of a bogus
             // LINK_FAIL, and keep the errno text marked so the pane shows it.
             "if ! command -v ln >/dev/null 2>&1; then echo LINK_UNTESTED_NO_LN; " +
             "elif ln /var/lib/dpkg/status /var/lib/dpkg/status-old 2>/tmp/link_err; then echo LINK_OK; " +
             "else echo LINK_FAIL:; echo LINKERR:; cat /tmp/link_err; fi; " +
-            "rm -f /var/lib/dpkg/status-old; " +
+            "rm -f /var/lib/dpkg/status-old /etc/passwd.lock /etc/shadow.lock /etc/group.lock /etc/gshadow.lock; " +
             "stat -c 'dpkgdir u=%u m=%a' /var/lib/dpkg 2>&1; " +
             "stat -c 'status u=%u m=%a' /var/lib/dpkg/status 2>&1; " +
             "cat /tmp/emux_dbswap 2>/dev/null; " +
@@ -120,7 +120,7 @@ class BootstrapManager(private val ctx: Context) {
             "export DEBIAN_FRONTEND=noninteractive; " +
             "SHIM=/usr/local/lib/emux/libemux-linkfix.so; " +
             "if [ -f \"\$SHIM\" ]; then grep -qsx \"\$SHIM\" /etc/ld.so.preload || echo \"\$SHIM\" >> /etc/ld.so.preload; fi; " +
-            "rm -f /var/lib/dpkg/status-old; " +
+            "rm -f /var/lib/dpkg/status-old /etc/passwd.lock /etc/shadow.lock /etc/group.lock /etc/gshadow.lock; " +
             "if ! dpkg --configure -a >&2; then " +
             "mkdir -p /var/lib/dpkg/updates.emux-broken 2>/dev/null; " +
             "for f in /var/lib/dpkg/updates/*; do [ -e \"\$f\" ] && mv \"\$f\" /var/lib/dpkg/updates.emux-broken/ 2>/dev/null; done; " +

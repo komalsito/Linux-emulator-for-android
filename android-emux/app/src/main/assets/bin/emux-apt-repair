@@ -46,14 +46,14 @@ export DEBIAN_FRONTEND=noninteractive
 # saves every later exec from crawling lib paths without /etc/ld.so.cache.
 ldconfig >/dev/null 2>&1 || true
 
-rm -f /var/lib/dpkg/status-old
+rm -f /var/lib/dpkg/status-old /etc/passwd.lock /etc/shadow.lock /etc/group.lock /etc/gshadow.lock 2>/dev/null
 if ! dpkg --configure -a >&2; then
     echo "emux-apt-repair: configure -a failed - quarantining dpkg journal" >&2
     mkdir -p /var/lib/dpkg/updates.emux-broken 2>/dev/null
     for f in /var/lib/dpkg/updates/*; do
         [ -e "$f" ] && mv "$f" /var/lib/dpkg/updates.emux-broken/ 2>/dev/null
     done
-    rm -f /var/lib/dpkg/status-old
+    rm -f /var/lib/dpkg/status-old /etc/passwd.lock /etc/shadow.lock /etc/group.lock /etc/gshadow.lock 2>/dev/null
     dpkg --configure -a >&2 || true
 fi
 
@@ -111,11 +111,11 @@ cat /tmp/emux_shimtest 2>/dev/null
   cat /etc/ld.so.preload 2>&1;
   if grep -q libemux-linkfix /proc/self/maps; then echo SHIM_LOADED; else echo SHIM_NOT_LOADED; fi;
   grep -a -o 'emux-linkfix-v[0-9]*' /usr/local/lib/emux/libemux-linkfix.so 2>/dev/null | head -1;
-  rm -f /var/lib/dpkg/status-old;
+  rm -f /var/lib/dpkg/status-old /etc/passwd.lock /etc/shadow.lock /etc/group.lock /etc/gshadow.lock 2>/dev/null;
   if ! command -v ln >/dev/null 2>&1; then echo LINK_UNTESTED_NO_LN;
   elif ln /var/lib/dpkg/status /var/lib/dpkg/status-old 2>/tmp/link_err; then echo LINK_OK;
   else echo LINK_FAIL:; echo LINKERR:; cat /tmp/link_err; fi;
-  rm -f /var/lib/dpkg/status-old;
+  rm -f /var/lib/dpkg/status-old /etc/passwd.lock /etc/shadow.lock /etc/group.lock /etc/gshadow.lock 2>/dev/null;
   stat -c 'dpkgdir u=%u m=%a' /var/lib/dpkg 2>&1;
   stat -c 'status u=%u m=%a' /var/lib/dpkg/status 2>&1;
   cat /tmp/emux_dbswap 2>/dev/null;
