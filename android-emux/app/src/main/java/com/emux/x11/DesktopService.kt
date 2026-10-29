@@ -490,6 +490,10 @@ class DesktopService(
                     hostProbeNote = "hostbind unixpath=$fsOk tcp6000=$tcpOk abs=$absOk"
                     noteInfo("host bind probe: $hostProbeNote")
                 }
+                // v0.2.49: reap init-parented leftovers before investing in
+                // a session - "failed to fork" inside the guest was orphan
+                // accumulation, and a reboot used to be the only cure.
+                com.emux.core.BootstrapManager.reapOrphanGuests { m -> noteInfo(m) }
                 // v0.2.6 FIELD FIX: drop STALE gate markers and socket files
                 // from previous app lives. A leftover /tmp/emux_x_up made the
                 // capture gate launch emux-capture against a server that no

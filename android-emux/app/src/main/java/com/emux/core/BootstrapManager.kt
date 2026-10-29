@@ -147,6 +147,40 @@ class BootstrapManager(private val ctx: Context) {
          * exited (code 1)". Guest-side retries in emux-x11 cover foreign apt
          * runs; this covers our own.
          */
+        /**
+         * v0.2.49 FIELD FIX: reap ORPHANED guests (PPid == 1, our uid).
+         * Field: "apt-get: fatal error, failed to fork" - forty-eight
+         * rounds of SIGHUP-immortal leftovers (proot shells, apt/dpkg
+         * remnants, nc pumps, tracer-less tracees) accumulated until
+         * fork() hit the process/memory ceiling on a 1 GB device.
+         * Current-session processes are parented by the app, never by
+         * init, so PPid==1 is a precise orphan filter; the pattern set
+         * is widened to the apt/nc/script remnants earlier sweeps missed.
+         */
+        internal fun reapOrphanGuests(log: (String) -> Unit = {}) {
+            runCatching {
+                val myUid = android.os.Process.myUid().toString()
+                val pat = Regex("proot|Xvfb|Xorg|emux-|xterm|xclock|xeyes|openbox|" +
+                    "tint2|pcmanfm|mousepad|apt-get|dpkg|/nc|script")
+                java.io.File("/proc").listFiles()?.forEach { d ->
+                    val pid = d.name.toIntOrNull() ?: return@forEach
+                    val st = runCatching { java.io.File(d, "status").readLines() }.getOrDefault(emptyList())
+                    val ppid = st.firstOrNull { it.startsWith("PPid:") }
+                        ?.split(Regex("\\s+"))?.getOrNull(1) ?: return@forEach
+                    if (ppid != "1") return@forEach
+                    val uidLine = st.firstOrNull { it.startsWith("Uid:") } ?: return@forEach
+                    if (uidLine.split(Regex("\\s+")).getOrNull(1) != myUid) return@forEach
+                    val cmd = runCatching {
+                        java.io.File(d, "cmdline").readBytes().decodeToString().replace('\u0000', ' ')
+                    }.getOrDefault("")
+                    if (pat.containsMatchIn(cmd)) {
+                        log("reaping orphan pid $pid: ${cmd.take(60)}")
+                        android.os.Process.killProcess(pid)
+                    }
+                }
+            }
+        }
+
         private val aptLockObj = java.util.concurrent.locks.ReentrantLock()
         internal fun aptLock(): java.util.concurrent.locks.ReentrantLock = aptLockObj
 
@@ -2425,6 +2459,9 @@ class BootstrapManager(private val ctx: Context) {
         }
         Thread {
             runCatching {
+                // v0.2.49: clear accumulated orphans from previous app lives
+                // before anything new tries to fork inside the guest.
+                reapOrphanGuests { com.emux.EmuXLog.i(it) }
                 // v0.1.91: yield the CPU to the first terminal/desktop start -
                 // this repair's proot run (dpkg --configure -a, ghost purge)
                 // raced session launches on slow tablets ("terminal is a
