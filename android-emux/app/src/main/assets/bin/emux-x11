@@ -66,6 +66,10 @@ running() {
 # panel/icons/menu appear live without waiting for a session restart.
 start_furniture() {
   seed_desktop_config
+  if [ -x /usr/bin/picom ] && ! running picom; then
+    echo "emux-x11: starting picom compositor (translucency + shadows)" >&2
+    nohup /usr/bin/picom -b --backend xrender >/tmp/picom.log 2>&1 </dev/null &
+  fi
   if [ -x /usr/bin/tint2 ] && ! running tint2; then
     echo "emux-x11: starting tint2 panel" >&2
     nohup /usr/bin/tint2 >/tmp/tint2.log 2>&1 </dev/null &
@@ -210,11 +214,11 @@ EOF
       cp "$HOME/.config/tint2/tint2rc" "$HOME/.config/tint2/tint2rc.emux-bak" 2>/dev/null
     fi
     {
-      echo "# EmuX tint2 panel (v0.2.51) - bottom taskbar, dark rice"
+      echo "# EmuX tint2 panel (v0.2.54) - translucent modern taskbar"
       echo "rounded = 0"
       echo "border_width = 0"
-      echo "background_color = #12141a 92"
-      echo "border_color = #12141a 100"
+      echo "background_color = #101318 70"
+      echo "border_color = #101318 100"
       echo "rounded = 4"
       echo "border_width = 1"
       echo "background_color = #3a6ea5 100"
@@ -222,7 +226,7 @@ EOF
       echo "panel_items = LTSBC"
       echo "panel_monitor = all"
       echo "panel_position = bottom center horizontal"
-      echo "panel_size = 100% 40"
+      echo "panel_size = 100% 46"
       echo "panel_margin = 0 0"
       echo "panel_padding = 2 2 4"
       echo "panel_background_id = 1"
@@ -242,7 +246,7 @@ EOF
       echo "task_active_background_id = 2"
       echo "launcher_padding = 4 2 4"
       echo "launcher_background_id = 0"
-      echo "launcher_icon_size = 32"
+      echo "launcher_icon_size = 36"
       echo "launcher_icon_theme = hicolor"
       for a in $APPS; do
         case "$a" in
@@ -267,16 +271,26 @@ EOF
     echo "$APPS" > "$STAMP" 2>/dev/null
   fi
   # --- Openbox right-click menu (same apps, plus WM controls) ---
-  if [ ! -e "$HOME/.config/openbox/menu.xml" ] || grep -q "EmuX" "$HOME/.config/openbox/menu.xml" 2>/dev/null; then
+  if [ ! -e "$HOME/.config/openbox/menu.xml" ] || ! grep -q "EmuX v0.2.54" "$HOME/.config/openbox/menu.xml" 2>/dev/null; then
     {
       echo '<?xml version="1.0" encoding="UTF-8"?>'
       echo '<openbox_menu xmlns="http://openbox.org/3.4/menu">'
-      echo '<menu id="root-menu" label="EmuX">'
+      echo '<menu id="root-menu" label="EmuX v0.2.54">'
+      echo '  <menu id="cat-apps" label="Applications">'
+      echo '    <menu id="cat-net" label="Internet">'
+      [ -n "$BROWSER" ] && echo "      <item label=\"Web Browser\"><action name=\"Execute\"><command>$BROWSER</command></action></item>"
+      echo '    </menu>'
+      echo '    <menu id="cat-office" label="Office">'
+      [ -x /usr/bin/mousepad ] && echo '      <item label="Text Editor"><action name="Execute"><command>mousepad</command></action></item>'
+      echo '    </menu>'
+      echo '    <menu id="cat-acc" label="Accessories">'
+      [ -x /usr/bin/xterm ] && echo '      <item label="Terminal"><action name="Execute"><command>xterm</command></action></item>'
+      [ -x /usr/bin/pcmanfm ] && echo '      <item label="Files"><action name="Execute"><command>pcmanfm</command></action></item>'
+      [ -x /usr/bin/galculator ] && echo '      <item label="Calculator"><action name="Execute"><command>galculator</command></action></item>'
+      echo '    </menu>'
+      echo '  </menu>'
       [ -x /usr/bin/xterm ] && echo '  <item label="Terminal"><action name="Execute"><command>xterm</command></action></item>'
       [ -x /usr/bin/pcmanfm ] && echo '  <item label="Files"><action name="Execute"><command>pcmanfm</command></action></item>'
-      [ -x /usr/bin/mousepad ] && echo '  <item label="Text Editor"><action name="Execute"><command>mousepad</command></action></item>'
-      [ -x /usr/bin/galculator ] && echo '  <item label="Calculator"><action name="Execute"><command>galculator</command></action></item>'
-      [ -n "$BROWSER" ] && echo "  <item label=\"Web Browser\"><action name=\"Execute\"><command>$BROWSER</command></action></item>"
       [ -x /usr/bin/mousepad ] && echo "  <item label=\"Desktop Help\"><action name=\"Execute\"><command>mousepad $HOME/Desktop/Welcome.txt</command></action></item>"
       echo '  <separator/>'
       echo '  <item label="Restart Openbox"><action name="Restart"/></item>'
@@ -396,7 +410,7 @@ THEME
 RCXML
   fi
   # --- tint2 refresh: darker bar, bigger icons (rewrite once per stamp) ---
-  if [ -e "$HOME/.config/tint2/tint2rc" ] && ! grep -q "EmuX tint2 panel (v0.2.51)" "$HOME/.config/tint2/tint2rc" 2>/dev/null; then
+  if [ -e "$HOME/.config/tint2/tint2rc" ] && ! grep -q "EmuX tint2 panel (v0.2.54)" "$HOME/.config/tint2/tint2rc" 2>/dev/null; then
     cp "$HOME/.config/tint2/tint2rc" "$HOME/.config/tint2/tint2rc.pre-rice" 2>/dev/null
     rm -f "$HOME/.config/tint2/tint2rc" 2>/dev/null
   fi
@@ -404,8 +418,9 @@ RCXML
   OBX="$HOME/.config/openbox"
   if [ ! -e "$OBX/autostart" ]; then
     {
-      echo "# EmuX desktop v0.2.45"
+      echo "# EmuX desktop v0.2.54"
       echo "(command -v xsetroot >/dev/null 2>&1 && xsetroot -solid \"#20344d\") &"
+      echo "(command -v picom >/dev/null 2>&1 && picom -b --backend xrender >/dev/null 2>&1) &"
       echo "tint2 >/dev/null 2>&1 &"
       echo "pcmanfm --desktop >/dev/null 2>&1 &"
     } > "$OBX/autostart" 2>/dev/null
@@ -1050,7 +1065,16 @@ if [ ! -e /tmp/emux_agent_launched ]; then
     mkfifo "$FIFO" 2>/dev/null || exit 0
     exec 3<>"$FIFO"
     while IFS=" " read -r t a b c <&3; do
-      command -v xdotool >/dev/null 2>&1 || continue
+      if ! command -v xdotool >/dev/null 2>&1; then
+        # v0.2.54: never drop events silently again - the field round had
+        # INPUT: agent green while xdotool was simply not installed.
+        if [ ! -e /tmp/emux_agent_noxtool ]; then
+          touch /tmp/emux_agent_noxtool
+          echo "agent: xdotool MISSING - events dropped until installed (apt-get install -y xdotool)"
+        fi
+        continue
+      fi
+      rm -f /tmp/emux_agent_noxtool 2>/dev/null
       case "$t" in
         M) xdotool mousemove --sync "$a" "$b" >/dev/null 2>&1 ;;
         D) xdotool mousedown "$a" >/dev/null 2>&1 ;;
@@ -1080,12 +1104,12 @@ fi
   # /tmp/emux_rest.log); start_furniture launches them the tick they land.
   while [ "$i" -lt 240 ]; do
     sleep 5
-    if { [ ! -x /usr/bin/tint2 ] || [ ! -x /usr/bin/pcmanfm ]; } && [ "$APTTRIED" = 0 ]; then
+    if { [ ! -x /usr/bin/tint2 ] || [ ! -x /usr/bin/pcmanfm ] || [ ! -x /usr/bin/xdotool ] || [ ! -x /usr/bin/picom ]; } && [ "$APTTRIED" = 0 ]; then
       if ! apt_busy; then
         APTTRIED=1
-        echo "emux-x11: governor installing missing furniture (tint2/pcmanfm/mousepad)" >&2
+        echo "emux-x11: governor installing missing furniture (tint2/pcmanfm/xdotool/picom)" >&2
         ( DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-            tint2 pcmanfm mousepad x11-xserver-utils xdotool >>/tmp/emux_rest.log 2>&1
+            tint2 pcmanfm mousepad x11-xserver-utils xdotool picom >>/tmp/emux_rest.log 2>&1
           dpkg --configure -a >>/tmp/emux_rest.log 2>&1 ) &
       fi
     fi
