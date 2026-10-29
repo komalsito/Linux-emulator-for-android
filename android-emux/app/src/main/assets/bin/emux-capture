@@ -363,9 +363,24 @@ seq=0
 fails=0
 MM=0
 IDLE=0
+# v0.2.52 FIELD FIX: follow display rotations LIVE. emux-x11's self-heal
+# can rotate the display a few seconds AFTER capture pinned its number
+# (field: tint2/pcmanfm alive on :N while the stream filmed the old,
+# windowless display = "black desktop with a running panel"). Re-read the
+# published marker each loop; on change, re-export DISPLAY and keep going.
+recheck_display() {
+  ND=$(tr -dc '0-9' < /tmp/emux_display_num 2>/dev/null)
+  if [ -n "$ND" ] && [ "$ND" != "$DN" ]; then
+    DN="$ND"; XP=$((6000 + DN))
+    if [ -e /tmp/.X11-unix/X$DN ]; then NDISP=":$DN"; else NDISP="127.0.0.1:$DN"; fi
+    echo "emux-capture: display rotated - following to $NDISP" >&2
+    export DISPLAY="$NDISP"
+  fi
+}
 PREV=/tmp/emux_frame.prev
 rm -f "$PREV" 2>/dev/null
 while :; do
+  recheck_display
   if ! grab_frame; then
     fails=$((fails+1))
     # v0.1.98: surface the grab error tail on the 1st and every 10th failure

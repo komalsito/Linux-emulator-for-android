@@ -708,6 +708,27 @@ class DesktopService(
                 // a frame until that wait finished.
                 openFrameListener()
                 beginFrameLoop { frameCallback?.invoke() }
+                // v0.2.52 FIELD FIX: the control plane must follow display
+                // rotations too - it pinned its display at connect time, so
+                // after a self-heal rotation all input went to the old,
+                // windowless server ("i cant click anything" even post-fix).
+                // Watch the marker; on change, reconnect X11Client to the new
+                // display (unix-first, as always).
+                scope.launch {
+                    while (isActive && state.value != State.IDLE) {
+                        kotlinx.coroutines.delay(3_000)
+                        val dn = runCatching {
+                            java.io.File(rootfs, "tmp/emux_display_num").readText().trim().toIntOrNull()
+                        }.getOrNull() ?: continue
+                        if (dn != displayNum) {
+                            noteInfo("display rotated to :$dn - reconnecting control plane")
+                            displayNum = dn
+                            runCatching { x11?.close() }
+                            x11 = null
+                            scope.launch { connectControlPlane(30_000) }
+                        }
+                    }
+                }
                 // v0.2.48 FIELD FIX: once frames flow, the frameless pane
                 // (and its history) is hidden behind the desktop bitmap and
                 // the 60 s terminal auto-dump never arms - so a furniture
