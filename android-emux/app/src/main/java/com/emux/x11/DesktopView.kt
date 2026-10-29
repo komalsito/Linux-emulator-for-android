@@ -35,6 +35,8 @@ class DesktopView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attrs) 
 
     // viewport transform: screen = (x - tx) * scale
     private var scale = 1f
+    // v0.2.58: one-shot first-tap mapping note (evidence round)
+    private var mapNotePosted = false
     private var tx = 0f
     private var ty = 0f
 
@@ -390,6 +392,14 @@ class DesktopView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attrs) 
                     return true
                 }
                 val (x, y) = mapToX(event.x, event.y)
+                // v0.2.58 EVIDENCE ROUND: one-shot pane note carrying the
+                // exact view->X mapping of the first tap, so a screenshot
+                // discriminates a mapping fault from a guest-side drop
+                // with zero terminal round-trips.
+                if (!mapNotePosted) {
+                    mapNotePosted = true
+                    desktop?.noteInfo("input map: view(${event.x.toInt()},${event.y.toInt()}) -> X($x,$y) cover=$coverMode zoom=$scale")
+                }
                 if (!longPressFired && !panning && !frameless) {
                     if (dragging) {
                         // releasing after drag: send button release at final pos

@@ -96,7 +96,15 @@ start_furniture() {
   fi
   if [ -x /usr/bin/pcmanfm ] && ! running pcmanfm; then
     echo "emux-x11: starting pcmanfm desktop (icons)" >&2
-    nohup /usr/bin/pcmanfm --desktop >/tmp/pcmanfm.log 2>&1 </dev/null &
+    # v0.2.58 FIELD FIX: starve pcmanfm of DBUS/GIO at launch. Under proot a
+    # --desktop client that reaches for a dead/hung session bus or gvfs parks
+    # in a blocking read BEFORE it ever paints the root window: black root,
+    # no icons - and a wedged GTK client can sit on the pointer grab,
+    # swallowing every injected click while xdotool still returns rc=0.
+    # A disabled bus address + no GIO volume monitors removes both waits.
+    touch /tmp/emux_pcmanfm_started
+    nohup env DBUS_SESSION_BUS_ADDRESS=disabled: GIO_USE_VOLUME_MONITOR=none \
+      /usr/bin/pcmanfm --desktop >/tmp/pcmanfm.log 2>&1 </dev/null &
   fi
   if { [ -e "$HOME/.config/openbox/menu.xml" ] || [ -e "$HOME/.themes/Emux/openbox-3/themerc" ]; } && [ ! -e /tmp/emux_obx_reconf ]; then
     echo "emux-x11: menu/theme present - openbox --reconfigure" >&2
@@ -1106,15 +1114,54 @@ if [ ! -e /tmp/emux_agent_launched ]; then
         continue
       fi
       rm -f /tmp/emux_agent_noxtool 2>/dev/null
+      # v0.2.58 EVIDENCE ROUND: every press logs its xdotool rc, and the
+      # FIRST click dumps the discrimination bundle (where the pointer
+      # really is, which window id tint2 owns vs the active window, how
+      # many X sockets exist) into this log - one field round then tells
+      # mapping-vs-display-vs-grab apart for "clicks do nothing".
       case "$t" in
         M) xdotool mousemove --sync "$a" "$b" >/dev/null 2>&1 ;;
-        D) xdotool mousedown "$a" >/dev/null 2>&1 ;;
-        U) xdotool mouseup "$a" >/dev/null 2>&1 ;;
-        K) xdotool keydown "$a" >/dev/null 2>&1 ;;
+        D) xdotool mousedown "$a" >/dev/null 2>&1
+           echo "agent: ev D b=$a rc=$?"
+           if [ ! -e /tmp/emux_agent_firstclick ]; then
+             touch /tmp/emux_agent_firstclick
+             echo "agent: first-click evidence:"
+             echo "  mouse: $(xdotool getmouselocation 2>&1)"
+             echo "  panelwin=$(xdotool search --class tint2 2>&1 | head -1)"
+             echo "  activewin=$(xdotool getactivewindow 2>&1 | head -1)"
+             echo "  xsockets: $(ls /tmp/.X11-unix 2>/dev/null | tr '\n' ' ')"
+           fi ;;
+        U) xdotool mouseup "$a" >/dev/null 2>&1
+           echo "agent: ev U b=$a rc=$?" ;;
+        K) xdotool keydown "$a" >/dev/null 2>&1
+           echo "agent: ev K ks=$a rc=$?" ;;
         k) xdotool keyup "$a" >/dev/null 2>&1 ;;
       esac
     done
   ' >/tmp/emux_agent.log 2>&1 </dev/null &
+  # v0.2.58 EVIDENCE ROUND: delayed deep census. ~45 s in, dump pid +
+  # process state + DISPLAY of every desktop participant plus the root
+  # pixmap verdict into the agent log - proves who is alive, on which
+  # server, and whether the wallpaper layer ever painted.
+  nohup /bin/sh -c '
+    sleep 45
+    ND=$(tr -dc 0-9 < /tmp/emux_display_num 2>/dev/null)
+    [ -n "$ND" ] && { [ -e "/tmp/.X11-unix/X$ND" ] && export DISPLAY=":$ND" || export DISPLAY="127.0.0.1:$ND"; }
+    { echo "census @ $(date +%T):"
+      for f in /proc/[0-9]*/cmdline; do
+        c=$(tr "\0" " " < "$f" 2>/dev/null)
+        case "$c" in
+          *Xvfb*|*openbox*|*tint2*|*pcmanfm*|*picom*|*emux-capture*|*emux-x11*)
+            p=${f#/proc/}; p=${p%/cmdline}
+            st=$(sed -n "s/^State:.//p" /proc/$p/status 2>/dev/null | tr -d " ")
+            dsp=$(tr "\0" "\n" < /proc/$p/environ 2>/dev/null | sed -n "s/^DISPLAY=//p" | head -1)
+            echo "  pid=$p state=${st:-?} DISPLAY=${dsp:-none} cmd=${c% }"
+          ;;
+        esac
+      done
+      echo "  rootpmap=$(xprop -root _XROOTPMAP_ID 2>&1 | head -1)"
+    } >> /tmp/emux_agent.log 2>&1
+  ' >/dev/null 2>&1 </dev/null &
 fi
 # v0.2.38: visibility watchdog - if no window client is alive (killed,
 # crashed, or never installed), relaunch one, for the first ~10 min.
@@ -1163,6 +1210,28 @@ fi
       done
     fi
     start_furniture   # v0.2.39: catches furniture the moment REST installs it
+    # v0.2.58 FIELD FIX: pcmanfm wedge watchdog. A wedged --desktop client
+    # paints nothing (black root, no icons) and can hold the pointer grab so
+    # every injected click vanishes while xdotool returns rc=0. A HEALTHY
+    # pcmanfm publishes _XROOTPMAP_ID once it paints the wallpaper; absence
+    # 25 s after start = wedged: kill -9 and relaunch. 4th strike: give up
+    # on the wallpaper layer and paint a solid root - never a black void.
+    if [ -x /usr/bin/pcmanfm ] && [ -e /tmp/emux_pcmanfm_started ] && running pcmanfm; then
+      PFAGE=$(( $(date +%s) - $(stat -c %Y /tmp/emux_pcmanfm_started 2>/dev/null || echo 0) ))
+      if [ "$PFAGE" -ge 25 ] && ! xprop -root _XROOTPMAP_ID >/dev/null 2>&1; then
+        W=$(( $(cat /tmp/emux_pcmanfm_wedges 2>/dev/null || echo 0) + 1 ))
+        echo "$W" > /tmp/emux_pcmanfm_wedges
+        echo "emux-x11: pcmanfm WEDGE strike $W (no _XROOTPMAP_ID ${PFAGE}s after start) - kill -9 + relaunch" >&2
+        for f in /proc/[0-9]*/cmdline; do
+          tr '\0' ' ' < "$f" 2>/dev/null | grep -q 'pcmanfm' && { p=${f#/proc/}; p=${p%/cmdline}; kill -9 "$p" 2>/dev/null; }
+        done
+        rm -f /tmp/emux_pcmanfm_started
+        if [ "$W" -ge 4 ]; then
+          echo "emux-x11: 4th wedge strike - falling back to xsetroot -solid" >&2
+          xsetroot -solid '#1a2733' 2>/dev/null
+        fi
+      fi
+    fi
     i=$((i + 1))
   done ) &
 # v0.2.35 FIELD FIX: launch a visibility client IMMEDIATELY once the
