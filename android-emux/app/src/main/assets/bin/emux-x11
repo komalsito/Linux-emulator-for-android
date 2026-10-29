@@ -1064,7 +1064,18 @@ if [ ! -e /tmp/emux_agent_launched ]; then
     rm -f "$FIFO" 2>/dev/null
     mkfifo "$FIFO" 2>/dev/null || exit 0
     exec 3<>"$FIFO"
+    CDN=""
     while IFS=" " read -r t a b c <&3; do
+      # v0.2.55 FIELD FIX: follow display rotations. The agent pinned its
+      # DISPLAY at launch, but the self-heal can rotate the display AFTER
+      # it starts - every tap then replayed onto the old, unseen server
+      # ("INPUT: agent green but I cannot click the taskbar").
+      ND=$(tr -dc 0-9 < /tmp/emux_display_num 2>/dev/null)
+      if [ -n "$ND" ] && [ "$ND" != "$CDN" ]; then
+        CDN="$ND"
+        if [ -e "/tmp/.X11-unix/X$CDN" ]; then export DISPLAY=":$CDN"; else export DISPLAY="127.0.0.1:$CDN"; fi
+        echo "agent: following display to $DISPLAY"
+      fi
       if ! command -v xdotool >/dev/null 2>&1; then
         # v0.2.54: never drop events silently again - the field round had
         # INPUT: agent green while xdotool was simply not installed.

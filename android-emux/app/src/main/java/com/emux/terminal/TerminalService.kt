@@ -190,12 +190,24 @@ class TerminalService : LifecycleService() {
             // busy-loop of processes). Clean exits (code 0, e.g. `exit`) are left
             // alone — the user closed the shell intentionally.
             lifecycleScope.launch {
-                var restartsUsed = autoRestarts
                 s.state.collect { st ->
+                    // v0.2.55 FIELD FIX: the restart budget used to be a
+                    // GLOBAL counter that never reset - the old SIGSEGV
+                    // waves burned through MAX_AUTO_RESTARTS in the first
+                    // days, and every terminal death since was permanent
+                    // until an app restart ("opening the desktop kills the
+                    // terminal, I have to restart everything"). Now the
+                    // budget resets after 5 quiet minutes: bursts stay
+                    // bounded, ordinary life-cycle deaths always recover.
                     if (st == TerminalSession.State.DEAD && !s.exitedCleanly &&
-                        s.id < 9000 && restartsUsed < MAX_AUTO_RESTARTS) {
-                        restartsUsed++
-                        autoRestarts = restartsUsed
+                        s.id < 9000) {
+                        val now = System.currentTimeMillis()
+                        if (now - lastAutoRestartMs > 300_000L) autoRestarts = 0
+                    }
+                    if (st == TerminalSession.State.DEAD && !s.exitedCleanly &&
+                        s.id < 9000 && autoRestarts < MAX_AUTO_RESTARTS) {
+                        autoRestarts++
+                        lastAutoRestartMs = System.currentTimeMillis()
                         sessions.remove(s)
                         refresh()
                         com.emux.EmuXLog.e("session ${s.id} died abnormally — respawning")
@@ -212,6 +224,7 @@ class TerminalService : LifecycleService() {
     }
 
     private var autoRestarts = 0
+    private var lastAutoRestartMs = 0L   // v0.2.55: windowed restart budget
 
     private fun refresh() {
         registry.value = sessions.toList()
