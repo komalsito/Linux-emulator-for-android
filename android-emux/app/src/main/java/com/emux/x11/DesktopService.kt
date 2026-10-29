@@ -703,6 +703,29 @@ class DesktopService(
                 // a frame until that wait finished.
                 openFrameListener()
                 beginFrameLoop { frameCallback?.invoke() }
+                // v0.2.48 FIELD FIX: once frames flow, the frameless pane
+                // (and its history) is hidden behind the desktop bitmap and
+                // the 60 s terminal auto-dump never arms - so a furniture
+                // install failure became invisible again, and the field
+                // terminal's degraded paste path keeps eating the long
+                // commands that would reveal it. 90 s after a CONNECTED
+                // desktop, if tint2 is still absent, put the REST apt log
+                // tail INTO the history (visible via scroll/dump) - no
+                // terminal archaeology required.
+                scope.launch {
+                    kotlinx.coroutines.delay(90_000)
+                    runCatching {
+                        val rf = com.emux.core.FsLayout.linuxRoot(ctx)
+                        if (!java.io.File(rf, "usr/bin/tint2").isFile &&
+                            state.value == State.CONNECTED) {
+                            val tail = java.io.File(rf, "tmp/emux_rest.log")
+                                .readLines().filter { it.isNotBlank() }.takeLast(8)
+                                .joinToString(" | ").take(400)
+                            noteInfo("furniture still missing 90s after CONNECT - " +
+                                "REST tail: " + (tail.ifBlank { "<no /tmp/emux_rest.log>" }))
+                        }
+                    }
+                }
 
                 // 2) v0.1.91: start the capture helper ONLY once the guest X is
                 //    actually up (tcp 6000) AND its toolchain (xwd/netpbm/nc,
