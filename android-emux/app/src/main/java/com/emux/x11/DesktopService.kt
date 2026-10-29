@@ -1461,15 +1461,37 @@ class DesktopService(
 
     // --------------------------------------------------------------------- input
     /** Map a touch/click to X coordinates (view already scaled letterboxed). */
-    fun injectClick(xInXSpace: Int, yInXSpace: Int, button: Int = 1, press: Boolean) {
-        x11?.fakeButton(button, xInXSpace, yInXSpace, press)
+    // v0.2.53: input over the rootfs FIFO into the guest xdotool agent.
+    // The host X11Client never completed a handshake on this ROM (52
+    // rounds); guest-local X connections always work. One line per event.
+    @Volatile var inputAgentUp = false; private set
+    private var inputFifo: java.io.FileOutputStream? = null
+    private fun inputLine(line: String): Boolean {
+        return runCatching {
+            if (inputFifo == null) {
+                inputFifo = java.io.FileOutputStream(
+                    java.io.File(com.emux.core.FsLayout.linuxRoot(ctx), "tmp/emux_in"), false)
+            }
+            inputFifo!!.write((line + "\n").toByteArray())
+            inputFifo!!.flush()
+            inputAgentUp = true
+        }.onFailure {
+            inputAgentUp = false
+            runCatching { inputFifo?.close() }
+            inputFifo = null
+        }.isSuccess
     }
 
-    fun injectMotion(x: Int, y: Int) { x11?.fakeMotion(x, y) }
+    fun injectClick(xInXSpace: Int, yInXSpace: Int, button: Int = 1, press: Boolean) {
+        inputLine("M $xInXSpace $yInXSpace 0")
+        inputLine(if (press) "D $button 0 0" else "U $button 0 0")
+    }
+
+    fun injectMotion(x: Int, y: Int) { inputLine("M $x $y 0") }
 
     /** Drag ended outside a click: just release button 1 at position. */
     fun fakeButtonReleaseOnly(x: Int, y: Int) {
-        x11?.let { c -> c.fakeMotion(x, y); c.fakeButton(1, x, y, press = false) }
+        inputLine("M $x $y 0"); inputLine("U 1 0 0")
     }
 
     fun injectKeycode(keycode: Int, press: Boolean) { x11?.fakeKey(keycode, press) }
@@ -1481,21 +1503,17 @@ class DesktopService(
     private fun noteInputDropped() {
         if (!inputDroppedNoted) {
             inputDroppedNoted = true
-            noteInfo("input dropped: control plane not connected (lastCtrlErr=$lastCtrlError)")
+            noteInfo("input dropped: guest FIFO agent unreachable (is xdotool installed? see /tmp/emux_agent.log)")
         }
     }
     fun injectKeysymTap(ks: Int): Boolean {
-        val c = x11
-        if (c == null) { noteInputDropped(); return false }
-        return runCatching { c.typeKeysymTap(ks) }
-            .getOrElse { noteInputDropped(); false }
+        val a = inputLine("K $ks 0 0")
+        val b = inputLine("k $ks 0 0")
+        if (!a || !b) noteInputDropped()
+        return a && b
     }
-    fun injectChar(ch: Char): Boolean {
-        val c = x11
-        if (c == null) { noteInputDropped(); return false }
-        return runCatching { c.typeChar(ch) }
-            .getOrElse { noteInputDropped(); false }
-    }
+    fun injectChar(ch: Char): Boolean =
+        injectKeysymTap(if (ch.code < 0x100) ch.code else 0x01000000 + ch.code)
 
     // -------------------------------------------------------------------- stop
     fun stop() {

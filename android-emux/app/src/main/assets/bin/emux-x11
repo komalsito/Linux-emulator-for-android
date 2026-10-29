@@ -44,7 +44,7 @@ fi
 # WM AND the visibility xterm (field v0.2.31: a perfectly streaming,
 # pure-black desktop = X root window with zero clients). Markers are
 # per-session by definition: clear them at every launcher start.
-rm -f /tmp/emux_wm_launched /tmp/emux_xterm_launched /tmp/emux_vis_launched /tmp/emux_obx_reconf 2>/dev/null
+rm -f /tmp/emux_wm_launched /tmp/emux_xterm_launched /tmp/emux_vis_launched /tmp/emux_obx_reconf /tmp/emux_agent_launched 2>/dev/null
 export HOME="${HOME:-/root}"
 export DISPLAY=:$DN
 export TMPDIR=/tmp
@@ -661,7 +661,7 @@ else
     # without one is not a visual interface), wmctrl + x11-utils (the
     # window list verify_desktop reports, so "black screen" can be
     # diagnosed from the log instead of a screenshot).
-    REST="x11-xserver-utils openbox xterm menu tint2 pcmanfm mousepad galculator wmctrl x11-utils"
+    REST="x11-xserver-utils openbox xterm menu tint2 pcmanfm mousepad galculator wmctrl x11-utils xdotool"
       # v0.2.42 FIELD FIX: NO apt transaction unless something is actually
       # missing. Every desktop open used to run the CORE install (and the
       # REST pass) even on a complete rootfs; while dpkg swaps libraries,
@@ -1034,6 +1034,33 @@ if [ ! -e /tmp/emux_wm_launched ]; then
     fi
   done
 fi
+# v0.2.53 FIELD FIX: input over the shared filesystem. The host-side
+# X11Client (tcp AND unix LocalSocket) has never completed a handshake on
+# this ROM in 52 rounds, while guest-local X connections (xwd, tint2,
+# xterm) always work. So input stops trying to speak X from Android:
+# the app writes one line per event into a FIFO in the rootfs, and this
+# agent replays them with xdotool INSIDE the guest, on the session's
+# DISPLAY. The filesystem is the one channel proven bidirectional
+# (markers, logs, frames-config all ride it already).
+if [ ! -e /tmp/emux_agent_launched ]; then
+  touch /tmp/emux_agent_launched
+  nohup /bin/sh -c '
+    FIFO=/tmp/emux_in
+    rm -f "$FIFO" 2>/dev/null
+    mkfifo "$FIFO" 2>/dev/null || exit 0
+    exec 3<>"$FIFO"
+    while IFS=" " read -r t a b c <&3; do
+      command -v xdotool >/dev/null 2>&1 || continue
+      case "$t" in
+        M) xdotool mousemove --sync "$a" "$b" >/dev/null 2>&1 ;;
+        D) xdotool mousedown "$a" >/dev/null 2>&1 ;;
+        U) xdotool mouseup "$a" >/dev/null 2>&1 ;;
+        K) xdotool keydown "$a" >/dev/null 2>&1 ;;
+        k) xdotool keyup "$a" >/dev/null 2>&1 ;;
+      esac
+    done
+  ' >/tmp/emux_agent.log 2>&1 </dev/null &
+fi
 # v0.2.38: visibility watchdog - if no window client is alive (killed,
 # crashed, or never installed), relaunch one, for the first ~10 min.
 # v0.2.45: a running WM / panel / file manager IS a live desktop, so
@@ -1058,7 +1085,7 @@ fi
         APTTRIED=1
         echo "emux-x11: governor installing missing furniture (tint2/pcmanfm/mousepad)" >&2
         ( DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-            tint2 pcmanfm mousepad x11-xserver-utils >>/tmp/emux_rest.log 2>&1
+            tint2 pcmanfm mousepad x11-xserver-utils xdotool >>/tmp/emux_rest.log 2>&1
           dpkg --configure -a >>/tmp/emux_rest.log 2>&1 ) &
       fi
     fi

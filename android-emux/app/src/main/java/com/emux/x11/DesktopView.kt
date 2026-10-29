@@ -274,6 +274,12 @@ class DesktopView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attrs) 
         if (fps > 0f) {
             val badge = Paint().apply { color = Color.argb(0xC0, 0x66, 0xBB, 0x6A); textSize = sp(10f) }
             canvas.drawText("LIVE %.1f fps".format(fps), 16f, sp(16f), badge)
+            // v0.2.53: input health ON the bitmap - the history TextView is
+            // invisible once frames flow, and "clicks do nothing" needed an
+            // always-visible answer: INPUT: agent = FIFO writer connected.
+            val up = desktop?.inputAgentUp == true
+            val ib = Paint().apply { color = if (up) Color.argb(0xC0, 0x66, 0xBB, 0x6A) else Color.argb(0xC0, 0xEF, 0x53, 0x50); textSize = sp(10f) }
+            canvas.drawText(if (up) "INPUT: agent" else "INPUT: down (xdotool/FIFO)", 16f, sp(28f), ib)
         }
     }
 
