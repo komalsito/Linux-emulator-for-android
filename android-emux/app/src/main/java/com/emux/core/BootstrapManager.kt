@@ -2463,6 +2463,63 @@ class BootstrapManager(private val ctx: Context) {
         return note
     }
 
+    /**
+     * v0.2.57 FIELD FIX: synchronous PRE-SESSION component install.
+     * The furniture (tint2/pcmanfm/picom/xdotool/mousepad) used to be
+     * installed by the in-session governor on first Desktop-tab open -
+     * i.e. apt transactions ran WHILE guest clients execve'd, and proot's
+     * exec-during-dpkg-transaction SIGSEGV wave ("proot warning: signal 11")
+     * killed whichever client lost the race: sometimes the panel, sometimes
+     * the icon layer, sometimes the input agent's xdotool. Doing the same
+     * install HERE - host-driven, aptLock-held, before a single guest
+     * process exists - keeps the session steady state transaction-free (see
+     * the NEEDCORE/NEEDREST reasoning above) and makes a fresh device
+     * turnkey: ~1 min of narrated progress, "components ready", session up.
+     */
+    fun installDesktopComponents(): String? {
+        var note: String? = null
+        val got = runCatching {
+            Companion.aptLock().tryLock(240, java.util.concurrent.TimeUnit.SECONDS)
+        }.getOrDefault(true)
+        if (!got) return "components: apt lock busy - skipped (governor will retry)"
+        try {
+        runCatching {
+            val spec = DistroCatalog.requested(ctx)
+            if (spec.pkg != PkgManager.APT) return null
+            val dest = FsLayout.linuxRoot(ctx)
+            if (!File(dest, "etc").isDirectory) return null
+            val proot = FsLayout.prootBin(ctx)
+            if (!proot.isFile) return null
+            val want = mapOf(
+                "usr/bin/tint2" to "tint2",
+                "usr/bin/pcmanfm" to "pcmanfm",
+                "usr/bin/picom" to "picom",
+                "usr/bin/xdotool" to "xdotool",
+                "usr/bin/mousepad" to "mousepad",
+                "usr/bin/xprop" to "x11-utils",
+                "usr/bin/xsetroot" to "x11-xserver-utils",
+            )
+            val missing = want.filter { !File(dest, it.key).isFile }.values.distinct()
+            if (missing.isEmpty()) return null
+            Companion.progressNote?.invoke(
+                "components: missing " + missing.joinToString(",") +
+                    " - installing before session (first run ~1 min)")
+            val r = runAptProot(proot, dest, missing, "Installing desktop components") { ph, _ ->
+                Companion.progressThrottled("$ph...")
+            }
+            com.emux.EmuXLog.i("installDesktopComponents: ok=${r.ok} tail=${r.tail.take(200)}")
+            note = "components install ok=${r.ok}: " + r.tail.take(180)
+            // interrupted install => dirty journal => heal before session
+            if (!r.ok && aptJournalDirty(dest)) {
+                val r2 = runRepairProot(proot, dest)
+                com.emux.EmuXLog.i("installDesktopComponents re-heal: ok=${r2.ok}")
+                note = note + " | re-heal ok=${r2.ok}"
+            }
+        }.onFailure { com.emux.EmuXLog.e("installDesktopComponents failed (non-fatal)", it) }
+        } finally { runCatching { Companion.aptLock().unlock() } }
+        return note
+    }
+
     fun startupRepairAsync(force: Boolean = false) {
         synchronized(Companion) {
             if (startupRepairStarted && !force) return

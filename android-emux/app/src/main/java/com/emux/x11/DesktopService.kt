@@ -417,6 +417,21 @@ class DesktopService(
                         com.emux.core.BootstrapManager.progressNote = null
                     }
                 }
+                // v0.2.57 FIELD FIX: synchronous pre-session component
+                // install. The furniture apt pass used to run INSIDE the
+                // session (governor), racing guest execve against dpkg
+                // transactions - proot's signal-11 wave then killed whoever
+                // lost. Install host-driven, narrated, BEFORE the guest
+                // session spawns; the Terminal tab stays idle through this
+                // window by design. ~1 min on a fresh device, then
+                // "components ready" and the session starts turnkey.
+                com.emux.core.BootstrapManager.progressNote = { m -> noteInfo(m) }
+                try {
+                    val cn = com.emux.core.BootstrapManager(ctx).installDesktopComponents()
+                    noteInfo(if (cn == null) "components ready (all present)" else "components ready: $cn")
+                } finally {
+                    com.emux.core.BootstrapManager.progressNote = null
+                }
                 // v0.1.63: surface the guest dpkg selfcheck (shim loaded? link()
                 // ok? db dir owner/mode?) in the pane history + desktop.log so
                 // the next field screenshot answers WHY instead of guessing.
