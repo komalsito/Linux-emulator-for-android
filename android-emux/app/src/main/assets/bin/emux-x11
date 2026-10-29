@@ -44,7 +44,7 @@ fi
 # WM AND the visibility xterm (field v0.2.31: a perfectly streaming,
 # pure-black desktop = X root window with zero clients). Markers are
 # per-session by definition: clear them at every launcher start.
-rm -f /tmp/emux_wm_launched /tmp/emux_xterm_launched /tmp/emux_vis_launched /tmp/emux_obx_reconf /tmp/emux_agent_launched 2>/dev/null
+rm -f /tmp/emux_wm_launched /tmp/emux_xterm_launched /tmp/emux_vis_launched /tmp/emux_obx_reconf /tmp/emux_agent_launched /tmp/emux_apt_updated 2>/dev/null
 export HOME="${HOME:-/root}"
 export DISPLAY=:$DN
 export TMPDIR=/tmp
@@ -55,6 +55,26 @@ PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$PATH"
 export PATH
 # v0.2.39: is a process with $1 in its cmdline alive? (procps not
 # guaranteed; /proc scan like kill_stale_x)
+# v0.2.56 FIELD FIX: apt-get install with EMPTY/STALE package lists fails
+# instantly ("Unable to locate package xdotool") - the governor and REST
+# loop never ran `apt-get update`, while every successful manual field
+# run did. Update once per session when lists are missing or older than
+# ~6 h, bounded and logged.
+apt_lists_stale() {
+  [ -d /var/lib/apt/lists ] || return 0
+  n=$(ls /var/lib/apt/lists 2>/dev/null | grep -c Packages)
+  [ "$n" = 0 ] && return 0
+  f=$(ls -t /var/lib/apt/lists/*Packages* 2>/dev/null | head -1)
+  [ -z "$f" ] && return 0
+  now=$(date +%s); mt=$(stat -c %Y "$f" 2>/dev/null || echo 0)
+  [ $((now - mt)) -gt 21600 ]
+}
+apt_update_once() {
+  [ -e /tmp/emux_apt_updated ] && return 0
+  touch /tmp/emux_apt_updated 2>/dev/null
+  echo "emux-x11: apt lists stale/empty - running apt-get update" >&2
+  DEBIAN_FRONTEND=noninteractive apt-get update >>/tmp/emux_rest.log 2>&1 || true
+}
 running() {
   for f in /proc/[0-9]*/cmdline; do
     tr '\0' ' ' < "$f" 2>/dev/null | grep -q "$1" && return 0
@@ -1119,9 +1139,14 @@ fi
       if ! apt_busy; then
         APTTRIED=1
         echo "emux-x11: governor installing missing furniture (tint2/pcmanfm/xdotool/picom)" >&2
-        ( DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+        ( apt_lists_stale && apt_update_once
+          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
             tint2 pcmanfm mousepad x11-xserver-utils xdotool picom >>/tmp/emux_rest.log 2>&1
-          dpkg --configure -a >>/tmp/emux_rest.log 2>&1 ) &
+          dpkg --configure -a >>/tmp/emux_rest.log 2>&1
+          if [ ! -x /usr/bin/xdotool ]; then
+            echo "emux-x11: governor install FAILED - xdotool still missing; rest.log tail:" >&2
+            tail -6 /tmp/emux_rest.log >&2 2>/dev/null
+          fi ) &
       fi
     fi
     has=0
@@ -1193,6 +1218,7 @@ if x_up && [ "$APT_BRANCH" = 1 ]; then
       [ -x "$b" ] || NEEDREST=1
     done
     if [ "$NEEDREST" = 1 ]; then
+    apt_lists_stale && apt_update_once
     TRIES=0
     while [ "$TRIES" -lt 30 ]; do
       if apt_busy; then TRIES=$((TRIES + 1)); sleep 10; continue; fi
@@ -1210,8 +1236,8 @@ if x_up && [ "$APT_BRANCH" = 1 ]; then
     # v0.2.46: if the furniture still is not on disk, say WHY with the apt
     # tail - forty rounds of silent furniture failures happened because
     # this subshell's output went to /dev/null (see below).
-    if [ ! -x /usr/bin/tint2 ] || [ ! -x /usr/bin/pcmanfm ]; then
-      echo "emux-x11: REST install incomplete - tail of /tmp/emux_rest.log:" >&2
+    if [ ! -x /usr/bin/tint2 ] || [ ! -x /usr/bin/pcmanfm ] || [ ! -x /usr/bin/xdotool ]; then
+      echo "emux-x11: REST install incomplete (tint2/pcmanfm/xdotool missing) - tail of /tmp/emux_rest.log:" >&2
       tail -6 /tmp/emux_rest.log >&2 2>/dev/null
     fi
     if [ ! -e /tmp/emux_wm_launched ]; then
