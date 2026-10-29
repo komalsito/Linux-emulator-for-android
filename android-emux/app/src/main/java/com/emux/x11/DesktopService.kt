@@ -517,6 +517,7 @@ class DesktopService(
                     bm.installHelperScripts(rootfs, staged) { _, _ -> }
                     bm.installCaptureConv(rootfs)
                     bm.installLinkFixShim(rootfs)
+                    bm.installWallpaper(rootfs)
                     noteInfo("helpers re-seeded from APK assets (env " +
                         com.emux.core.FsLayout.ENV_VERSION + ")")
                 }.onFailure {

@@ -74,8 +74,8 @@ start_furniture() {
     echo "emux-x11: starting pcmanfm desktop (icons)" >&2
     nohup /usr/bin/pcmanfm --desktop >/tmp/pcmanfm.log 2>&1 </dev/null &
   fi
-  if [ -e "$HOME/.config/openbox/menu.xml" ] && [ ! -e /tmp/emux_obx_reconf ]; then
-    echo "emux-x11: menu present - openbox --reconfigure" >&2
+  if { [ -e "$HOME/.config/openbox/menu.xml" ] || [ -e "$HOME/.themes/Emux/openbox-3/themerc" ]; } && [ ! -e /tmp/emux_obx_reconf ]; then
+    echo "emux-x11: menu/theme present - openbox --reconfigure" >&2
     touch /tmp/emux_obx_reconf
     command -v openbox >/dev/null 2>&1 && openbox --reconfigure >/dev/null 2>&1 &
   fi
@@ -210,13 +210,13 @@ EOF
       cp "$HOME/.config/tint2/tint2rc" "$HOME/.config/tint2/tint2rc.emux-bak" 2>/dev/null
     fi
     {
-      echo "# EmuX tint2 panel (v0.2.45) - bottom taskbar"
+      echo "# EmuX tint2 panel (v0.2.51) - bottom taskbar, dark rice"
       echo "rounded = 0"
       echo "border_width = 0"
-      echo "background_color = #222222 100"
-      echo "border_color = #222222 100"
-      echo "rounded = 0"
-      echo "border_width = 0"
+      echo "background_color = #12141a 92"
+      echo "border_color = #12141a 100"
+      echo "rounded = 4"
+      echo "border_width = 1"
       echo "background_color = #3a6ea5 100"
       echo "border_color = #3a6ea5 100"
       echo "panel_items = LTSBC"
@@ -240,9 +240,9 @@ EOF
       echo "task_active_font_color = #ffffff 100"
       echo "task_background_id = 0"
       echo "task_active_background_id = 2"
-      echo "launcher_padding = 2 2 2"
+      echo "launcher_padding = 4 2 4"
       echo "launcher_background_id = 0"
-      echo "launcher_icon_size = 28"
+      echo "launcher_icon_size = 32"
       echo "launcher_icon_theme = hicolor"
       for a in $APPS; do
         case "$a" in
@@ -305,14 +305,100 @@ EOF
   # --- pcmanfm desktop background (only if pcmanfm has never run: a
   # non-black background is the cheapest proof the desktop, not just X,
   # is up; if pcmanfm later fails, xsetroot below still colours it) ---
-  if [ ! -e "$HOME/.config/pcmanfm/default/pcmanfm.conf" ]; then
+  # v0.2.51 RICE: wallpaper + icon styling via pcmanfm; rewritten once per
+  # version stamp so later seeds refresh the look without clobbering edits.
+  if [ ! -e "$HOME/.config/pcmanfm/default/pcmanfm.conf" ] || \
+     ! grep -q "Emux rice v0.2.51" "$HOME/.config/pcmanfm/default/pcmanfm.conf" 2>/dev/null; then
     {
+      echo "# Emux rice v0.2.51"
       echo "[desktop]"
-      echo "wallpaper_mode=0"
-      echo "desktop_bg=#20344d"
-      echo "desktop_fg=#ffffff"
+      echo "wallpaper_mode=6"
+      echo "wallpaper=/usr/share/emux/wall.png"
+      echo "desktop_bg=#10141a"
+      echo "desktop_fg=#e8eaf0"
       echo "desktop_shadow=1"
+      echo "show_wm_menu=1"
+      echo "[config]"
+      echo "icon_theme=Adwaita"
     } > "$HOME/.config/pcmanfm/default/pcmanfm.conf" 2>/dev/null
+  fi
+  # --- Emux openbox theme: flat dark, blue active title, rounded 6 ---
+  mkdir -p "$HOME/.themes/Emux/openbox-3" 2>/dev/null
+  cat > "$HOME/.themes/Emux/openbox-3/themerc" 2>/dev/null <<'THEME'
+# Emux theme v0.2.51 - flat dark, modern
+border.width: 1
+padding.width: 6
+window.active.border.color: #3a6ea5
+window.inactive.border.color: #232733
+window.active.title.bg: flat solid
+window.active.title.bg.color: #232733
+window.inactive.title.bg: flat solid
+window.inactive.title.bg.color: #1a1d24
+window.active.label.text.color: #e8eaf0
+window.inactive.label.text.color: #868c98
+window.active.button.unpressed.image.color: #9aa0ac
+window.active.button.pressed.image.color: #ffffff
+window.active.button.disabled.image.color: #4a4f5a
+window.inactive.button.unpressed.image.color: #6a707c
+menu.border.color: #232733
+menu.border.width: 1
+menu.title.bg: flat solid
+menu.title.bg.color: #232733
+menu.title.text.color: #e8eaf0
+menu.items.bg: flat solid
+menu.items.bg.color: #1a1d24
+menu.items.text.color: #d8dbe2
+menu.items.disabled.text.color: #6a707c
+menu.items.active.bg: flat solid
+menu.items.active.bg.color: #3a6ea5
+menu.items.active.text.color: #ffffff
+menu.separator.color: #2a2f3a
+menu.separator.padding.width: 6
+osd.bg: flat solid
+osd.bg.color: #1a1d24
+osd.active.label.text.color: #e8eaf0
+osd.inactive.label.text.color: #868c98
+THEME
+  # --- rc.xml: theme + sane mouse bindings (only if absent) ---
+  if [ ! -e "$HOME/.config/openbox/rc.xml" ]; then
+    cat > "$HOME/.config/openbox/rc.xml" 2>/dev/null <<'RCXML'
+<?xml version="1.0" encoding="UTF-8"?>
+<openbox_config xmlns="http://openbox.org/3.4/rc">
+  <theme><name>Emux</name><titleLayout>NLIMC</titleLayout><keepBorder>yes</keepBorder><hideDisabled>no</hideDisabled><cornerRadius>6</cornerRadius></theme>
+  <focus><followMouse>no</followMouse><focusNew>yes</focusNew><raiseOnFocus>no</raiseOnFocus></focus>
+  <resize><drawContents>yes</drawContents></resize>
+  <mouse>
+    <context name="Root">
+      <mousebind button="Right" action="Press"><action name="ShowMenu"><menu>root-menu</menu></action></mousebind>
+    </context>
+    <context name="Titlebar">
+      <mousebind button="Left" action="Press"><action name="Focus"/><action name="Raise"/></mousebind>
+      <mousebind button="Left" action="Drag"><action name="Move"/></mousebind>
+    </context>
+    <context name="Frame">
+      <mousebind button="Left" action="Press"><action name="Focus"/></mousebind>
+    </context>
+    <context name="Bottom">
+      <mousebind button="Left" action="Press"><action name="Focus"/></mousebind>
+      <mousebind button="Left" action="Drag"><action name="Resize"/></mousebind>
+    </context>
+    <context name="Close">
+      <mousebind button="Left" action="Click"><action name="Close"/></mousebind>
+    </context>
+    <context name="Maximize">
+      <mousebind button="Left" action="Click"><action name="ToggleMaximize"/></mousebind>
+    </context>
+    <context name="Iconify">
+      <mousebind button="Left" action="Click"><action name="Iconify"/></mousebind>
+    </context>
+  </mouse>
+</openbox_config>
+RCXML
+  fi
+  # --- tint2 refresh: darker bar, bigger icons (rewrite once per stamp) ---
+  if [ -e "$HOME/.config/tint2/tint2rc" ] && ! grep -q "EmuX tint2 panel (v0.2.51)" "$HOME/.config/tint2/tint2rc" 2>/dev/null; then
+    cp "$HOME/.config/tint2/tint2rc" "$HOME/.config/tint2/tint2rc.pre-rice" 2>/dev/null
+    rm -f "$HOME/.config/tint2/tint2rc" 2>/dev/null
   fi
   # --- Openbox autostart: panel + icons with the WM, once per version ---
   OBX="$HOME/.config/openbox"

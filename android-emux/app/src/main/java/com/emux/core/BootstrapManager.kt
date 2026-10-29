@@ -2168,6 +2168,17 @@ class BootstrapManager(private val ctx: Context) {
         }
     }
 
+    /** v0.2.51: bundle+seed the desktop wallpaper (pcmanfm reads it). */
+    internal fun installWallpaper(dest: File) {
+        runCatching {
+            val out = File(dest, "usr/share/emux/wall.png")
+            out.parentFile?.mkdirs()
+            ctx.assets.open("wallpaper/wall.png").use { ins ->
+                replaceRegularFileWith(out) { f -> f.outputStream().use { os -> ins.copyTo(os) } }
+            }
+        }
+    }
+
     internal fun installLinkFixShim(dest: File) {
         runCatching {
             val out = File(dest, "usr/local/lib/emux/libemux-linkfix.so")

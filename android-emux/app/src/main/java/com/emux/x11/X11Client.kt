@@ -65,7 +65,9 @@ class X11Client(
         const val EV_GEOMETRY_NOTIFY = 22
         const val EV_MASK_BIT = 0x80
 
-        const val XTEST_FAKE_INPUT = 0
+        // v0.2.51 FIELD FIX: FakeInput is XTEST minor opcode 2; 0 is
+        // GetVersion. Forty rounds of "can't click anything" end here.
+        const val XTEST_FAKE_INPUT = 2
     }
 
     class XProtocolException(msg: String) : IOException(msg)
@@ -338,17 +340,18 @@ class X11Client(
         // v0.2.31: XTestFakeInput body is 24 bytes; allocate(20) overflowed on
         // the trailing pad put - every tap/drag would have thrown
         // BufferOverflowException the moment connect() stopped throwing.
+        // v0.2.51: body per xtestproto FakeInput: type, detail, pad2,
+        // time, root, rootX, rootY, pad8. The old body started with the
+        // (wrong) minor opcode and shifted every field by one byte.
         val body = ByteBuffer.allocate(24).order(order)
-        body.put(XTEST_FAKE_INPUT.toByte())   // ext request number
+        body.put(kind.toByte())               // type: 2/3 key, 4/5 button, 6 motion
+        body.put(detail.toByte())             // keycode / button number
         body.put(0); body.put(0)              // pad
-        body.put(kind.toByte())
-        body.put(detail.toByte())
-        body.put(0); body.put(0); body.put(0) // pad
         body.putInt(0)                        // time = CurrentTime
-        body.putInt(rootWindow)
+        body.putInt(rootWindow)               // root window
         body.putShort(x.toShort()); body.putShort(y.toShort())
-        body.putInt(0)                        // pad
-        send(buildRequest(xtestOpcode, 0, body.array()))
+        body.putInt(0); body.putInt(0)        // pad 8
+        send(buildRequest(xtestOpcode, XTEST_FAKE_INPUT, body.array()))
     }
 
     fun fakeKey(keycode: Int, press: Boolean) =
