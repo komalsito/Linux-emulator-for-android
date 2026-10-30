@@ -7,8 +7,10 @@ So the repo's root `emux-debug.apk` has repeatedly gone stale: it was still
 desktop fixes — including the fix for "I can't see the desktop" — were committed,
 pushed, and *not installable by anyone*.
 
-This document is the build recipe plus the check that catches that, and it ends
-with why building the APK **without** Gradle was attempted and abandoned.
+This document is the build recipe plus the check that catches that. Section 4
+covers building the APK **without Gradle at all** — attempted, abandoned, and then
+solved: `tools/build-apk/no-gradle-build.sh` now produces the committed
+`emux-debug.apk`, validated against a Gradle-built reference APK.
 
 ---
 
@@ -81,49 +83,87 @@ git add ../emux-debug.apk && git commit -m "chore: refresh root emux-debug.apk t
 
 ---
 
-## 4. Why not build it without Gradle? (attempted, abandoned — measured)
+## 4. Building it without Gradle (attempted, abandoned, then solved)
 
-Worth recording because it looks easy from the outside: the module is 23 Kotlin
-files, `isMinifyEnabled=false` for debug (no R8), there are no `jniLibs`, the
-assets are 1.6 MB, and build-tools r34 (`aapt2`, `d8`, `zipalign`, `apksigner`)
-is a 61 MB download. Most of the pipeline *did* work:
+`tools/build-apk/no-gradle-build.sh` builds and signs the APK with **no Gradle at
+all**, in ~4 minutes on the 1 GB box. `tools/build-apk/README.md` is the reference
+for it; this section records why the first attempt was abandoned, because two of the
+three blockers were misdiagnosed at the time and the misdiagnosis is worth keeping.
 
-| step | result |
+The first attempt died on `aapt2 link`:
+
+```
+resource 'styleable/SearchView' has a conflicting value
+```
+
+`appcompat-1.7.0` and `material-1.12.0` both declare `styleable/SearchView` with
+different attribute lists, and the conclusion drawn was that Gradle resolves the
+conflict by dependency priority during its own resource merge, so reproducing it
+would mean reimplementing the merger. **That was wrong.** Dumping the reference APK's
+own `R$styleable` fields shows what Gradle actually does: it emits the **union** —
+appcompat's 17 attributes plus material's 12, 29 in total, and *both* packages' R
+classes get all 29. One `<declare-styleable>` in the app's own resource space, not a
+priority pick. That is a two-line edit to a library `values.xml`, not a merger.
+
+The second blocker was real but tractable: `android.nonTransitiveRClass=true` means
+each library's bytecode reads its *own* R, and `aapt2 link --java` only ever produces
+one R for the app package. So 59 R classes have to be generated. The rule that makes
+it exact:
+
+- field **sets** come from each AAR's own `R.txt` (which is why `loader`'s R contains
+  core's `ColorStateListItem` — old AARs published transitive symbol tables, and AGP
+  honours them);
+- field **values** come from the final linked table;
+- styleable arrays *and their index constants* must be derived from the **final**
+  array, not the AAR's. The reference APK's `constraintlayout` R carries
+  `AppCompatTheme_actionModeTheme` — an attribute that did not exist when
+  constraintlayout 2.0.1 was published, which is only explicable if AGP regenerates
+  from the merged table.
+
+Validated against the reference APK: **179 of its library R classes match
+field-for-field**, and `com.emux.R` matches exactly across all 10 types (73 fields).
+
+The third blocker was the honest one and still stands: **nothing here can be run.**
+No emulator (needs KVM and gigabytes), no device. So instead of runtime testing, the
+build was closed statically against the Gradle-built APK:
+
+| check | result |
 |---|---|
-| build-tools r34 from `dl.google.com` | fine (`chmod +x` — Python's `zipfile.extractall` drops exec bits) |
-| 61 dependencies re-fetched **as AARs** (the type-check classpath keeps only `classes.jar`, discarding `res/`) | 60/61; `androidx.collection:collection-ktx:1.4.0` is a 261-byte placeholder jar, not an AAR |
-| 48 `classes.jar` + 36 `res/` + emoji2's inner `libs/repackaged.jar` | fine |
-| `aapt2 compile` of 36 library res dirs + the app's | 37/37, 0 failures |
-| merged `AndroidManifest.xml` | **solved**: reconstructed from the shipped APK with `aapt2 dump xmltree` + `aapt2 dump resources`, resolving the 13 numeric `@0x7f…` references back to symbolic names (a fresh link reassigns IDs, so numeric refs copied from the old APK would point at the wrong resource). Result: well-formed XML, structure identical to Gradle's merger — 10 `uses-permission`, 9 `receiver`, 6 `service`, 3 `activity`, 1 `provider`, 2 `uses-library`, including WorkManager's constraint proxies, the `androidx.startup` provider, `profileinstaller`, `room` and the `DYNAMIC_RECEIVER_NOT_EXPORTED_PERMISSION` |
-| `aapt2 link` | **blocked** |
+| every class the reference APK defines | 8,100 total → 7,079 from locked jars + 251 generated R + 705 D8 synthetics + 69 app sources = **0 unaccounted** |
+| library R classes vs the reference's | **179 exact**, 0 partial, 0 absent |
+| `com.emux.R` vs the reference's | exact, all 10 types |
+| `tools/verify_apk.sh` | **50 PASS / 0 FAIL** |
+| APK entry set vs the reference | 969 vs 970 (dex split 2 vs 8 — cosmetic; and AGP's `app-metadata.properties` is deliberately not fabricated) |
+| signature digest | equals `debug-keystore/emux-debug.jks`, so `adb install -r` upgrades in place |
 
-Two blockers, both structural rather than fixable by tweaking flags:
+Getting the class closure to zero is what uncovered the real risk, and it was not R
+classes — it was **dependencies**. A POM walk gets three versions wrong, and each
+error is invisible until runtime:
 
-1. **Gradle pre-merges library resources; `aapt2 link` alone cannot.** Linking all
-   37 compiled resource sets fails on
-   `resource 'styleable/SearchView' has a conflicting value` — declared by both
-   `appcompat-1.7.0` and `material-1.12.0` with *different* attribute lists. Only
-   1 of 132 styleables collides, but Gradle resolves it by dependency priority
-   during its own merge, so the conflict never reaches aapt2 in a real build.
-   Reproducing that means implementing the merger.
-2. **`android.nonTransitiveRClass=true`** (in `gradle.properties`). Gradle emits
-   **per-library** R classes: `androidx.appcompat.R.styleable.SearchView` and
-   `com.google.android.material.R.styleable.SearchView` hold *different* arrays,
-   and each library's compiled code reads its own. A hand build would have to
-   regenerate ~40 R classes with per-library styleable arrays and per-library
-   resource attribution (recoverable from each AAR's own `R.txt`, but it is real
-   work). Getting it wrong does not fail at build time — it makes one library
-   read another's `int[]` at runtime, in whatever widget uses it.
+- `room` must be **2.5.0** (2.6.1 adds 9 classes the reference APK lacks);
+- `loader` must be **1.0.0** (1.1.0 dropped `ModernAsyncTask$AsyncTaskResult` and
+  two siblings that the reference APK has);
+- `collection` must be **1.1.0** (1.4.0 adds 122 classes and drops `MapCollections`);
+- `lifecycle-runtime` / `lifecycle-viewmodel` 2.8.6 are **empty KMP anchors** — the
+  code is in the `-android` variants, selected via Gradle module metadata that no POM
+  walk can see. Fetch the anchors and you ship an APK with no `ViewModel` class;
+- `androidx.window`, `slidingpanelayout`, `concurrent-futures`,
+  `constraintlayout-solver`, `profileinstaller`, `viewbinding` and
+  `customview-poolingcontainer` are all transitive and all absent from
+  `app/build.gradle.kts`.
 
-And the decisive one: **there is no way to run the result here.** No emulator
-(needs KVM and gigabytes), no device. Everything above is static validation; the
-failure mode that non-transitive R produces is a runtime misbehaviour in a widget,
-which is precisely what static checks cannot see. For an app whose user cannot
-easily debug it, a plausibly-built APK that is subtly wrong is worse than no APK
-— it converts "please rebuild this" into a fresh round of unverifiable field
-reports.
+Two more traps, both silent:
 
-What is reusable if anyone picks this up: the manifest reconstruction technique
-(it is exact, and it is the only way to see what Gradle's merger produced), the
-AAR-with-resources fetch, and `tools/verify_apk.sh`, which needs nothing but
-build-tools and validates a Gradle-built APK completely.
+- **build-tools' own d8 cannot dex appcompat 1.7.0.** `d8` 8.2.2 dies with an
+  internal `NullPointerException` on `ActionBarDrawerToggle$1`, reproducible on that
+  class in isolation. AGP never hits it because it uses the D8 bundled in the plugin.
+  Use `com.android.tools:r8` ≥ 8.5.
+- **`aapt2 link --version-code` does not override the manifest.** With
+  `android:versionCode` already present it is ignored, so the first successful link
+  here produced a perfectly valid, correctly signed APK that reported **v0.2.58** —
+  the exact failure mode this document exists to prevent, reproduced by the fix for
+  it. The version now comes from `app/build.gradle.kts`.
+
+`manual-build.sh` (the Gradle-warm-up hybrid) remains the reference path and should
+be preferred wherever Gradle can run. The zero-Gradle path exists so that the APK can
+never again lag the source that fixes the desktop.

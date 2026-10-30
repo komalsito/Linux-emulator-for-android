@@ -4,6 +4,10 @@ build/
 *.dex
 *.bin
 *.lock
+# ...except the no-Gradle build's dependency lock, which IS the build input: it pins
+# the 76 artifacts whose versions a POM walk gets wrong (room 2.5.0, loader 1.0.0,
+# collection 1.1.0). See android-emux/tools/build-apk/README.md.
+!android-emux/tools/build-apk/deps.lock
 *.ap_
 .idea/
 .vscode/

@@ -126,14 +126,24 @@ sh tools/verify_apk.sh app/build/outputs/apk/debug/app-debug.apk   # must be all
 adb install -r app/build/outputs/apk/debug/app-debug.apk
 ```
 
-Requires JDK 17+, the Android SDK (platform 34) and ~4 GB of free RAM. See
-[`android-emux/docs/BUILDING_THE_APK.md`](android-emux/docs/BUILDING_THE_APK.md)
-for the full recipe, what each `verify_apk.sh` failure means, and why the APK
-cannot be built without Gradle.
+Requires JDK 17+, the Android SDK (platform 34) and ~4 GB of free RAM.
+
+**No 4 GB to spare?** `sh android-emux/tools/build-apk/no-gradle-build.sh` builds and
+signs the same APK with **no Gradle at all** — about 4 minutes on a 1 GB machine —
+then runs the verifier before writing `emux-debug.apk`. It generates the three things
+Gradle would have supplied (the per-library R classes, the ViewBinding, and the
+linked resources), and is documented in
+[`android-emux/tools/build-apk/README.md`](android-emux/tools/build-apk/README.md).
+`manual-build.sh` alongside it is the hybrid path (a small-heap Gradle warm-up, then
+the same steps) and stays the reference wherever Gradle can run.
+
+See [`android-emux/docs/BUILDING_THE_APK.md`](android-emux/docs/BUILDING_THE_APK.md)
+for the full recipe and what each `verify_apk.sh` failure means.
 
 **Verify before you install.** The root `emux-debug.apk` goes stale silently — it
-sat at v0.2.58 while the source reached v0.2.61, so two releases of desktop fixes
-were committed and pushed but installable by nobody. `sh tools/verify_apk.sh`
+once sat at v0.2.58 while the source reached v0.2.61, so two releases of desktop
+fixes were committed and pushed but installable by nobody. It is now v0.2.61 and
+matches the working tree (`verify_apk.sh`: 50 PASS / 0 FAIL). `sh tools/verify_apk.sh`
 compares an APK against the working tree (identity, signature, every guest asset
 byte-for-byte, and whether the dex carries the current code) and exits non-zero on
 any mismatch. Signing must stay on the committed `debug-keystore/emux-debug.jks`:
