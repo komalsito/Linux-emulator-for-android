@@ -129,7 +129,10 @@ class DesktopView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attrs) 
             android.view.inputmethod.EditorInfo.IME_FLAG_NO_FULLSCREEN
         return object : android.view.inputmethod.BaseInputConnection(this, false) {
             override fun commitText(text: CharSequence?, newCursorPosition: Int): Boolean {
-                text?.forEach { desktop?.injectChar(it) }
+                // v0.2.59: one call, not one-per-character. Over the FIFO path
+                // each character used to cost a whole xdotool process under
+                // proot, which made the soft keyboard unusable.
+                text?.let { desktop?.injectText(it.toString()) }
                 return true
             }
             override fun deleteSurroundingText(before: Int, after: Int): Boolean {
@@ -279,9 +282,15 @@ class DesktopView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attrs) 
             // v0.2.53: input health ON the bitmap - the history TextView is
             // invisible once frames flow, and "clicks do nothing" needed an
             // always-visible answer: INPUT: agent = FIFO writer connected.
-            val up = desktop?.inputAgentUp == true
+            val tr = desktop?.inputTransport ?: "down"
+            val up = tr != "down"
             val ib = Paint().apply { color = if (up) Color.argb(0xC0, 0x66, 0xBB, 0x6A) else Color.argb(0xC0, 0xEF, 0x53, 0x50); textSize = sp(10f) }
-            canvas.drawText(if (up) "INPUT: agent" else "INPUT: down (xdotool/FIFO)", 16f, sp(28f), ib)
+            canvas.drawText(
+                when (tr) {
+                    "xtest" -> "INPUT: XTEST (control plane)"
+                    "agent" -> "INPUT: guest xdotool agent (slow fallback)"
+                    else    -> "INPUT: down - no XTEST, no agent"
+                }, 16f, sp(28f), ib)
         }
     }
 

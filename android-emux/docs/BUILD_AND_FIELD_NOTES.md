@@ -46,3 +46,59 @@
   its connection; the v0.2.7 re-accept catch logged a note and slept 500 ms per EOF
   (~2 fps cap + flooded pane once the native encoder runs at 10 fps). EOF after >=1
   decoded frame now re-accepts immediately and silently.
+- **v0.2.59 / vc159** — THE DESKTOP-WAS-NEVER-INTERACTIVE round. Three independent
+  root causes, each measured on a live Xvfb 1.21 + Openbox 3.6.1 stack rather than
+  inferred; see `DESKTOP_FIX_v0.2.59.md` for the evidence and the probes.
+  1. **XTEST was dead from wire-protocol bugs in `X11Client`, not from the ROM.**
+     QueryExtension was sent as opcode 15 (that is QueryTree; the real opcode is 98),
+     the setup reply was parsed big-endian on a little-endian server, the screen walk
+     used the wrong offsets, `GetProperty` omitted its window field, and
+     XTestFakeInput used a 24-byte body (the server only accepts a 36-byte request:
+     type/detail/time/rootX/rootY/root/deviceid). Rewritten; keysym→keycode now comes
+     from the server's own `GetKeyboardMapping`, so shift level is always correct.
+     Two MORE bugs of the same class were then caught by the new
+     `tools/x11probe/protocol_audit.sh` harness running the compiled client
+     against a live server: `internAtom()` and `getProperty()` wrote their BOOL
+     (`only-if-exists`, `delete-after`) into the request BODY instead of the
+     header's second byte, inflating each request by 4 bytes, so the server
+     answered BadLength for EVERY atom - even `WM_NAME` - and
+     `isWindowManagerRunning()` reported false forever while Openbox ran.
+     `XErrorEvent.describe()` now names the error and request (`BadLength on
+     InternAtom`) and reads majorCode as the single byte at offset 10 that it
+     is; that diagnostic is what surfaced the bug.
+  2. **The FIFO fallback typed nothing because keysyms were passed as keycodes.**
+     The host sent `K <keysym-int>` and the agent ran `xdotool keydown <int>`, but
+     xdotool treats a bare number as a KEYCODE: measured, `xdotool keydown 97`
+     injects keycode 97 while keysym 97 ('a') is keycode 38. Protocol is now
+     `T <text>` (xdotool type) / `N <name>` (xdotool key), payload kept verbatim
+     (the old `read -r t a b c` truncated any text containing a space), legacy `K`
+     translated to names. Multi-key `N` must stay UNQUOTED (xdotool takes one key
+     name per argument; one quoted string exits 2).
+  3. **"signal 11" was the app killing its own ptrace tracer.** `killDesktopGuests()`
+     built `/bin/sh -c '<payload>'` with the literal patterns `Xvfb|Xorg|emux-capture|xwd`
+     inside the payload, and proot's OWN argv contains that payload. proot binds the
+     host `/proc`, so the sweep matched the tracer and `kill -9`'d it; a tracee whose
+     tracer dies reports exactly "proot warning: signal 11". `[ $p != $$ ]` guarded the
+     shell, not its proot parent. Patterns now travel in the environment
+     (`EMUX_SW1..4`, never in any argv) and the shell skips itself plus its parent
+     parsed from `/proc/self/stat`. A short list degrades to an unmatchable sentinel,
+     never to `*""*` (which matches every process).
+  Also: bare `openbox` does NOT run autostart (openbox.org/help/Autostart) so the
+  seeded panel/colours never executed — `start_wm()` now uses the documented
+  `openbox --sm-disable --startup "/bin/sh ~/.config/openbox/autostart"`; A/B pixel
+  census goes from 100% pure black (1 colour) to 97.7% `#20344d` (102 colours).
+  `paint_root()` guarantees a non-black root even if pcmanfm wedges. picom is opt-in
+  (`touch /tmp/emux_want_picom`) — a compositor buys nothing on a 10 fps `xwd` stream
+  and is a large LMK target. The v0.2.47 LMK bias is corrected: negative
+  `oom_score_adj` needs CAP_SYS_RESOURCE so the terminal "-300" was ALWAYS silently
+  rejected while the desktop "+100" succeeded, and `cmd.contains("proot")` skipped
+  every real hog (Xvfb/Openbox/tint2/pcmanfm are tracees whose cmdline has no
+  "proot"). Now verified-by-read-back and reported honestly on the pane.
+  Input no longer blocks the UI thread: FIFO writes moved to a daemon thread with
+  motion coalescing and FIFO-inode reopen (the agent rm+mkfifo's each session, so a
+  cached stream wrote into an unlinked inode and every event vanished). IME commits
+  are one `injectText` call, not one xdotool process per character.
+  ENV_VERSION 67→68 so the corrected `emux-x11` is actually re-seeded onto devices.
+  Full module type-checks clean (23/23 files, 261 classes, 0 errors) against the real
+  API 34 `android.jar` + AndroidX 1.13/1.7/2.8 jars via `probe/compile_all.sh`; the
+  APK itself was NOT packaged here (1 GB sandbox OOM-kills the Gradle daemon).

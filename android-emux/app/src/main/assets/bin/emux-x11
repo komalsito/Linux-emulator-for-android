@@ -81,13 +81,99 @@ running() {
   done
   return 1
 }
+# v0.2.59 FIELD FIX — launch Openbox the way its OWN documentation specifies.
+#
+# openbox.org/help/Autostart, verbatim:
+#   "When you run the openbox command on its own, the autostart scripts will
+#    not run. They are run by openbox-session or when you log in graphically
+#    with the Openbox session type."
+#   "Once Openbox starts, the system-wide default script, located at
+#    /etc/xdg/openbox/autostart, will be run. Then the user script at
+#    ~/.config/openbox/autostart is run afterward."
+#
+# Every EmuX release up to v0.2.58 ran bare `openbox`, so the seeded
+# ~/.config/openbox/autostart (background colour, picom, tint2, pcmanfm
+# --desktop) and ~/.config/openbox/environment were NEVER executed. That is a
+# direct cause of "I can't see the desktop": the root window stayed black and
+# the panel/icons only appeared if the 5-second watchdog happened to launch
+# them, which is why the field reports kept flip-flopping between "a terminal",
+# "a black screen" and "sometimes a panel".
+#
+# Verified against Openbox 3.6.1: bare `openbox` -> autostart NOT run;
+# `openbox --startup <script>` -> run. `openbox-session` is the same mechanism
+# (Debian's script ends in
+#   exec /usr/bin/openbox --startup "<libdir>/openbox-autostart OPENBOX")
+# but it depends on an arch-specific libdir and on PyXDG (which logs
+# "openbox-xdg-autostart requires PyXDG"), so we drive --startup directly.
+# --sm-disable skips the session-manager connection: there is no SM here.
+start_wm() {
+  WM_BIN=""
+  for c in "/usr/bin/$1" "/usr/local/bin/$1" "/bin/$1" /usr/bin/openbox /usr/bin/twm /usr/bin/icewm; do
+    [ -x "$c" ] && { WM_BIN="$c"; break; }
+  done
+  [ -n "$WM_BIN" ] || return 1
+  # Source the Openbox environment scripts first, exactly as openbox-session does.
+  for E in /etc/xdg/openbox/environment "$HOME/.config/openbox/environment"; do
+    [ -r "$E" ] && . "$E" 2>/dev/null
+  done
+  AS="$HOME/.config/openbox/autostart"
+  case "$(basename "$WM_BIN")" in
+    openbox)
+      if [ -r "$AS" ]; then
+        echo "emux-x11: launching $WM_BIN --sm-disable --startup '$AS' (documented session behaviour)" >&2
+        nohup "$WM_BIN" --sm-disable --startup "/bin/sh $AS" >/tmp/wm.log 2>&1 </dev/null &
+      else
+        echo "emux-x11: launching $WM_BIN --sm-disable (no autostart file to run)" >&2
+        nohup "$WM_BIN" --sm-disable >/tmp/wm.log 2>&1 </dev/null &
+      fi ;;
+    *)
+      echo "emux-x11: launching fallback WM $WM_BIN" >&2
+      nohup "$WM_BIN" >/tmp/wm.log 2>&1 </dev/null & ;;
+  esac
+  WM_PID=$!
+  sleep 1
+  if kill -0 "$WM_PID" 2>/dev/null; then
+    touch /tmp/emux_wm_launched
+    echo "emux-x11: WM alive (pid $WM_PID, $WM_BIN)" >&2
+    return 0
+  fi
+  echo "emux-x11: WM DIED within 1 s of launch ($WM_BIN) - wm.log tail:" >&2
+  tail -5 /tmp/wm.log >&2 2>/dev/null
+  return 1
+}
+# v0.2.59: guarantee a visible root window BEFORE any client starts. The old
+# path relied on pcmanfm --desktop painting a wallpaper; when pcmanfm wedged
+# (a known failure mode under proot, see the wedge watchdog below) the root
+# stayed pure black and "no desktop" was indistinguishable from "no frames".
+# A solid colour costs one xsetroot call and makes a black pane unambiguous.
+paint_root() {
+  command -v xsetroot >/dev/null 2>&1 || return 0
+  [ -e /tmp/emux_root_painted ] && return 0
+  touch /tmp/emux_root_painted 2>/dev/null
+  xsetroot -solid '#20344d' >/dev/null 2>&1 || xsetroot -solid '#20344d' >/dev/null 2>&1
+  echo "emux-x11: root window painted #20344d (never a black void)" >&2
+}
 # v0.2.39: bring desktop furniture up the moment it exists - called from
 # the REST pass right after install AND from the visibility watchdog, so
 # panel/icons/menu appear live without waiting for a session restart.
 start_furniture() {
   seed_desktop_config
-  if [ -x /usr/bin/picom ] && ! running picom; then
-    echo "emux-x11: starting picom compositor (translucency + shadows)" >&2
+  paint_root
+  # v0.2.59: picom is now OPT-IN (touch /tmp/emux_want_picom). Two reasons,
+  # both measured rather than guessed:
+  #  1. The video path is a full-screen `xwd -root` grab at ~10 fps. A
+  #     compositing manager redirects every client to an offscreen pixmap and
+  #     re-composites onto the root, i.e. one extra full-screen render per
+  #     frame to buy translucency and shadows that a 10 fps screenshot stream
+  #     cannot display smoothly anyway.
+  #  2. It is a large long-lived client. On a 1-2 GB device that makes it a
+  #     prime low-memory-killer candidate, and an unprivileged app CANNOT lower
+  #     oom_score_adj (that needs CAP_SYS_RESOURCE), so the v0.2.47 "-300"
+  #     protection on the terminal's proot silently fails while the desktop's
+  #     "+100" succeeds. When the LMK reaps the terminal's proot, its tracee
+  #     reports exactly the user's symptom: "proot warning: signal 11".
+  if [ -x /usr/bin/picom ] && [ -e /tmp/emux_want_picom ] && ! running picom; then
+    echo "emux-x11: starting picom compositor (opt-in via /tmp/emux_want_picom)" >&2
     nohup /usr/bin/picom -b --backend xrender >/tmp/picom.log 2>&1 </dev/null &
   fi
   if [ -x /usr/bin/tint2 ] && ! running tint2; then
@@ -442,32 +528,47 @@ RCXML
     cp "$HOME/.config/tint2/tint2rc" "$HOME/.config/tint2/tint2rc.pre-rice" 2>/dev/null
     rm -f "$HOME/.config/tint2/tint2rc" 2>/dev/null
   fi
-  # --- Openbox autostart: panel + icons with the WM, once per version ---
+  # --- Openbox autostart -------------------------------------------------
+  # v0.2.59: this file is now ACTUALLY EXECUTED (start_wm passes it to
+  # `openbox --startup`; bare `openbox` ignored it entirely, per
+  # openbox.org/help/Autostart). Two consequences, both fixed here:
+  #  1. The old version gate grepped for "EmuX desktop v0.2.45" while writing
+  #     "EmuX desktop v0.2.54", so the stamp never matched and the block was
+  #     appended a second time - harmless while nothing ran it, but it would
+  #     now have launched TWO panels and TWO desktop icon layers.
+  #  2. pcmanfm must be starved of DBUS/GIO here too, exactly as the
+  #     start_furniture launch does: under proot a --desktop client that
+  #     reaches for a dead session bus or gvfs parks in a blocking read before
+  #     it ever paints the root window (black desktop, no icons).
+  # A user's own hand-written autostart is backed up once and never clobbered
+  # again; only EmuX-stamped files are rewritten.
   OBX="$HOME/.config/openbox"
-  if [ ! -e "$OBX/autostart" ]; then
-    {
-      echo "# EmuX desktop v0.2.54"
-      echo "(command -v xsetroot >/dev/null 2>&1 && xsetroot -solid \"#20344d\") &"
-      echo "(command -v picom >/dev/null 2>&1 && picom -b --backend xrender >/dev/null 2>&1) &"
-      echo "tint2 >/dev/null 2>&1 &"
-      echo "pcmanfm --desktop >/dev/null 2>&1 &"
-    } > "$OBX/autostart" 2>/dev/null
-  elif ! grep -q "EmuX desktop v0.2.45" "$OBX/autostart" 2>/dev/null; then
-    if grep -q "EmuX seeded autostart" "$OBX/autostart" 2>/dev/null; then
-      # Old seeded autostart already launches tint2 + pcmanfm: only add
-      # the coloured background, never a second panel/desktop.
-      {
-        echo "# EmuX desktop v0.2.45"
-        echo "(command -v xsetroot >/dev/null 2>&1 && xsetroot -solid \"#20344d\") &"
-      } >> "$OBX/autostart" 2>/dev/null
+  EMUX_AUTOSTART_STAMP="EmuX desktop v0.2.59"
+  if [ -e "$OBX/autostart" ] && ! grep -qF "$EMUX_AUTOSTART_STAMP" "$OBX/autostart" 2>/dev/null; then
+    if grep -q "EmuX desktop v0.2" "$OBX/autostart" 2>/dev/null; then
+      : # an older EmuX stamp: safe to rewrite in place
     else
-      {
-        echo "# EmuX desktop v0.2.45"
-        echo "(command -v xsetroot >/dev/null 2>&1 && xsetroot -solid \"#20344d\") &"
-        echo "tint2 >/dev/null 2>&1 &"
-        echo "pcmanfm --desktop >/dev/null 2>&1 &"
-      } >> "$OBX/autostart" 2>/dev/null
+      cp "$OBX/autostart" "$OBX/autostart.emux-bak" 2>/dev/null
+      echo "emux-x11: user autostart backed up to autostart.emux-bak" >&2
     fi
+  fi
+  if [ ! -e "$OBX/autostart" ] || grep -q "EmuX desktop v0.2" "$OBX/autostart" 2>/dev/null \
+     || [ ! -s "$OBX/autostart" ]; then
+    {
+      echo "# $EMUX_AUTOSTART_STAMP"
+      echo "# Run by openbox --startup (see openbox.org/help/Autostart). Every"
+      echo "# command must end with & or the ones after it never run."
+      echo "(command -v xsetroot >/dev/null 2>&1 && xsetroot -solid \"#20344d\") &"
+      echo "(command -v tint2 >/dev/null 2>&1 && tint2) >/dev/null 2>&1 &"
+      echo "if [ -e /tmp/emux_want_picom ] && command -v picom >/dev/null 2>&1; then"
+      echo "  (picom -b --backend xrender) >/dev/null 2>&1 &"
+      echo "fi"
+      echo "if command -v pcmanfm >/dev/null 2>&1; then"
+      echo "  (DBUS_SESSION_BUS_ADDRESS=disabled: GIO_USE_VOLUME_MONITOR=none \\"
+      echo "     pcmanfm --desktop) >/dev/null 2>&1 &"
+      echo "fi"
+    } > "$OBX/autostart" 2>/dev/null
+    chmod +x "$OBX/autostart" 2>/dev/null
   fi
 }
 # v0.2.45: self-check the desktop, not just the X server. A streaming
@@ -1067,15 +1168,11 @@ if [ -x /usr/bin/openbox ] || [ -x "/usr/bin/$WM" ]; then
   seed_desktop_config
   command -v update-menus >/dev/null 2>&1 && update-menus >/dev/null 2>&1 &
 fi
+# v0.2.59: seed_desktop_config above writes ~/.config/openbox/autostart, so it
+# MUST run before start_wm - that is the whole point of the --startup fix.
+paint_root
 if [ ! -e /tmp/emux_wm_launched ]; then
-  for c in "/usr/bin/$WM" /usr/bin/openbox; do
-    if [ -x "$c" ]; then
-      echo "emux-x11: launching WM $c (immediate)" >&2
-      nohup "$c" >/tmp/wm.log 2>&1 </dev/null &
-      touch /tmp/emux_wm_launched
-      break
-    fi
-  done
+  start_wm "$WM"
 fi
 # v0.2.53 FIELD FIX: input over the shared filesystem. The host-side
 # X11Client (tcp AND unix LocalSocket) has never completed a handshake on
@@ -1092,8 +1189,19 @@ if [ ! -e /tmp/emux_agent_launched ]; then
     rm -f "$FIFO" 2>/dev/null
     mkfifo "$FIFO" 2>/dev/null || exit 0
     exec 3<>"$FIFO"
+    # v0.2.59: no pathname expansion - key names and text payloads must reach
+    # xdotool verbatim, never glob-expanded against the guest filesystem.
+    set -f
     CDN=""
-    while IFS=" " read -r t a b c <&3; do
+    while IFS= read -r LINE <&3; do
+      [ -n "$LINE" ] || continue
+      # v0.2.59 FIELD FIX: split off ONLY the command letter. The old
+      # `read -r t a b c` split the payload on spaces, so a text event lost
+      # everything after its second space and a key name with arguments could
+      # not be expressed at all.
+      T=${LINE%% *}
+      ARG=${LINE#"$T"}
+      ARG=${ARG# }
       # v0.2.55 FIELD FIX: follow display rotations. The agent pinned its
       # DISPLAY at launch, but the self-heal can rotate the display AFTER
       # it starts - every tap then replayed onto the old, unseen server
@@ -1114,28 +1222,68 @@ if [ ! -e /tmp/emux_agent_launched ]; then
         continue
       fi
       rm -f /tmp/emux_agent_noxtool 2>/dev/null
-      # v0.2.58 EVIDENCE ROUND: every press logs its xdotool rc, and the
-      # FIRST click dumps the discrimination bundle (where the pointer
-      # really is, which window id tint2 owns vs the active window, how
-      # many X sockets exist) into this log - one field round then tells
-      # mapping-vs-display-vs-grab apart for "clicks do nothing".
-      case "$t" in
-        M) xdotool mousemove --sync "$a" "$b" >/dev/null 2>&1 ;;
-        D) xdotool mousedown "$a" >/dev/null 2>&1
-           echo "agent: ev D b=$a rc=$?"
+      # v0.2.59 FIELD FIX: THE KEYBOARD BUG. The host used to send
+      # "K <keysym-integer>" and this agent ran `xdotool keydown <integer>`.
+      # xdotool treats a bare number as a KEYCODE, not a keysym: measured on a
+      # live server, `xdotool keydown 97` injects keycode 97 while keysym 97
+      # ("a") is keycode 38 - and `xdotool keydown a` correctly injects 38.
+      # So every character typed on the desktop went to the wrong key (or to
+      # nothing at all for the >0xFF Unicode keysym range, whose decimal form
+      # is far outside the 8..255 keycode window). Typing into an xterm that
+      # was fed `xdotool type --clearmodifiers` plus `xdotool key <NAME>`
+      # worked first time.
+      #
+      # Protocol now (one line per event, payload kept verbatim):
+      #   M <x> <y>   pointer move
+      #   D <button>  button press        U <button>  button release
+      #   T <text>    literal text  -> xdotool type --clearmodifiers
+      #   N <name>    X11 key name  -> xdotool key  --clearmodifiers
+      #   K <keysym>  legacy; translated here to a name, never passed through
+      case "$T" in
+        M) set -- $ARG; xdotool mousemove --sync "$1" "$2" >/dev/null 2>&1 ;;
+        D) set -- $ARG
+           xdotool mousedown "$1" >/dev/null 2>&1
+           echo "agent: ev D b=$1 rc=$?"
            if [ ! -e /tmp/emux_agent_firstclick ]; then
              touch /tmp/emux_agent_firstclick
              echo "agent: first-click evidence:"
              echo "  mouse: $(xdotool getmouselocation 2>&1)"
              echo "  panelwin=$(xdotool search --class tint2 2>&1 | head -1)"
              echo "  activewin=$(xdotool getactivewindow 2>&1 | head -1)"
-             echo "  xsockets: $(ls /tmp/.X11-unix 2>/dev/null | tr '\n' ' ')"
+             echo "  xsockets: $(ls /tmp/.X11-unix 2>/dev/null | tr '"'"'\n'"'"' '"'"' '"'"')"
            fi ;;
-        U) xdotool mouseup "$a" >/dev/null 2>&1
-           echo "agent: ev U b=$a rc=$?" ;;
-        K) xdotool keydown "$a" >/dev/null 2>&1
-           echo "agent: ev K ks=$a rc=$?" ;;
-        k) xdotool keyup "$a" >/dev/null 2>&1 ;;
+        U) set -- $ARG
+           xdotool mouseup "$1" >/dev/null 2>&1
+           echo "agent: ev U b=$1 rc=$?" ;;
+        T) xdotool type --clearmodifiers -- "$ARG" >/dev/null 2>&1
+           echo "agent: ev T len=${#ARG} rc=$?" ;;
+        N) # Deliberately UNQUOTED: `xdotool key` takes one key name per
+           # argument, so a multi-key payload ("BackSpace BackSpace") must
+           # word-split. Passed as one quoted string it is not a valid key
+           # name and xdotool exits 2 - measured, not assumed.
+           xdotool key --clearmodifiers -- $ARG >/dev/null 2>&1
+           echo "agent: ev N k=$ARG rc=$?" ;;
+        K) N=""
+           case "$ARG" in
+             65288) N=BackSpace;; 65289) N=Tab;;      65293) N=Return;;
+             65307) N=Escape;;    65535) N=Delete;;   65360) N=Home;;
+             65361) N=Left;;      65362) N=Up;;       65363) N=Right;;
+             65364) N=Down;;      65365) N=Prior;;    65366) N=Next;;
+             65367) N=End;;       65300) N=Num_Lock;; 65507) N=ctrl;;
+             65505) N=shift;;     65509) N=Caps_Lock;;
+           esac
+           if [ -n "$N" ]; then
+             xdotool key --clearmodifiers -- "$N" >/dev/null 2>&1
+             echo "agent: ev K ks=$ARG -> $N rc=$?"
+           elif [ "$ARG" -ge 32 ] 2>/dev/null && [ "$ARG" -le 126 ] 2>/dev/null; then
+             CH=$(printf "\\$(printf '"'"'%03o'"'"' "$ARG")")
+             xdotool type --clearmodifiers -- "$CH" >/dev/null 2>&1
+             echo "agent: ev K ks=$ARG -> char '"'"'$CH'"'"' rc=$?"
+           else
+             echo "agent: ev K ks=$ARG has no xdotool encoding - DROPPED (upgrade the app: it should send T/N)"
+           fi ;;
+        k) : ;;   # legacy key-release: `xdotool key` already releases
+        *) echo "agent: unknown event '"'"'$T'"'"'" ;;
       esac
     done
   ' >/tmp/emux_agent.log 2>&1 </dev/null &
@@ -1314,13 +1462,7 @@ if x_up && [ "$APT_BRANCH" = 1 ]; then
       # seed_desktop_config already ran inside start_furniture above;
       # just refresh the openbox menu database if the menu pkg landed.
       command -v update-menus >/dev/null 2>&1 && update-menus >/dev/null 2>&1 &
-      for c in "/usr/bin/$WM" /usr/bin/openbox; do
-        if [ -x "$c" ]; then
-          nohup "$c" >/tmp/wm.log 2>&1 </dev/null &
-          touch /tmp/emux_wm_launched
-          break
-        fi
-      done
+      start_wm "$WM"
       # v0.2.14: a working desktop with no windows is a pure-black void
       # (field: "for a moment there was a black desktop with nothing") -
       # indistinguishable from a broken pipeline. Open one xterm so the
@@ -1381,10 +1523,9 @@ if ! verify_x; then
   # not wait 180 s for a watcher forked against the old display.
   if verify_x; then
     : > /tmp/emux_x_up 2>/dev/null
-    rm -f /tmp/emux_wm_launched /tmp/emux_xterm_launched 2>/dev/null
-    for c in "/usr/bin/$WM" /usr/bin/openbox; do
-      if [ -x "$c" ]; then nohup "$c" >/tmp/wm.log 2>&1 </dev/null & touch /tmp/emux_wm_launched; break; fi
-    done
+    rm -f /tmp/emux_wm_launched /tmp/emux_xterm_launched /tmp/emux_root_painted 2>/dev/null
+    paint_root
+    start_wm "$WM"
     if [ -x /usr/bin/xterm ] && [ ! -e /tmp/emux_xterm_launched ]; then
       nohup /usr/bin/xterm -geometry 96x28+60+40 >/tmp/xterm.log 2>&1 </dev/null &
       touch /tmp/emux_xterm_launched
@@ -1399,14 +1540,10 @@ if ! x_up; then
   exit 1
 fi
 
-# window manager; fall back through installed WMs to xterm so SOMETHING draws
-run_wm() {
-  for c in "/usr/bin/$1" "/usr/local/bin/$1" "/bin/$1"; do
-    [ -x "$c" ] && { "$c" >/tmp/wm.log 2>&1 & touch /tmp/emux_wm_launched; return 0; }
-  done
-  return 1
-}
-run_wm "$WM" || run_wm openbox || run_wm twm || run_wm icewm || {
+# window manager; fall back through installed WMs to xterm so SOMETHING draws.
+# v0.2.59: start_wm() owns the whole cascade now (and runs Openbox with
+# --startup so the seeded autostart actually executes - see its comment).
+start_wm "$WM" || {
   if [ -x /usr/bin/xterm ]; then
     /usr/bin/xterm -e /bin/sh -l >/tmp/wm.log 2>&1 &
     touch /tmp/emux_wm_launched /tmp/emux_xterm_launched

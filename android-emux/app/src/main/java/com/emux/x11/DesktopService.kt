@@ -538,34 +538,73 @@ class DesktopService(
                 }.onFailure {
                     noteInfo("helper re-seed failed (non-fatal): " + (it.message?.take(80) ?: "?"))
                 }
-                // v0.2.47 FIELD FIX: opening the Desktop tab used to kill the
-                // Terminal tab on ~1 GB devices - Android's low-memory killer
-                // reaped the terminal's proot (a background process once the
-                // user switched tabs), and a tracee whose tracer dies prints
-                // "proot warning: signal 11" (the pid-29008 ghost seen in
-                // every round). Bias the LMK: terminal shells get protected
-                // scores, desktop guests (self-healing, respawnable) become
-                // the preferred sacrifice.
+                // v0.2.47 FIELD FIX / v0.2.59 CORRECTION: opening the Desktop tab
+                // used to kill the Terminal tab on ~1 GB devices - Android's
+                // low-memory killer reaped the terminal's proot (a background
+                // process once the user switched tabs), and a tracee whose
+                // tracer dies prints "proot warning: signal 11" (the pid-29008
+                // ghost in every round).
+                //
+                // The v0.2.47 implementation did not actually do what it
+                // claimed, for two reasons measured here:
+                //   1. Writing a NEGATIVE oom_score_adj requires CAP_SYS_RESOURCE,
+                //      which an unprivileged app does not have. The "-300" that
+                //      was supposed to protect the Terminal's proot has ALWAYS
+                //      been silently swallowed by runCatching, while the "+100"
+                //      on the desktop guests succeeded. Net effect: the desktop
+                //      got more killable and the terminal got nothing.
+                //   2. `if (!cmd.contains("proot")) return@forEach` skipped every
+                //      real memory hog - Xvfb, Openbox, tint2 and pcmanfm are
+                //      proot TRACEES whose own cmdline contains no "proot" - so
+                //      the processes actually holding the framebuffer and the
+                //      desktop were never adjusted at all.
+                //
+                // We cannot protect the terminal from userspace. What we can do
+                // is make the desktop stack the preferred sacrifice and report
+                // the truth, so a field log distinguishes "bias applied" from
+                // "bias denied (needs root)" instead of implying success.
+                var lmkRaised = 0; var lmkProtected = 0; var lmkDenied = 0
                 runCatching {
                     val myUid = android.os.Process.myUid().toString()
                     java.io.File("/proc").listFiles()?.forEach { d ->
-                        val pid = d.name.toIntOrNull() ?: return@forEach
                         val cmd = runCatching {
                             java.io.File(d, "cmdline").readBytes().decodeToString().replace('\u0000', ' ')
                         }.getOrDefault("")
-                        if (!cmd.contains("proot")) return@forEach
+                        if (cmd.isBlank()) return@forEach
                         val uidLine = runCatching {
                             java.io.File(d, "status").readLines().firstOrNull { it.startsWith("Uid:") } ?: ""
                         }.getOrDefault("")
                         if (uidLine.split(Regex("\\s+")).getOrNull(1) != myUid) return@forEach
+                        // Desktop-side first (highest = most killable), then the
+                        // terminal side. Order matters: emux-x11's own launcher
+                        // cmdline also mentions Xvfb.
                         val adj = when {
-                            cmd.contains("emux-x11") || cmd.contains("emux-capture") -> "100"
-                            cmd.contains("bash") || cmd.contains("/bin/sh") || cmd.contains("script") -> "-300"
+                            cmd.contains("emux-capture") || cmd.contains("/xwd") -> "950"
+                            cmd.contains("emux-x11") -> "900"
+                            cmd.contains("Xvfb") || cmd.contains("Xorg") -> "850"
+                            cmd.contains("openbox") || cmd.contains("tint2") ||
+                            cmd.contains("pcmanfm") || cmd.contains("picom") ||
+                            cmd.contains("xsetroot") || cmd.contains("feh") -> "800"
+                            cmd.contains("proot") &&
+                            (cmd.contains("bash") || cmd.contains("/bin/sh") || cmd.contains("script")) -> "-300"
                             else -> return@forEach
                         }
-                        runCatching { java.io.File(d, "oom_score_adj").writeText(adj) }
+                        val ok = runCatching {
+                            val f = java.io.File(d, "oom_score_adj")
+                            f.writeText(adj)
+                            f.readText().trim() == adj   // verify: EPERM is silent
+                        }.getOrDefault(false)
+                        if (ok) { if (adj.startsWith("-")) lmkProtected++ else lmkRaised++ }
+                        else if (adj.startsWith("-")) lmkDenied++
                     }
                 }
+                if (lmkDenied > 0) noteInfo(
+                    "LMK: raised $lmkRaised desktop procs, but protecting the Terminal " +
+                    "(oom_score_adj -300) was DENIED on $lmkDenied procs - that needs root. " +
+                    "Under memory pressure Android can still reap the terminal's proot " +
+                    "(\"proot warning: signal 11\"). picom is now opt-in to cut the pressure.")
+                else if (lmkRaised + lmkProtected > 0) noteInfo(
+                    "LMK bias applied: $lmkRaised desktop procs raised, $lmkProtected terminal procs protected")
                 desktopStartUpTicks = runCatching {
                     (java.io.File("/proc/uptime").readText().trim().split(" ")[0].toDouble() * 100).toLong() - 50
                 }.getOrDefault(Long.MAX_VALUE)
@@ -1193,11 +1232,37 @@ class DesktopService(
             val rootfs = com.emux.core.FsLayout.linuxRoot(ctx)
             if (!proot.isFile || !java.io.File(rootfs, "etc").isDirectory) return
             val nb = com.emux.core.FsLayout.nativeBridgeDir(ctx)
+            // v0.2.59 FIELD FIX — the sweep used to kill its own proot.
+            // The pattern names ("Xvfb", "Xorg", "emux-capture", "xwd") were
+            // literal text inside the `/bin/sh -c <payload>` argument, and
+            // proot's OWN argv contains that same payload string. proot binds
+            // the host /proc, so the loop walked straight into the tracer's
+            // cmdline, matched *Xvfb*, and `kill -9`'d it. The `[ $p != $$ ]`
+            // guard only excluded the shell, not its proot parent. Killing a
+            // ptrace tracer is precisely how a tracee ends up reporting
+            // "proot warning: signal 11" — the user's exact symptom — and it
+            // also aborted the sweep before the X lock cleanup, leaving stale
+            // locks that make the NEXT session adopt a dead display ("can't see
+            // the desktop"). Patterns now travel in the ENVIRONMENT (never in
+            // any cmdline) and the shell skips itself and its parent.
+            val sweepPatterns = listOf("Xvfb", "Xorg", "emux-capture", "/xwd")
+            // Hard guard on a wide blast radius: an EMPTY pattern would make the
+            // case arm `*""*`, which matches every cmdline and kill -9's the
+            // whole uid. The sentinel below cannot appear in a real argv, so a
+            // short list degrades to "match nothing" rather than "match all".
+            val neverMatch = "\u0001emux-never\u0001"
+            fun sweepVar(i: Int) = sweepPatterns.getOrElse(i) { neverMatch }
+                .ifBlank { neverMatch }
             val payload =
+                "PP=\$(sed 's/.*) //' /proc/self/stat 2>/dev/null | cut -d' ' -f2); " +
                 "for f in /proc/[0-9]*/cmdline; do " +
+                "p=\${f#/proc/}; p=\${p%/cmdline}; " +
+                "[ \"\$p\" = \"\$\$\" ] && continue; " +
+                "[ -n \"\$PP\" ] && [ \"\$p\" = \"\$PP\" ] && continue; " +
                 "c=\$(tr '\\0' ' ' < \$f 2>/dev/null); " +
-                "case \$c in *Xvfb*|*Xorg*|*emux-capture*|*xwd*) " +
-                "p=\${f#/proc/}; p=\${p%/cmdline}; [ \$p != \$\$ ] && kill -9 \$p 2>/dev/null;; " +
+                "case \$c in " +
+                "*\"\$EMUX_SW1\"*|*\"\$EMUX_SW2\"*|*\"\$EMUX_SW3\"*|*\"\$EMUX_SW4\"*) " +
+                "kill -9 \$p 2>/dev/null;; " +
                 "esac; done; " +
                 "rm -f /tmp/.X0-lock /tmp/.X11-unix/X0 2>/dev/null; true"
             val pb = ProcessBuilder(
@@ -1212,6 +1277,11 @@ class DesktopService(
                 "HOME" to "/root",
                 "PATH" to "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
                 "PROOT_LOADER" to java.io.File(nb, "loader").absolutePath,
+                // v0.2.59: the match patterns live here, NOT in argv.
+                "EMUX_SW1" to sweepVar(0),
+                "EMUX_SW2" to sweepVar(1),
+                "EMUX_SW3" to sweepVar(2),
+                "EMUX_SW4" to sweepVar(3),
             ))
             pb.redirectErrorStream(true)
             val p = pb.start()
@@ -1265,7 +1335,17 @@ class DesktopService(
                 c.connect()
                 x11 = c
                 inputDroppedNoted = false
-                noteInfo("control plane UP via ${c.transport} :$displayNum - touch + keyboard live")
+                inputTransport = "xtest"
+                inputAgentUp = true
+                // v0.2.59: prove the control plane is real, not just connected.
+                // A correct handshake yields a plausible geometry, an XTEST
+                // opcode above 127 and a populated keymap; if any of those is
+                // wrong the pane says so instead of claiming "input live".
+                val wmUp = runCatching { c.isWindowManagerRunning() }.getOrDefault(false)
+                noteInfo(
+                    "control plane UP via ${c.transport} :$displayNum - XTEST opcode ${c.xtestOpcode}, " +
+                    "${c.keymapSize()} keysyms, ${c.screenWidth}x${c.screenHeight}@${c.depth}, " +
+                    "WM ${if (wmUp) "running" else "NOT running"}")
                 Log.i(TAG, "X connected: ${c.screenWidth}x${c.screenHeight}@${c.depth} vendor=${c.vendor}")
                 return true
             } catch (e: Exception) {
@@ -1475,60 +1555,250 @@ class DesktopService(
     }
 
     // --------------------------------------------------------------------- input
-    /** Map a touch/click to X coordinates (view already scaled letterboxed). */
-    // v0.2.53: input over the rootfs FIFO into the guest xdotool agent.
-    // The host X11Client never completed a handshake on this ROM (52
-    // rounds); guest-local X connections always work. One line per event.
+    // v0.2.59 — TWO transports, tried in this order:
+    //
+    //  1. XTEST over the control plane ([X11Client]). This is the real path.
+    //     It was dead for 52 rounds purely because of wire-protocol bugs in
+    //     X11Client (big-endian setup length, QueryExtension sent as opcode 15
+    //     = QueryTree, 24-byte FakeInput body instead of 36, rootX/rootY inside
+    //     pad2) — not because of the ROM. Fixed there; verified end to end
+    //     against Xvfb 1.21 + Openbox 3.6.1: an injected click focused an
+    //     xterm and injected keystrokes ran a shell command. One persistent
+    //     socket, ~0.02 ms per event, no guest process per keystroke, and
+    //     keycodes come from the server's own GetKeyboardMapping so the shift
+    //     level is always right.
+    //
+    //  2. The rootfs FIFO + guest xdotool agent, kept only as a fallback for a
+    //     ROM where the host genuinely cannot reach the X socket. It costs one
+    //     xdotool process per event under proot, so it is coarsely coalesced
+    //     here. Its keyboard protocol was also wrong: the app sent a KEYSYM
+    //     integer and the agent ran `xdotool keydown <int>`, but xdotool treats
+    //     a bare number as a KEYCODE. Measured: `xdotool keydown 97` injects
+    //     keycode 97, while keysym 97 ('a') is keycode 38 — so typing produced
+    //     nothing. The agent now takes `T <text>` for xdotool type and
+    //     `N <name>` for X11 key names, which xdotool resolves correctly.
+
+    /** Human-readable input transport, painted on the pane by DesktopView. */
+    @Volatile var inputTransport: String = "down"; private set
+
+    /** Back-compat for the pane badge: true when ANY input path is live. */
     @Volatile var inputAgentUp = false; private set
+
+    // X11 keysym -> xdotool key NAME, for the keysyms DesktopView produces.
+    // xdotool resolves names through XStringToKeysym and the live keymap, so
+    // this is layout-independent.
+    private val keysymNames: Map<Int, String> = mapOf(
+        0xFF08 to "BackSpace", 0xFF09 to "Tab", 0xFF0D to "Return",
+        0xFF1B to "Escape", 0xFFFF to "Delete", 0xFF50 to "Home",
+        0xFF51 to "Left", 0xFF52 to "Up", 0xFF53 to "Right",
+        0xFF54 to "Down", 0xFF55 to "Prior", 0xFF56 to "Next",
+        0xFF57 to "End", 0xFF58 to "Begin", 0xFF61 to "Print",
+        0xFF63 to "Insert", 0xFFBE to "F1", 0xFFBF to "F2",
+        0xFFC0 to "F3", 0xFFC1 to "F4", 0xFFC2 to "F5", 0xFFC3 to "F6",
+        0xFFC4 to "F7", 0xFFC5 to "F8", 0xFFC6 to "F9", 0xFFC7 to "F10",
+        0xFFC8 to "F11", 0xFFC9 to "F12", 0xFFE1 to "shift",
+        0xFFE2 to "shift", 0xFFE3 to "ctrl", 0xFFE4 to "ctrl",
+        0xFFE7 to "Meta_L", 0xFFE8 to "Meta_R", 0xFFE9 to "alt",
+        0xFFEA to "alt", 0xFF7F to "Num_Lock", 0xFF14 to "Caps_Lock",
+        0xFF02 to "Caps_Lock",
+    )
+
+    // --- FIFO transport (fallback) -----------------------------------------
     private var inputFifo: java.io.FileOutputStream? = null
+    private var inputFifoKey: Any? = null
+    private val inputExecutor = java.util.concurrent.Executors.newSingleThreadExecutor { r ->
+        Thread(r, "emux-input").apply { isDaemon = true; priority = Thread.MAX_PRIORITY }
+    }
+    // A drag floods motion events far faster than a proot-spawned xdotool can
+    // drain them; keep only the newest motion so a gesture never queues up.
+    private val inputPending = java.util.ArrayDeque<String>()
+    // Declared as java.lang.Object, NOT Any(): Kotlin's `Any` does not expose
+    // wait()/notifyAll(), so the monitor calls below are unresolved references
+    // and the module fails to compile. Caught by kotlinc, not by inspection.
+    private val inputLock = java.lang.Object()
+    @Volatile private var inputDropped = 0L
+
+    private fun fifoFile() = java.io.File(com.emux.core.FsLayout.linuxRoot(ctx), "tmp/emux_in")
+
+    private fun fifoFileKey(f: java.io.File): Any? = runCatching {
+        java.nio.file.Files.readAttributes(f.toPath(),
+            java.nio.file.attribute.BasicFileAttributes::class.java).fileKey()
+    }.getOrNull()
+
+    /**
+     * Enqueue one agent line. NEVER blocks the caller: open(2) on a FIFO blocks
+     * until a reader appears, and write(2) blocks once the pipe fills — both
+     * used to happen on the UI thread from onTouchEvent, which is an ANR and
+     * reads to the user as "the desktop ignores my finger".
+     */
     private fun inputLine(line: String): Boolean {
-        return runCatching {
-            if (inputFifo == null) {
-                inputFifo = java.io.FileOutputStream(
-                    java.io.File(com.emux.core.FsLayout.linuxRoot(ctx), "tmp/emux_in"), false)
+        val c = x11
+        if (c != null && c.connected) return false            // XTEST owns input
+        synchronized(inputLock) {
+            // Coalesce consecutive motion events into the newest one.
+            if (line.startsWith("M ")) {
+                val it = inputPending.descendingIterator()
+                while (it.hasNext()) if (it.next().startsWith("M ")) it.remove() else break
             }
-            inputFifo!!.write((line + "\n").toByteArray())
-            inputFifo!!.flush()
-            inputAgentUp = true
-        }.onFailure {
-            inputAgentUp = false
-            runCatching { inputFifo?.close() }
-            inputFifo = null
-        }.isSuccess
+            if (inputPending.size > 512) { inputPending.pollFirst(); inputDropped++ }
+            inputPending.addLast(line)
+            inputLock.notifyAll()
+        }
+        return true
+    }
+
+    private fun inputWriterLoop() {
+        while (true) {
+            val line = synchronized(inputLock) {
+                // v0.2.59: wait whenever the queue is empty. The previous
+                // condition ALSO required `x11?.connected != true`, so the
+                // moment the XTEST control plane came up this loop stopped
+                // waiting, pollFirst() returned null and `?: continue` spun
+                // the executor thread at 100% CPU for the entire desktop
+                // session (battery drain + scheduler pressure that starved
+                // the very input path it was meant to back up).
+                while (inputPending.isEmpty()) {
+                    runCatching { inputLock.wait(250) }
+                }
+                inputPending.pollFirst()
+            } ?: continue
+            runCatching {
+                val f = fifoFile()
+                // Reopen when the agent recreated the FIFO (it rm+mkfifo's on
+                // every session start); a cached stream then points at an
+                // unlinked inode and every write silently vanishes.
+                val key = fifoFileKey(f)
+                if (inputFifo == null || (key != null && key != inputFifoKey)) {
+                    runCatching { inputFifo?.close() }
+                    inputFifo = java.io.FileOutputStream(f, false)
+                    inputFifoKey = key
+                }
+                inputFifo!!.write((line + "\n").toByteArray())
+                inputFifo!!.flush()
+                if (!inputAgentUp) { inputAgentUp = true; inputTransport = "agent" }
+            }.onFailure {
+                inputAgentUp = false
+                inputTransport = "down"
+                runCatching { inputFifo?.close() }
+                inputFifo = null; inputFifoKey = null
+                noteInputDropped()
+            }
+        }
+    }
+
+    private var inputWriterStarted = false
+    private fun ensureInputWriter() {
+        if (inputWriterStarted) return
+        inputWriterStarted = true
+        inputExecutor.execute { runCatching { inputWriterLoop() } }
+    }
+
+    // --- injection entry points --------------------------------------------
+    /** True when the XTEST control plane is live and owning input. */
+    private fun xtest(): X11Client? = x11?.takeIf { it.connected && it.xtestOpcode > 127 }
+
+    private fun surfaceXtestErrors(c: X11Client) {
+        val errs = c.takeErrors()
+        if (errs.isNotEmpty()) noteInfo("XTEST rejected an event: ${errs.first().describe()}")
     }
 
     fun injectClick(xInXSpace: Int, yInXSpace: Int, button: Int = 1, press: Boolean) {
+        val c = xtest()
+        if (c != null) {
+            runCatching { c.fakeButton(button, xInXSpace, yInXSpace, press); surfaceXtestErrors(c) }
+                .onFailure { noteInputDropped("XTEST click failed: $it") }
+            return
+        }
+        ensureInputWriter()
         inputLine("M $xInXSpace $yInXSpace 0")
         inputLine(if (press) "D $button 0 0" else "U $button 0 0")
     }
 
-    fun injectMotion(x: Int, y: Int) { inputLine("M $x $y 0") }
+    fun injectMotion(x: Int, y: Int) {
+        val c = xtest()
+        if (c != null) { runCatching { c.fakeMotion(x, y) }; return }
+        ensureInputWriter(); inputLine("M $x $y 0")
+    }
 
     /** Drag ended outside a click: just release button 1 at position. */
     fun fakeButtonReleaseOnly(x: Int, y: Int) {
-        inputLine("M $x $y 0"); inputLine("U 1 0 0")
+        val c = xtest()
+        if (c != null) {
+            runCatching { c.fakeButton(1, x, y, false); surfaceXtestErrors(c) }
+            return
+        }
+        ensureInputWriter(); inputLine("M $x $y 0"); inputLine("U 1 0 0")
     }
 
     fun injectKeycode(keycode: Int, press: Boolean) { x11?.fakeKey(keycode, press) }
 
-    // v0.2.44: keyboard injection for the Desktop tab (it never had any:
-    // DesktopView had no InputConnection and no key routing, so typing on
-    // the desktop went nowhere even with a live control plane).
     private var inputDroppedNoted = false
-    private fun noteInputDropped() {
-        if (!inputDroppedNoted) {
-            inputDroppedNoted = true
-            noteInfo("input dropped: guest FIFO agent unreachable (is xdotool installed? see /tmp/emux_agent.log)")
+    private fun noteInputDropped(reason: String =
+        "input dropped: no XTEST control plane and the guest FIFO agent is unreachable " +
+        "(is xdotool installed? see /tmp/emux_agent.log)") {
+        if (!inputDroppedNoted) { inputDroppedNoted = true; noteInfo(reason) }
+    }
+
+    /** Tap one X11 keysym (used for Return/BackSpace/arrows/... from DesktopView). */
+    fun injectKeysymTap(ks: Int): Boolean {
+        val c = xtest()
+        if (c != null) {
+            val ok = runCatching { c.typeKeysymTap(ks) }.getOrDefault(false)
+            if (ok) { surfaceXtestErrors(c); return true }
+            noteInputDropped("keysym 0x${Integer.toHexString(ks)} is not in the server keymap")
+            return false
+        }
+        ensureInputWriter()
+        val name = keysymNames[ks]
+        return if (name != null) {
+            inputLine("N $name")
+        } else if (ks in 0x20..0x7E) {
+            // Printable ASCII: send the character, xdotool type resolves it.
+            inputLine("T " + ks.toChar())
+        } else {
+            noteInputDropped("no agent encoding for keysym 0x${Integer.toHexString(ks)}")
+            false
         }
     }
-    fun injectKeysymTap(ks: Int): Boolean {
-        val a = inputLine("K $ks 0 0")
-        val b = inputLine("k $ks 0 0")
-        if (!a || !b) noteInputDropped()
-        return a && b
+
+    /** Type one character. */
+    fun injectChar(ch: Char): Boolean {
+        // Route control chars through their keysym: over the FIFO the payload
+        // is line-delimited, so a literal '\n' would be parsed as the start of
+        // the next command.
+        if (ch == '\n' || ch == '\r') return injectKeysymTap(0xFF0D)
+        if (ch == '\t') return injectKeysymTap(0xFF09)
+        if (ch == '\b') return injectKeysymTap(0xFF08)
+        val c = xtest()
+        if (c != null) {
+            val ok = runCatching { c.typeChar(ch) }.getOrDefault(false)
+            if (ok) { surfaceXtestErrors(c); return true }
+        }
+        ensureInputWriter()
+        return inputLine("T $ch")
     }
-    fun injectChar(ch: Char): Boolean =
-        injectKeysymTap(if (ch.code < 0x100) ch.code else 0x01000000 + ch.code)
+
+    /** Type a whole IME commit at once — one agent line, one xdotool process. */
+    fun injectText(text: String): Boolean {
+        if (text.isEmpty()) return true
+        val c = xtest()
+        if (c != null) {
+            val ok = runCatching { c.typeString(text) }.getOrDefault(false)
+            if (ok) { surfaceXtestErrors(c); return true }
+        }
+        ensureInputWriter()
+        // The FIFO protocol is one command per LINE, so an embedded newline
+        // would be parsed as the next command (and an empty line dropped).
+        // Normalise CRLF, then emit text segments as `T` and each newline as
+        // an explicit `N Return`.
+        var ok = true
+        text.replace("\r\n", "\n").replace('\r', '\n').split('\n')
+            .forEachIndexed { i, seg ->
+                if (i > 0) ok = inputLine("N Return") && ok
+                if (seg.isNotEmpty()) ok = inputLine("T $seg") && ok
+            }
+        return ok
+    }
 
     // -------------------------------------------------------------------- stop
     fun stop() {
@@ -1536,6 +1806,12 @@ class DesktopService(
         runCatching { activeSock?.close() }; activeSock = null   // v0.1.54
         runCatching { listener?.close() }; listener = null
         x11?.close(); x11 = null
+        // v0.2.59: drop the queued input and the FIFO handle. The writer thread
+        // is a daemon and is reused by the next session; leaving the stream open
+        // would keep writing into a FIFO the next agent has already unlinked.
+        synchronized(inputLock) { inputPending.clear() }
+        runCatching { inputFifo?.close() }; inputFifo = null; inputFifoKey = null
+        inputAgentUp = false; inputTransport = "down"
         scope.launch {
             xSession?.stop(); captureSession?.stop()
             xSession = null; captureSession = null
