@@ -119,11 +119,26 @@ open issues).
 
 ```bash
 cd android-emux
-./gradlew assembleDebug
+./gradlew :app:assembleDebug
 # output: app/build/outputs/apk/debug/app-debug.apk
+
+sh tools/verify_apk.sh app/build/outputs/apk/debug/app-debug.apk   # must be all PASS
+adb install -r app/build/outputs/apk/debug/app-debug.apk
 ```
 
-Requires JDK 17+ and the Android SDK (platform 34).
+Requires JDK 17+, the Android SDK (platform 34) and ~4 GB of free RAM. See
+[`android-emux/docs/BUILDING_THE_APK.md`](android-emux/docs/BUILDING_THE_APK.md)
+for the full recipe, what each `verify_apk.sh` failure means, and why the APK
+cannot be built without Gradle.
+
+**Verify before you install.** The root `emux-debug.apk` goes stale silently — it
+sat at v0.2.58 while the source reached v0.2.61, so two releases of desktop fixes
+were committed and pushed but installable by nobody. `sh tools/verify_apk.sh`
+compares an APK against the working tree (identity, signature, every guest asset
+byte-for-byte, and whether the dex carries the current code) and exits non-zero on
+any mismatch. Signing must stay on the committed `debug-keystore/emux-debug.jks`:
+a different signature means `INSTALL_FAILED_UPDATE_INCOMPATIBLE`, and the only way
+past it is an uninstall, which **deletes the downloaded rootfs**.
 
 ## Repository layout
 
