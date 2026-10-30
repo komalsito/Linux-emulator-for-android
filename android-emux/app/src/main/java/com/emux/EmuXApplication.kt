@@ -28,9 +28,28 @@ class EmuXApplication : Application() {
     // permanently broken. Nothing in app-start may be able to crash it.
     override fun onCreate() {
         super.onCreate()
+        // v0.2.62 CRASH VISIBILITY: installed FIRST, before anything else can
+        // throw. The guards below only cover statements inside this method — the
+        // crashes that reach the user as the system "EmuX keeps stopping" dialog
+        // are the ones that escape them entirely (an androidx.startup provider, a
+        // Runnable posted after onCreate returned, an uncaught Throwable in a
+        // coroutine, a View callback like onDraw, or class initialization of
+        // anything touched below). A process-wide handler is the only net that
+        // covers all of those, and it writes the report the next launch displays.
+        try { com.emux.CrashReport.install(this) } catch (_: Throwable) { /* reporter is best-effort */ }
         // v0.1.91: persist the PTY-wrapper probe so terminal cold starts skip
         // re-exec'ing every wrapper candidate (part of "terminal slow to start").
-        com.emux.terminal.TtyWrap.cacheFile = java.io.File(filesDir, "ttywrap.probe")
+        // v0.2.62: this was the one statement in Application.onCreate NOT inside a
+        // guard. Assigning to TtyWrap.cacheFile initializes the TtyWrap object,
+        // whose <clinit> reads TerminalSession.CANDIDATES — so a failure there was
+        // an ExceptionInInitializerError before any try block, i.e. an unopenable
+        // app with no on-screen explanation. The probe result is a cache; losing
+        // it only costs a re-probe on the next terminal cold start.
+        try {
+            com.emux.terminal.TtyWrap.cacheFile = java.io.File(filesDir, "ttywrap.probe")
+        } catch (e: Throwable) {
+            android.util.Log.e("EmuX", "ttywrap cache init failed", e)
+        }
         try {
             com.emux.EmuXLog.init(this)
             com.emux.EmuXLog.i("EmuXApplication onCreate v${com.emux.EmuXLog.appVersion(this)}")

@@ -55,7 +55,7 @@ with an `UnsupportedOperationException` shell and still pass every other check.
    preserving per-entry compression.
 9. **align, sign, verify.**
 
-## Five things that will bite you
+## Six things that will bite you
 
 **1. `styleable` collisions are merged, not resolved by priority.** `appcompat` and
 `material` both declare `styleable/SearchView`, with 17 and 12 different attributes.
@@ -112,6 +112,40 @@ harvesting "just the classes" — without it `Dispatchers.Main` throws
 *"Module with the Main dispatcher is missing"* the first time anything touches a
 `lifecycleScope`.
 
+### 6. A dependency can resolve to the wrong version and every other check still passes
+
+The v0.2.61 build shipped `androidx.sqlite` **2.4.0** / `sqlite-framework` **2.4.0** /
+`tracing` **1.2.0** / `localbroadcastmanager` **1.1.0** where AGP resolves **2.3.0** /
+**2.3.0** / **1.0.0** / **1.0.0**. `verify_apk.sh` reported 50 PASS / 0 FAIL, and so
+did every structural comparison: the class *names* across those versions are
+identical, so a class-set diff cannot see it — only method signatures differ, and
+those are invisible without running the code.
+
+What does see it: every AAR ships `META-INF/<group>_<artifact>.version` naming its own
+version, so the packaged markers can be diffed against `deps.lock`. That is now
+section 5 of `verify_apk.sh`. Two details it has to get right:
+
+- **KMP naming.** An artifact publishes as `lifecycle-runtime-android` or
+  `kotlinx-coroutines-core-jvm`, but the marker inside it is named for the *base*
+  module (`androidx.lifecycle_lifecycle-runtime.version`,
+  `kotlinx_coroutines_core.version`). Index both spellings, or the matcher blames
+  `androidx.core:core` 1.13.1 for `coroutines-core` 1.8.1.
+- **One marker is generated, not shipped.** AGP's `writeVersionFile` task emits
+  `androidx.lifecycle_lifecycle-runtime-ktx.version`; the published anchor jar for
+  that module contains only `MANIFEST.MF` and
+  `kotlin-project-structure-metadata.json`. A from-source build cannot produce it
+  without fabricating a file, so it is counted and not failed.
+
+For the record, `javap` on both versions of each artifact showed this particular
+drift was *benign* — tracing's changes are purely additive, localbroadcastmanager's
+API is byte-identical, and sqlite-framework differs only by one **private** field on
+`FrameworkSQLiteDatabase`, unreachable from Room 2.5.0. It was still wrong to ship,
+and it was found only because a device crashed and forced the question.
+
+`lifecycle-livedata-core-ktx:2.8.6` is also pinned now: a KMP anchor with zero
+classes whose `classes.jar` nonetheless carries a marker AGP emits, so skipping it
+lost an entry. Marker parity with the AGP build went 55/61 → 60/61.
+
 ## How this build was validated (no device available)
 
 There is no emulator or device in the sandbox, so nothing here has been *run*. What
@@ -124,14 +158,30 @@ was checked, all statically, against the Gradle-built reference APK:
 - **R field sets** — of the reference APK's 191 R classes, **179 library R classes
   match field-for-field** and `com.emux.R` matches exactly across all 10 types
   (73 fields).
-- **`verify_apk.sh`** — 50 PASS / 0 FAIL: identity, signature digest vs
+- **`verify_apk.sh`** — 51 PASS / 0 FAIL: identity, signature digest vs
   `debug-keystore/emux-debug.jks`, all 34 assets byte-identical to the working tree,
   guest-script rice/autostart stamps, the `pcmanfm` desktop-items repair, `doctor`,
-  dex method proxies, multidex.
-- **Entry set** — 969 entries vs the reference's 970. Differences: dex is split into
-  2 files instead of 8 (cosmetic — min-api 24 has native multidex), and
-  `META-INF/com/android/build/gradle/app-metadata.properties` is deliberately not
-  fabricated.
+  dex method proxies, multidex, and (since v0.2.62) every packaged dependency
+  version against `deps.lock`. Run against the *stale* v0.2.58 APK it reports
+  `passed=41 failed=10`; its dependency check passes, which is the point — the check
+  fails on drift, not on age.
+- **Entry set** — 965 entries vs the reference's 970. Differences: dex is split into
+  2 files instead of 8 (cosmetic — min-api 24 has native multidex);
+  `META-INF/com/android/build/gradle/app-metadata.properties` and the generated
+  `lifecycle-runtime-ktx` marker are deliberately not fabricated; and this build
+  carries the three v1 (JAR) signature entries `META-INF/EMUX.{RSA,SF}` +
+  `MANIFEST.MF`, which the AGP build omits because it signs v2/v3 only. Harmless —
+  v1 is ignored on API 24+ when a valid v2 block is present, and `apksigner`
+  reports the same certificate either way.
+- **No stub bodies leaked.** The two-pass compile needs stubs to break a
+  Kotlin/Java cycle, and a stub that survives into the dex keeps the right class
+  *name* while its methods throw. Checked two ways: `UnsupportedOperationException`
+  appears 4× in this dex vs 5× in the reference, and all 288 `com/emux` classes
+  shared with the reference have *identical* method counts. `audit_classes.py`
+  enforces the traceability half of this on every build.
+
+None of that is a substitute for running the app. See
+`docs/CRASH_ON_LAUNCH_v0.2.62.md` for what happened when it finally met a device.
 
 A Gradle build remains the reference path. This one exists so the APK can never again
 be three releases behind the source that fixes the desktop.

@@ -78,6 +78,39 @@ class MainActivity : AppCompatActivity() {
         }
 
     override fun onCreate(savedInstanceState: Bundle?) {
+        // v0.2.62 CRASH VISIBILITY. The v0.1.3 guard below only covers throws from
+        // inside doOnCreate. A field report of "crashes on every launch with the
+        // system dialog" therefore means the throw came from somewhere the guard
+        // cannot reach — an androidx.startup ContentProvider (which runs before any
+        // Activity exists), a Runnable posted after onCreate returned, an uncaught
+        // Throwable in a coroutine, a View callback such as onDraw, or class
+        // initialization. Those leave NO on-screen trace, and a device without adb
+        // cannot produce a logcat. CrashReport's process-wide handler captured it;
+        // show it here instead of launching straight back into the same failure.
+        val priorCrash = runCatching { com.emux.CrashReport.consumeIfFresh(this) }.getOrNull()
+        if (priorCrash != null) {
+            try {
+                // super.onCreate must run exactly once, and doOnCreate owns that
+                // call on the normal path — so this branch calls it itself.
+                super.onCreate(savedInstanceState)
+                setContentView(crashReportView(priorCrash))
+            } catch (e: Throwable) {
+                // super.onCreate already ran, so falling through to doOnCreate
+                // would call it a second time. Degrade to plain text instead.
+                runCatching {
+                    setContentView(android.widget.ScrollView(this).apply {
+                        addView(android.widget.TextView(this@MainActivity).apply {
+                            text = "EmuX could not render the crash report ($e).\n\n$priorCrash"
+                            setTextIsSelectable(true)
+                            setPadding(48, 96, 48, 48)
+                            setTextColor(0xFFE8E8E8.toInt())
+                            setBackgroundColor(0xFF101216.toInt())
+                        })
+                    })
+                }
+            }
+            return
+        }
         // v0.1.3 CRASH FIX: wrap the ENTIRE startup path. Any exception thrown
         // here (missing resource, OEM view-inflation quirk, corrupt prefs…) used
         // to propagate straight out of onCreate → Android shows "EmuX keeps
@@ -103,6 +136,68 @@ class MainActivity : AppCompatActivity() {
                 })
             } catch (_: Throwable) { /* nothing more we can do */ }
         }
+    }
+
+    /**
+     * v0.2.62: renders a captured crash report with a copy button and an escape
+     * hatch. Built in code, not XML, because it has to work even when inflation is
+     * what broke — same reasoning as the v0.1.3 error screen.
+     */
+    private fun crashReportView(report: String): android.view.View {
+        val col = android.widget.LinearLayout(this).apply {
+            orientation = android.widget.LinearLayout.VERTICAL
+            setPadding(48, 96, 48, 48)
+            setBackgroundColor(0xFF101216.toInt())
+        }
+        col.addView(android.widget.TextView(this).apply {
+            text = "EmuX crashed on the previous launch"
+            textSize = 20f
+            setTextColor(0xFFFF8A65.toInt())
+        })
+        col.addView(android.widget.TextView(this).apply {
+            text = "This failure happened outside the app's own startup guard, so nothing " +
+                "else could show it. The report below is what the crash left behind.\n\n" +
+                "Copy it with the button, or photograph this screen — either is enough to " +
+                "diagnose it. \"Try starting anyway\" clears the report and launches normally; " +
+                "if the crash repeats, this screen comes back."
+            textSize = 13f
+            setTextColor(0xFFB0BEC5.toInt())
+            setPadding(0, 20, 0, 28)
+        })
+        col.addView(android.widget.TextView(this).apply {
+            text = report
+            setTextIsSelectable(true)
+            textSize = 11f
+            typeface = android.graphics.Typeface.MONOSPACE
+            setTextColor(0xFFE8E8E8.toInt())
+            setPadding(0, 0, 0, 20)
+        })
+        col.addView(android.widget.Button(this).apply {
+            text = "Copy report"
+            setOnClickListener {
+                runCatching {
+                    val cm = getSystemService(android.content.Context.CLIPBOARD_SERVICE)
+                        as android.content.ClipboardManager
+                    cm.setPrimaryClip(android.content.ClipData.newPlainText("EmuX crash report", report))
+                    text = "Copied ✓"
+                }
+            }
+        })
+        col.addView(android.widget.Button(this).apply {
+            text = "Try starting EmuX anyway"
+            setOnClickListener {
+                runCatching { com.emux.CrashReport.clear(this@MainActivity) }
+                runCatching { recreate() }
+            }
+        })
+        col.addView(android.widget.TextView(this).apply {
+            text = "Also written to (readable with a file manager, no adb needed):\n" +
+                runCatching { com.emux.CrashReport.locations(this@MainActivity) }.getOrDefault("(unavailable)")
+            textSize = 10f
+            setTextColor(0xFF78909C.toInt())
+            setPadding(0, 28, 0, 0)
+        })
+        return android.widget.ScrollView(this).apply { addView(col) }
     }
 
     private fun doOnCreate(savedInstanceState: Bundle?) {

@@ -27,6 +27,8 @@ androidx.fragment:fragment:1.8.3@aar  # google
 androidx.interpolator:interpolator:1.0.0@aar  # google
 androidx.legacy:legacy-support-core-utils:1.0.0@aar  # google
 androidx.lifecycle:lifecycle-common-jvm:2.8.6@jar  # google
+androidx.lifecycle:lifecycle-livedata-core-ktx:2.8.6@aar  # google  (KMP anchor: 0 classes, but its
+#   classes.jar carries the .version marker AGP emits - skipping the anchor lost that entry)
 androidx.lifecycle:lifecycle-livedata-core:2.8.6@aar  # google
 androidx.lifecycle:lifecycle-livedata:2.8.6@aar  # google
 androidx.lifecycle:lifecycle-process:2.8.6@aar  # google
@@ -36,7 +38,7 @@ androidx.lifecycle:lifecycle-viewmodel-android:2.8.6@aar  # google
 androidx.lifecycle:lifecycle-viewmodel-ktx:2.8.6@aar  # google
 androidx.lifecycle:lifecycle-viewmodel-savedstate:2.8.6@aar  # google
 androidx.loader:loader:1.0.0@aar  # google
-androidx.localbroadcastmanager:localbroadcastmanager:1.1.0@aar  # google
+androidx.localbroadcastmanager:localbroadcastmanager:1.0.0@aar  # google  (AGP-resolved)
 androidx.preference:preference-ktx:1.2.1@aar  # google
 androidx.preference:preference:1.2.1@aar  # google
 androidx.print:print:1.0.0@aar  # google
@@ -49,10 +51,10 @@ androidx.room:room-runtime:2.5.0@aar  # google
 androidx.savedstate:savedstate-ktx:1.2.1@aar  # google
 androidx.savedstate:savedstate:1.2.1@aar  # google
 androidx.slidingpanelayout:slidingpanelayout:1.2.0@aar  # google
-androidx.sqlite:sqlite-framework:2.4.0@aar  # google
-androidx.sqlite:sqlite:2.4.0@aar  # google
+androidx.sqlite:sqlite-framework:2.3.0@aar  # google  (AGP-resolved: room 2.5.0 needs 2.3.0; 2.4.0 drops a private field from FrameworkSQLiteDatabase)
+androidx.sqlite:sqlite:2.3.0@aar  # google  (AGP-resolved; 2.4.0 is a KMP-anchor version room 2.5.0 was not built against)
 androidx.startup:startup-runtime:1.1.1@aar  # google
-androidx.tracing:tracing:1.2.0@aar  # google
+androidx.tracing:tracing:1.0.0@aar  # google  (AGP-resolved; 1.2.0 adds forceEnableAppTracing/truncatedTraceSectionLabel)
 androidx.transition:transition:1.5.0@aar  # google
 androidx.vectordrawable:vectordrawable-animated:1.1.0@aar  # google
 androidx.vectordrawable:vectordrawable:1.1.0@aar  # google

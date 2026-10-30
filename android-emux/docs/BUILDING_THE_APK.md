@@ -49,7 +49,7 @@ sh tools/verify_apk.sh app/build/outputs/apk/debug/app-debug.apk
 
 It compares the APK against the **working tree** (so it also catches a build made
 from an edited or uncommitted tree) and exits non-zero on any mismatch. Run
-against the stale v0.2.58 APK it reports `passed=40 failed=10`:
+against the stale v0.2.58 APK it reports `passed=41 failed=10`:
 
 | check | what a failure means |
 |---|---|
@@ -63,6 +63,7 @@ against the stale v0.2.58 APK it reports `passed=40 failed=10`:
 | APK's `emux-x11` has `doctor()` | pre-v0.2.61 — no field diagnostic |
 | dex contains `injectScroll`, `injectKeysymCombo`, `maybeShowIntro` | the host half is stale (these exist only from v0.2.60/v0.2.61 on) |
 | multidex | wrong packaging |
+| **every `META-INF/*.version` marker matches `deps.lock`** | **a dependency resolved to the wrong version.** Added in v0.2.62 after a no-Gradle build shipped `androidx.sqlite` 2.4.0 / `tracing` 1.2.0 / `localbroadcastmanager` 1.1.0 where AGP resolves 2.3.0 / 1.0.0 / 1.0.0 and *every other check passed*. Class names are identical across those versions, so a class-set comparison cannot see it — only method signatures differ, and those are invisible without running the code. This is the only check here that tests the dependencies rather than the app's own code and assets. KMP naming needs care: an artifact publishes as `lifecycle-runtime-android` / `kotlinx-coroutines-core-jvm` but its marker is named for the base module, and without aliasing both spellings `core` 1.13.1 gets blamed for `coroutines-core` 1.8.1. One marker (`lifecycle-runtime-ktx`) is *generated* by AGP rather than shipped in any artifact, so it is counted and not failed |
 
 `ENV_VERSION` itself is a Kotlin `const val`, so it is **inlined into the dex as a
 bare integer** and cannot be grepped out — hence the method-name checks above as
@@ -78,7 +79,7 @@ reviewing:
 ```sh
 cp app/build/outputs/apk/debug/app-debug.apk ../emux-debug.apk
 sh tools/verify_apk.sh            # must be all PASS
-git add ../emux-debug.apk && git commit -m "chore: refresh root emux-debug.apk to v0.2.61 (vc161)"
+git add ../emux-debug.apk && git commit -m "chore: refresh root emux-debug.apk to v0.2.62 (vc162)"
 ```
 
 ---

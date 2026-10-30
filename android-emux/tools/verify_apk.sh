@@ -184,6 +184,85 @@ if command -v unzip >/dev/null 2>&1; then
   ck "APK is multidex as expected" "$([ "$NDEX" -ge 2 ] && echo 1 || echo 0)" "found $NDEX dex file(s)"
 fi
 
+# ---- 5. dependency versions match deps.lock -------------------------------
+# v0.2.62: added because a shipped APK crashed on every launch and all 50 checks
+# above passed. The cause class was dependency drift: the no-Gradle build resolved
+# androidx.sqlite 2.4.0 / tracing 1.2.0 / localbroadcastmanager 1.1.0 where AGP
+# resolves 2.3.0 / 1.0.0 / 1.0.0. Class NAMES were identical, so a class-set
+# comparison cannot see it - only method signatures differ, and those are invisible
+# without running the code. Every AAR ships META-INF/<group>_<artifact>.version
+# naming its own version, so the packaged markers can be diffed against the lock
+# that produced them. This is the only check here that tests the DEPENDENCIES
+# rather than the app's own code and assets.
+echo
+echo "--- dependency versions (APK markers vs deps.lock)"
+LOCK="$HERE/build-apk/deps.lock"
+if [ ! -f "$LOCK" ]; then
+  sk "dependency version markers" "no deps.lock at $LOCK"
+elif ! command -v python3 >/dev/null 2>&1; then
+  sk "dependency version markers" "python3 not installed"
+else
+  python3 - "$APK" "$LOCK" > "$TMPD/depvers" <<'PYEOF'
+import re,sys,zipfile
+apk,lock=sys.argv[1],sys.argv[2]
+pins={}
+# A KMP artifact publishes under its base name but the .version marker it ships is
+# named for the BASE module, not the -android/-jvm variant: deps.lock pins
+# lifecycle-runtime-android and kotlinx-coroutines-core-jvm, while the APK carries
+# androidx.lifecycle_lifecycle-runtime.version and kotlinx_coroutines_core.version.
+# Index both spellings so those do not mis-match a shorter artifact name (which is
+# how 'core' 1.13.1 got blamed for coroutines-core 1.8.1).
+for ln in open(lock):
+    ln=ln.split('#')[0].strip()
+    if not ln or ':' not in ln: continue
+    coord=ln.split('@')[0]
+    parts=coord.split(':')
+    if len(parts)<3: continue
+    art=parts[1].replace('_','-').lower(); ver=parts[2]
+    pins[art]=ver
+    for suf in ('-android','-jvm'):
+        if art.endswith(suf): pins.setdefault(art[:-len(suf)], ver)
+z=zipfile.ZipFile(apk)
+markers={n.split('/')[-1][:-len('.version')]:z.read(n).decode('utf-8','replace').strip()
+         for n in z.namelist() if n.startswith('META-INF/') and n.endswith('.version')}
+VER=re.compile(r'^\d+(\.\d+)*([.\-][A-Za-z0-9.\-]+)?$')
+# AGP *generates* a few .version markers that no published artifact carries, so a
+# Gradle-built APK contains them and a from-source build cannot without
+# fabricating a file. lifecycle-runtime-ktx 2.8.6 is a KMP anchor whose jar holds
+# only MANIFEST.MF + kotlin-project-structure-metadata.json - the marker for it is
+# written by AGP's writeVersionFile task, not shipped. Counted, not failed.
+GENERATED_ONLY={'androidx.lifecycle_lifecycle-runtime-ktx'}
+matched=drift=opaque=generated=0
+for name,ver in sorted(markers.items()):
+    if name in GENERATED_ONLY: generated+=1; continue
+    norm=name.replace('_','-').lower()
+    # longest artifact name that is a separator-delimited suffix of the marker
+    cands=[a for a in pins if norm==a or norm.endswith('-'+a)]
+    if not cands:
+        print(f"0|no deps.lock entry for marker {name} (version {ver})|unpinned dependency packaged into the APK")
+        drift+=1; continue
+    art=max(cands,key=len)
+    if not VER.match(ver):
+        opaque+=1; continue        # AGP writes a Gradle up-to-date message for some artifacts
+    matched+=1
+    if pins[art]!=ver:
+        print(f"0|{art}: APK carries {ver}, deps.lock pins {pins[art]}|version drift - a wrong dependency was packaged")
+        drift+=1
+if not drift:
+    extra=[]
+    if opaque: extra.append(f"{opaque} opaque")
+    if generated: extra.append(f"{generated} AGP-generated")
+    note=(" ("+", ".join(extra)+")") if extra else ""
+    print(f"1|{matched} dependency version marker(s) match deps.lock{note}, {len(markers)} in APK|")
+if drift:
+    print(f"0|{drift} dependency version marker(s) do NOT match deps.lock|see lines above")
+PYEOF
+  while IFS='|' read -r ok desc detail; do
+    [ -z "$ok" ] && continue
+    ck "$desc" "$ok" "$detail"
+  done < "$TMPD/depvers"
+fi
+
 rm -rf "$TMPD"
 echo
 echo "=== summary ==="

@@ -36,7 +36,7 @@ javac -nowarn -source 17 -target 17 -d $OUT/rclasses @$OUT/r.list 2>&1 | grep -v
 echo "   $(find $OUT/rclasses -name '*.class' | wc -l) classes from $(wc -l < $OUT/r.list) sources"
 
 P1="$J/x11/DesktopService.kt $J/x11/DesktopView.kt $J/x11/X11Client.kt $J/x11/UsbCaptureActivity.kt \
- $J/EmuXLog.kt $J/core/FsLayout.kt $J/core/RootManager.kt $J/core/DistroCatalog.kt \
+ $J/EmuXLog.kt $J/CrashReport.kt $J/core/FsLayout.kt $J/core/RootManager.kt $J/core/DistroCatalog.kt \
  $J/terminal/TerminalSession.kt $J/terminal/TerminalService.kt $J/terminal/ExtraKeysView.kt \
  $STUBS/ActivityMainBinding.kt $STUBS/SubsetStubs.kt $STUBS/SubsetStubs2.kt $STUBS/BootstrapManagerStub.kt"
 P2="$J/MainActivity.kt $J/SettingsActivity.kt $J/EmuXApplication.kt \

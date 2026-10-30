@@ -233,7 +233,36 @@ class DesktopView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attrs) 
         }
     }
 
+    /**
+     * v0.2.62 CRASH FIX: onDraw is a View callback — it runs on the main looper
+     * OUTSIDE every guard this app has (MainActivity's v0.1.3 catch(Throwable)
+     * covers only doOnCreate; postSafely's v0.1.8 catch covers only posted
+     * Runnables). A throw here is the system "EmuX keeps stopping" dialog, on
+     * every frame, i.e. an unopenable app. This pane also gained real drawing code
+     * in v0.2.60/61 (intro card, helper bar, Chip, fadeTick) that had never run on
+     * a device, so it is the most likely such site. Degrade to a dark pane with a
+     * one-line note: a blank desktop is recoverable, a dead process is not.
+     */
     override fun onDraw(canvas: Canvas) {
+        try {
+            drawPane(canvas)
+        } catch (e: Throwable) {
+            runCatching { com.emux.EmuXLog.e("DesktopView.onDraw failed", e) }
+            runCatching {
+                canvas.drawColor(Color.rgb(0x10, 0x14, 0x1A))
+                val p = Paint().apply {
+                    color = Color.argb(0xE0, 0xEF, 0x53, 0x50); textSize = sp(13f)
+                }
+                canvas.drawText(
+                    "desktop pane failed to draw: ${e.javaClass.simpleName}: ${e.message}".take(150),
+                    24f, height / 2f, p)
+            }
+            // Stop the fade ticker so a broken draw cannot re-throw every frame.
+            runCatching { removeCallbacks(fadeTick); hintUntilMs = 0L }
+        }
+    }
+
+    private fun drawPane(canvas: Canvas) {
         if (debugRedUntilMs > System.currentTimeMillis()) {
             canvas.drawColor(Color.RED); return
         }
