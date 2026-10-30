@@ -121,3 +121,87 @@ nothing else. v0.2.62 passes 51/0.
 The next launch will show the stack trace on screen. Copy it or photograph it. That
 single artifact is enough to finish this; everything above is what can be determined
 without one.
+
+---
+
+## Addendum: v0.2.62 did not work, and why that was predictable
+
+The field answer came back: *"still nothing from the app, it's an instant crash."*
+No report file, no report screen. That is not a mystery — v0.2.62 installed the
+handler in `Application.onCreate`, and Android's startup order is:
+
+```
+Application()  ->  attachBaseContext()  ->  [EVERY ContentProvider.onCreate]  ->  Application.onCreate()  ->  Activities
+```
+
+The app's only ContentProvider is `androidx.startup.InitializationProvider`, running
+`EmojiCompatInitializer`, `ProcessLifecycleInitializer` and
+`ProfileInstallerInitializer` in the window **before** `onCreate`. If the throw is
+there, the handler did not exist yet, so nothing could be recorded. The v0.2.62
+design could not have caught the very case it was written for, and the comment in
+that commit even listed "an androidx.startup provider" as a covered case. It was
+not.
+
+### v0.2.63
+
+- **`CrashReport.install` moved to `attachBaseContext`**, which runs before any
+  provider. That is the only position from which a process-wide handler covers the
+  whole startup path. Still installed in `onCreate` too (idempotent), so a future
+  reordering cannot silently undo it.
+- **`CrashReportActivity` runs in `android:process=":crash"`.** The crashing process
+  is dying and would take an in-process Activity with it; a second process is started
+  by `system_server` and outlives the failure. It uses a **framework** theme
+  (`@android:style/Theme.DeviceDefault.NoActionBar`) and builds its views in code,
+  because if app resource inflation is what broke, this screen still has to work.
+  `EmuXApplication.onCreate` returns early in that process so a screen whose only job
+  is to display a stack trace does not also schedule bootstraps.
+- **`SafeStartupProvider` was written and then deleted.** Subclassing
+  `InitializationProvider` to catch its initializers is impossible:
+  `javap -p androidx.startup.InitializationProvider` shows
+  `public final boolean onCreate()`. All five of its methods are final. The net had to
+  go earlier in the lifecycle instead — which is what `attachBaseContext` provides.
+
+### Build-pipeline defects found while rebuilding
+
+The sandbox had lost its entire toolchain (`java`, `/opt`, `/tmp/stubs`), so the build
+had to be reconstructed from the committed scripts. Four things broke, and three of
+them were silent:
+
+1. **The two-pass compile depended on four stub files that were never committed.**
+   `$STUBS/{ActivityMainBinding,SubsetStubs,SubsetStubs2,BootstrapManagerStub}.kt`
+   existed only in one machine's `/tmp`. A fresh checkout could not build at all, and
+   the failure was quiet: empty stub files still compile, the damage appears as
+   unresolved references. The split existed only because a single `kotlinc` over
+   ~12.6k lines was believed to OOM at 1 GB. **It does not** — one pass with
+   `-Xmx700m` finishes in about a minute, and `kotlinc` resolves `.java` sources given
+   on the command line, which is what removes the cycle. `compile_classes.sh` is now a
+   single pass with no stubs, so nothing can leak a throwing placeholder body into the
+   dex.
+2. **The driver masked compile failures.** Stage 7 was
+   `sh compile_classes.sh | grep -E '...'`. Under `set -e` a pipeline's status is its
+   LAST command's, so `grep` succeeding hid `exit 1` — and a build with unresolved
+   references was dexed, packaged, aligned and signed. `verify_apk.sh` caught it
+   (9 PASS / 3 FAIL), but the driver must not produce it. Stage 7 and stage 1 now
+   capture output and check the status explicitly.
+3. **The `SearchView` styleable union was a hand edit, not a pipeline stage.**
+   `appcompat` declares it with 17 attrs and `material` with 12; `aapt2 link` alone
+   rejects the pair. AGP never sees this because its resource *merger* unions them
+   first. The previous fix was an edit to an extracted `values.xml` under `/opt`, so it
+   vanished with the sandbox. `fix_styleable_union.py` is now stage 3/10: it finds
+   every styleable declared by more than one library, rewrites the first occurrence to
+   the union and removes the duplicates. Idempotent, and it reports
+   `appcompat:17, material:12 -> union of 29`, matching the reference APK's
+   `R$styleable.SearchView` field count exactly.
+4. **The compiled-resource cache never invalidated.** Stage 4 was
+   `[ -f flat/$n.zip ] || aapt2 compile`, so after stage 3 rewrote `values.xml` the
+   stale archive was reused and `aapt2 link` failed on a conflict that had already been
+   fixed. It now recompiles when any file under a library's `res/` is newer than its
+   archive — the same class of silent staleness as a stale committed APK, one level
+   down.
+
+Also in `verify_apk.sh`: sections 3 and 4 shelled out to `unzip` and `strings`. Neither
+exists on a lean machine, and when they were missing the 34 asset checks silently
+SKIPped while the dex checks emitted three **false FAILs** claiming a current APK
+"predates v0.2.60". Both sections now use `python3`/`zipfile`, which the pipeline
+already requires. A verifier that cannot run must not look like one that found a
+problem.

@@ -53,6 +53,11 @@
              initializes WorkManager explicitly (EmuXBootstrapApp) before first use,
              and falls back to an in-process runner if even that fails.
              NOTE: <provider> must live INSIDE <application>, not at manifest level. -->
+        <!-- NOTE: InitializationProvider.onCreate() is FINAL, so it cannot be
+             subclassed to catch a failing initializer. The net has to go earlier
+             instead: CrashReport installs a process-wide handler from
+             Application.attachBaseContext, which Android calls BEFORE any
+             ContentProvider is created. -->
         <provider
             android:name="androidx.startup.InitializationProvider"
             android:authorities="${applicationId}.androidx-startup"
@@ -63,6 +68,18 @@
                 android:value="androidx.startup"
                 tools:node="remove" />
         </provider>
+
+        <!-- v0.2.63: renders a captured crash report. android:process=":crash" so it
+             survives the death of the process that crashed; a FRAMEWORK theme, not
+             @style/EmuX, so it still works if app resource inflation is what broke. -->
+        <activity
+            android:name="com.emux.CrashReportActivity"
+            android:process=":crash"
+            android:exported="false"
+            android:excludeFromRecents="true"
+            android:taskAffinity="com.emux.crash"
+            android:launchMode="singleInstance"
+            android:theme="@android:style/Theme.DeviceDefault.NoActionBar" />
 
         <activity
             android:name=".MainActivity"

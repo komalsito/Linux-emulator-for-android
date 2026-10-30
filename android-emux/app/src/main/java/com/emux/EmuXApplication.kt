@@ -26,17 +26,35 @@ class EmuXApplication : Application() {
     // → the system shows "EmuX keeps stopping" and, because Application runs on
     // every launch (including WorkManager/scheduled wakeups), the app looked
     // permanently broken. Nothing in app-start may be able to crash it.
+    /**
+     * v0.2.63 CRASH FIX — THE ORDERING TRAP. Android creates every ContentProvider
+     * BETWEEN attachBaseContext and onCreate:
+     *
+     *   Application() -> attachBaseContext() -> [all ContentProviders] -> onCreate()
+     *
+     * v0.2.62 installed the crash reporter in onCreate, which is too late: this
+     * app's only provider is androidx.startup's InitializationProvider, running
+     * three initializers in the window before it. A throw there killed the process
+     * before the handler existed, so the field report was "instant crash, still
+     * nothing from the app" — the reporter could not have fired even in principle.
+     * Installing here covers providers, onCreate, and everything after.
+     */
+    override fun attachBaseContext(base: Context) {
+        super.attachBaseContext(base)
+        try { com.emux.CrashReport.install(this) } catch (_: Throwable) { /* best-effort */ }
+    }
+
     override fun onCreate() {
         super.onCreate()
-        // v0.2.62 CRASH VISIBILITY: installed FIRST, before anything else can
-        // throw. The guards below only cover statements inside this method — the
-        // crashes that reach the user as the system "EmuX keeps stopping" dialog
-        // are the ones that escape them entirely (an androidx.startup provider, a
-        // Runnable posted after onCreate returned, an uncaught Throwable in a
-        // coroutine, a View callback like onDraw, or class initialization of
-        // anything touched below). A process-wide handler is the only net that
-        // covers all of those, and it writes the report the next launch displays.
+        // v0.2.62: installed here too (idempotent) so the reporter survives any
+        // future reordering of attachBaseContext. See the comment above — the one
+        // that actually matters for provider crashes is in attachBaseContext.
         try { com.emux.CrashReport.install(this) } catch (_: Throwable) { /* reporter is best-effort */ }
+        // v0.2.63: CrashReportActivity runs in a separate ":crash" process, and
+        // Android creates the Application in EVERY process. That process exists only
+        // to draw a stack trace, so it must not schedule bootstraps or touch
+        // WorkManager behind the dying one's back.
+        if (isCrashReporterProcess()) return
         // v0.1.91: persist the PTY-wrapper probe so terminal cold starts skip
         // re-exec'ing every wrapper candidate (part of "terminal slow to start").
         // v0.2.62: this was the one statement in Application.onCreate NOT inside a
@@ -82,6 +100,20 @@ class EmuXApplication : Application() {
             }
         } catch (e: Throwable) { com.emux.EmuXLog.e("startup bootstrap scheduling failed", e) }
     }
+
+    /**
+     * True when this Application instance belongs to the ":crash" process that
+     * only exists to render CrashReportActivity. `Application.getProcessName()` is
+     * API 28+, so fall back to /proc/self/cmdline for minSdk 24.
+     */
+    private fun isCrashReporterProcess(): Boolean = runCatching {
+        val name = if (android.os.Build.VERSION.SDK_INT >= 28) {
+            getProcessName()
+        } else {
+            java.io.File("/proc/self/cmdline").readText().trimEnd('\u0000', '\n', ' ')
+        }
+        name != null && name.endsWith(":crash")
+    }.getOrDefault(false)
 
     private fun ensureNotificationChannel() {
         try {

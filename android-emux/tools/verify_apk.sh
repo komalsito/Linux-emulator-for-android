@@ -126,42 +126,44 @@ else
   sk "signature checks" "needs build-tools, keytool and $KS"
 fi
 
-# ---- 3. guest assets are the current ones ---------------------------------
-# The guest script is where every desktop fix lives, and it is only re-seeded
-# onto a device when ENV_VERSION rises - so a stale assets/bin/emux-x11 means
-# the fix cannot reach an existing install even if the dex is new.
+# ---- 3+4. guest assets and dex contents, via python3 ----------------------
+# These two sections used to shell out to `unzip -p` and `strings`. Neither is
+# guaranteed on a lean machine, and when they were absent the asset checks silently
+# SKIPped while the dex checks reported three FALSE FAILS ("the APK predates
+# v0.2.60") for an APK that was in fact current. A verifier that cannot run must not
+# look like a verifier that found a stale APK. python3 is already a hard dependency
+# of the build pipeline, so both sections now use zipfile and nothing else.
+#
+# The guest script is where every desktop fix lives, and it is only re-seeded onto a
+# device when ENV_VERSION rises - so a stale assets/bin/emux-x11 means the fix cannot
+# reach an existing install even if the dex is new.
 echo
 echo "--- guest assets (where the desktop fixes actually live)"
 TMPD=$(mktemp -d /tmp/vapkXXXX)
-if command -v unzip >/dev/null 2>&1; then
-  for f in $(cd "$PROJ/app/src/main/assets" && find . -type f | sed 's|^\./||'); do
-    unzip -p "$APK" "assets/$f" > "$TMPD/$(echo "$f" | tr '/' '_')" 2>/dev/null
-    if [ ! -s "$TMPD/$(echo "$f" | tr '/' '_')" ]; then
-      ck "assets/$f present in the APK" 0 "missing or empty"
-    elif cmp -s "$PROJ/app/src/main/assets/$f" "$TMPD/$(echo "$f" | tr '/' '_')"; then
-      PASS=$((PASS+1)); printf '  PASS  assets/%s identical to source\n' "$f"
-    else
-      ck "assets/$f identical to source" 0 \
-         "differs - the APK was built from a different tree (or is stale)"
-    fi
-  done
-  G="$TMPD/bin_emux-x11"
-  if [ -s "$G" ]; then
-    ck "APK's emux-x11 carries the current rice stamp ($SRC_RICE)" \
-       "$(grep -qF "$SRC_RICE" "$G" && echo 1 || echo 0)" \
-       "found: $(grep -oE 'Emux rice v[0-9.]+' "$G" | head -1)"
-    ck "APK's emux-x11 carries the current autostart stamp ($SRC_AS)" \
-       "$(grep -qF "$SRC_AS" "$G" && echo 1 || echo 0)" \
-       "found: $(grep -oE 'EmuX desktop v[0-9.]+' "$G" | head -1)"
-    ck "APK's emux-x11 has the pcmanfm desktop-items repair" \
-       "$(grep -q 'desktop-items-0.conf' "$G" && echo 1 || echo 0)" \
-       "no desktop-items-0.conf handling - pre-v0.2.60 guest script"
-    ck "APK's emux-x11 has the doctor subcommand" \
-       "$(grep -q '^doctor()' "$G" && echo 1 || echo 0)" "no doctor() - pre-v0.2.61"
-  fi
-else
-  sk "asset comparison" "unzip not installed"
-fi
+python3 - "$APK" "$PROJ/app/src/main/assets" "$SRC_RICE" "$SRC_AS" > "$TMPD/a" <<'PYEOF'
+import os,re,sys,zipfile
+apk,aroot,rice,autostart=sys.argv[1:5]
+z=zipfile.ZipFile(apk); names=set(z.namelist())
+srcs=[]
+for r,_,fs in os.walk(aroot):
+    for f in fs: srcs.append(os.path.relpath(os.path.join(r,f),aroot))
+def out(ok,desc,detail=""): print(("1|" if ok else "0|")+desc+"|"+detail)
+for rel in sorted(srcs):
+    n='assets/'+rel
+    if n not in names: out(False,f"assets/{rel} present in the APK","missing"); continue
+    same = z.read(n)==open(os.path.join(aroot,rel),'rb').read()
+    out(same,f"assets/{rel} identical to source",
+        "" if same else "differs - the APK was built from a different tree (or is stale)")
+g=z.read('assets/bin/emux-x11').decode('utf-8','replace') if 'assets/bin/emux-x11' in names else ''
+def found(pat):
+    m=re.search(pat,g); return m.group(0) if m else 'none'
+out(rice in g, f"APK's emux-x11 carries the current rice stamp ({rice})", found(r'Emux rice v[0-9.]+'))
+out(autostart in g, f"APK's emux-x11 carries the current autostart stamp ({autostart})", found(r'EmuX desktop v[0-9.]+'))
+out('desktop-items-0.conf' in g, "APK's emux-x11 has the pcmanfm desktop-items repair",
+    "no desktop-items-0.conf handling - pre-v0.2.60 guest script")
+out(bool(re.search(r'(?m)^doctor\(\)',g)), "APK's emux-x11 has the doctor subcommand",
+    "no doctor() - pre-v0.2.61")
+PYEOF
 
 # ---- 4. dex carries the current host-side code ----------------------------
 # ENV_VERSION is a Kotlin `const val`, so it is INLINED into the dex as a bare
@@ -169,20 +171,25 @@ fi
 # v0.2.60/v0.2.61 sources, so their presence proves the dex is current.
 echo
 echo "--- dex (host-side Kotlin)"
-for sym in injectScroll injectKeysymCombo maybeShowIntro; do
-  N=0
-  if command -v unzip >/dev/null 2>&1; then
-    for d in $(unzip -Z1 "$APK" 2>/dev/null | grep '^classes.*\.dex$'); do
-      unzip -p "$APK" "$d" 2>/dev/null | strings | grep -q "$sym" && N=$((N+1))
-    done
-  fi
-  ck "dex contains $sym" "$([ "$N" -gt 0 ] && echo 1 || echo 0)" \
-     "not found in any classes*.dex - the APK predates v0.2.60/v0.2.61"
+python3 - "$APK" > "$TMPD/d" <<'PYEOF'
+import sys,zipfile
+z=zipfile.ZipFile(sys.argv[1])
+dex=sorted(n for n in z.namelist() if n.startswith('classes') and n.endswith('.dex'))
+blobs=[z.read(n) for n in dex]
+def out(ok,desc,detail=""): print(("1|" if ok else "0|")+desc+"|"+detail)
+for sym in ('injectScroll','injectKeysymCombo','maybeShowIntro'):
+    hit=any(sym.encode() in b for b in blobs)
+    out(hit,f"dex contains {sym}",
+        "" if hit else "not found in any classes*.dex - the APK predates v0.2.60/v0.2.61")
+out(len(dex)>=2,"APK is multidex as expected","" if len(dex)>=2 else f"found {len(dex)} dex file(s)")
+PYEOF
+
+for f in "$TMPD/a" "$TMPD/d"; do
+  while IFS='|' read -r ok desc detail; do
+    [ -z "$ok" ] && continue
+    ck "$desc" "$ok" "$detail"
+  done < "$f"
 done
-if command -v unzip >/dev/null 2>&1; then
-  NDEX=$(unzip -Z1 "$APK" 2>/dev/null | grep -c '^classes.*\.dex$')
-  ck "APK is multidex as expected" "$([ "$NDEX" -ge 2 ] && echo 1 || echo 0)" "found $NDEX dex file(s)"
-fi
 
 # ---- 5. dependency versions match deps.lock -------------------------------
 # v0.2.62: added because a shipped APK crashed on every launch and all 50 checks

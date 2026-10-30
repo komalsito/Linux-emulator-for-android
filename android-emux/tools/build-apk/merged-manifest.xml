@@ -21,7 +21,7 @@
 <meta-data android:name="androidx.emoji2.text.EmojiCompatInitializer" android:value="androidx.startup" />
 <meta-data android:name="androidx.lifecycle.ProcessLifecycleInitializer" android:value="androidx.startup" />
 <meta-data android:name="androidx.profileinstaller.ProfileInstallerInitializer" android:value="androidx.startup" />
-        </provider> <activity android:theme="@style/EmuX" android:name="com.emux.MainActivity" android:exported="true" android:launchMode="singleTask" android:configChanges="orientation|screenSize|keyboardHidden|keyboard|screenLayout|smallestScreenSize|density|uiMode" android:windowSoftInputMode="adjustResize">
+        </provider> <activity android:name="com.emux.CrashReportActivity" android:process=":crash" android:exported="false" android:excludeFromRecents="true" android:taskAffinity="com.emux.crash" android:launchMode="singleInstance" android:theme="@android:style/Theme.DeviceDefault.NoActionBar" /> <activity android:theme="@style/EmuX" android:name="com.emux.MainActivity" android:exported="true" android:launchMode="singleTask" android:configChanges="orientation|screenSize|keyboardHidden|keyboard|screenLayout|smallestScreenSize|density|uiMode" android:windowSoftInputMode="adjustResize">
 <intent-filter> <action android:name="android.intent.action.MAIN" />
 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter> </activity> <activity android:theme="@style/EmuX.Prefs" android:name="com.emux.SettingsActivity" android:exported="false" />
