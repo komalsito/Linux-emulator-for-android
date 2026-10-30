@@ -430,25 +430,103 @@ EOF
       echo '</openbox_menu>'
     } > "$HOME/.config/openbox/menu.xml" 2>/dev/null
   fi
-  # --- pcmanfm desktop background (only if pcmanfm has never run: a
-  # non-black background is the cheapest proof the desktop, not just X,
-  # is up; if pcmanfm later fails, xsetroot below still colours it) ---
-  # v0.2.51 RICE: wallpaper + icon styling via pcmanfm; rewritten once per
-  # version stamp so later seeds refresh the look without clobbering edits.
-  if [ ! -e "$HOME/.config/pcmanfm/default/pcmanfm.conf" ] || \
-     ! grep -q "Emux rice v0.2.51" "$HOME/.config/pcmanfm/default/pcmanfm.conf" 2>/dev/null; then
+  # --- pcmanfm desktop background ----------------------------------------
+  # v0.2.60 FIELD FIX. Three separate defects, each measured with a pixel
+  # census of the root window (tools/x11probe/desktop_paint_test.sh), and each
+  # of which ALONE was enough to leave the desktop pure black on a real
+  # install even after v0.2.59 guaranteed a painted root:
+  #  1. NO DIRECTORY. This block wrote pcmanfm.conf with `2>/dev/null` but
+  #     never mkdir'd ~/.config/pcmanfm/default - a directory that does not
+  #     exist until pcmanfm has run once. On a fresh install the write failed
+  #     silently, so the rice never existed at all.
+  #  2. `wallpaper_mode=6` is not a value pcmanfm understands. The key takes a
+  #     STRING (none|color|stretch|fit|center|tile|crop). Given an unparseable
+  #     mode, pcmanfm ignores `wallpaper=` entirely and paints only
+  #     desktop_bg, so the shipped wall.png was never displayed on any device.
+  #  3. THE AUTHORITATIVE FILE IS THE PER-SCREEN ONE. Background, wallpaper
+  #     and icon layout live in
+  #     ~/.config/pcmanfm/default/desktop-items-0.conf, which OVERRIDES the
+  #     [desktop] section of pcmanfm.conf. pcmanfm creates that file on its
+  #     first run with `desktop_bg=#000000`, so every install that had opened
+  #     the desktop before this fix stayed 100% black forever - and xsetroot
+  #     could not rescue it, because pcmanfm paints its own root pixmap
+  #     (_XROOTPMAP_ID) over whatever the root background was.
+  # desktop_bg is now the same #20344d paint_root uses, so even with no
+  # wallpaper on disk the desktop is visibly navy: the "never a black void"
+  # contract finally holds on the layer the user is actually looking at.
+  EMUX_RICE_STAMP="Emux rice v0.2.60"
+  EMUX_WALL=/usr/share/emux/wall.png
+  if [ -e "$EMUX_WALL" ]; then
+    EMUX_WALL_MODE=crop   # fill the screen and crop the overflow: no distortion
+  else
+    EMUX_WALL_MODE=color  # nothing to show: solid colour, never black
+    EMUX_WALL=""
+  fi
+  PFD="$HOME/.config/pcmanfm/default"
+  mkdir -p "$PFD" 2>/dev/null
+  if [ ! -e "$PFD/pcmanfm.conf" ] || \
+     ! grep -qF "$EMUX_RICE_STAMP" "$PFD/pcmanfm.conf" 2>/dev/null; then
     {
-      echo "# Emux rice v0.2.51"
+      echo "# $EMUX_RICE_STAMP"
       echo "[desktop]"
-      echo "wallpaper_mode=6"
-      echo "wallpaper=/usr/share/emux/wall.png"
-      echo "desktop_bg=#10141a"
+      echo "wallpaper_mode=$EMUX_WALL_MODE"
+      echo "wallpaper=$EMUX_WALL"
+      echo "desktop_bg=#20344d"
       echo "desktop_fg=#e8eaf0"
       echo "desktop_shadow=1"
       echo "show_wm_menu=1"
       echo "[config]"
       echo "icon_theme=Adwaita"
-    } > "$HOME/.config/pcmanfm/default/pcmanfm.conf" 2>/dev/null
+    } > "$PFD/pcmanfm.conf" 2>/dev/null
+  fi
+  # Defect 3: the per-screen desktop layer. Written in full when absent. When
+  # it already exists it is repaired ONLY if it is still pcmanfm's own
+  # untouched default (pure black background AND no wallpaper path): a user
+  # who deliberately chose a colour or a wallpaper is left exactly alone, and
+  # icon layout/sort order survive either way - just the background keys are
+  # rewritten. Idempotent: once repaired, the gate no longer matches.
+  PFI="$PFD/desktop-items-0.conf"
+  if [ ! -e "$PFI" ]; then
+    {
+      echo "# $EMUX_RICE_STAMP"
+      echo "[*]"
+      echo "wallpaper_mode=$EMUX_WALL_MODE"
+      echo "wallpaper_common=1"
+      echo "wallpaper=$EMUX_WALL"
+      echo "desktop_bg=#20344d"
+      echo "desktop_fg=#e8eaf0"
+      echo "desktop_shadow=#000000"
+      echo "desktop_font=Sans 12"
+      echo "show_wm_menu=1"
+      echo "sort=mtime;ascending;"
+      echo "show_documents=0"
+      echo "show_trash=1"
+      echo "show_mounts=0"
+    } > "$PFI" 2>/dev/null
+  elif grep -q "^desktop_bg=#000000" "$PFI" 2>/dev/null && \
+       ! grep -q "^wallpaper=/." "$PFI" 2>/dev/null; then
+    echo "emux-x11: repairing pcmanfm's untouched black desktop defaults" >&2
+    EMUX_BG_SEEN=0; EMUX_MODE_SEEN=0; EMUX_WP_SEEN=0
+    {
+      echo "# $EMUX_RICE_STAMP"
+      while IFS= read -r EMUX_L; do
+        case "$EMUX_L" in
+          desktop_bg=*)     echo "desktop_bg=#20344d"; EMUX_BG_SEEN=1 ;;
+          wallpaper_mode=*) echo "wallpaper_mode=$EMUX_WALL_MODE"; EMUX_MODE_SEEN=1 ;;
+          wallpaper=*)      echo "wallpaper=$EMUX_WALL"; EMUX_WP_SEEN=1 ;;
+          show_wm_menu=*)   echo "show_wm_menu=1" ;;
+          \#*rice*)         : ;;
+          *)                echo "$EMUX_L" ;;
+        esac
+      done < "$PFI"
+      # pcmanfm's own default file carries NO wallpaper= key at all, so
+      # rewriting existing keys alone would leave mode=crop pointing at
+      # nothing and fall back to the solid colour. Append whatever is absent;
+      # the file has a single [*] group, so EOF is still inside it.
+      [ "$EMUX_BG_SEEN" = 1 ]   || echo "desktop_bg=#20344d"
+      [ "$EMUX_MODE_SEEN" = 1 ] || echo "wallpaper_mode=$EMUX_WALL_MODE"
+      [ "$EMUX_WP_SEEN" = 1 ]   || echo "wallpaper=$EMUX_WALL"
+    } > "$PFI.emux-tmp" 2>/dev/null && mv "$PFI.emux-tmp" "$PFI" 2>/dev/null
   fi
   # --- Emux openbox theme: flat dark, blue active title, rounded 6 ---
   mkdir -p "$HOME/.themes/Emux/openbox-3" 2>/dev/null
@@ -543,17 +621,26 @@ RCXML
   # A user's own hand-written autostart is backed up once and never clobbered
   # again; only EmuX-stamped files are rewritten.
   OBX="$HOME/.config/openbox"
-  EMUX_AUTOSTART_STAMP="EmuX desktop v0.2.59"
+  EMUX_AUTOSTART_STAMP="EmuX desktop v0.2.60"
+  # Set when we just displaced a user's own autostart; the generated file then
+  # chains it back (see the tail of the block below).
+  EMUX_USER_BAK=""
   if [ -e "$OBX/autostart" ] && ! grep -qF "$EMUX_AUTOSTART_STAMP" "$OBX/autostart" 2>/dev/null; then
     if grep -q "EmuX desktop v0.2" "$OBX/autostart" 2>/dev/null; then
       : # an older EmuX stamp: safe to rewrite in place
     else
       cp "$OBX/autostart" "$OBX/autostart.emux-bak" 2>/dev/null
-      echo "emux-x11: user autostart backed up to autostart.emux-bak" >&2
+      EMUX_USER_BAK=1
+      echo "emux-x11: user autostart backed up to autostart.emux-bak and will be chained" >&2
     fi
   fi
+  # v0.2.60: `|| [ -n "$EMUX_USER_BAK" ]` is the part that was missing. Backing
+  # the user's file up without replacing it meant EmuX's own furniture never
+  # started for that user either - no panel, no root colour - which reproduces
+  # the exact "I can't see the desktop" report from someone who had customised
+  # Openbox once. Rewrite, and chain their script from the end of ours.
   if [ ! -e "$OBX/autostart" ] || grep -q "EmuX desktop v0.2" "$OBX/autostart" 2>/dev/null \
-     || [ ! -s "$OBX/autostart" ]; then
+     || [ ! -s "$OBX/autostart" ] || [ -n "$EMUX_USER_BAK" ]; then
     {
       echo "# $EMUX_AUTOSTART_STAMP"
       echo "# Run by openbox --startup (see openbox.org/help/Autostart). Every"
@@ -567,6 +654,16 @@ RCXML
       echo "  (DBUS_SESSION_BUS_ADDRESS=disabled: GIO_USE_VOLUME_MONITOR=none \\"
       echo "     pcmanfm --desktop) >/dev/null 2>&1 &"
       echo "fi"
+      # v0.2.60: a user's own autostart is backed up above and then CHAINED, not
+      # silently dropped. Before this, "respect the user's file" also meant
+      # EmuX's furniture never started for that user - no panel, no root colour,
+      # i.e. the very "I can't see the desktop" report, from someone who had
+      # merely customised Openbox once. The absolute path is written at
+      # generation time so the generated file needs no escaping of $HOME.
+      if [ -r "$OBX/autostart.emux-bak" ]; then
+        echo "# the user's own autostart, preserved and chained"
+        echo "[ -r '$OBX/autostart.emux-bak' ] && /bin/sh '$OBX/autostart.emux-bak' &"
+      fi
     } > "$OBX/autostart" 2>/dev/null
     chmod +x "$OBX/autostart" 2>/dev/null
   fi

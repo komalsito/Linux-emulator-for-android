@@ -40,6 +40,14 @@ terminal", "a black screen" and "sometimes a panel".
 | **A** — bare `openbox` (v0.2.58) | **NO** (marker file never written) | absent | **100.0% pure black, 1 distinct colour** |
 | **B** — `openbox --sm-disable --startup …` (v0.2.59) | **YES** | running | **97.7% `#20344d`, 102 distinct colours** |
 
+> **Corrected in v0.2.60.** Row B was measured in a sandbox where `pcmanfm` was
+> not installed, so nothing painted over `xsetroot`. On a real device
+> `pcmanfm --desktop` owns the root window and the same configuration measured
+> **99.4 % pure black** — see [`INPUT_AND_PAINT_v0.2.60.md`](INPUT_AND_PAINT_v0.2.60.md)
+> §2. The A/B conclusion above (bare `openbox` never runs autostart) is
+> unaffected and still holds; `desktop_visible_ab.sh` now seeds the whole
+> `seed_desktop_config` so the trial HOMEs match a device.
+
 ### The fix
 
 `start_wm()` in `assets/bin/emux-x11` now does what `openbox-session` does,
@@ -67,6 +75,15 @@ Two supporting changes:
   wallpaper; when pcmanfm wedged (a known proot failure mode, already guarded by
   a watchdog) the root stayed black and "no desktop" was indistinguishable from
   "no frames". A black pane is now unambiguous.
+
+  > **Corrected in v0.2.60 — this guarantee was not real.** `paint_root()` sets
+  > the root window *background*; a healthy `pcmanfm --desktop` then paints its
+  > own root pixmap over it and publishes `_XROOTPMAP_ID`, so the colour was
+  > never visible, and the wedge watchdog (which keys on that atom being
+  > *absent*) never fired either. `paint_root()` is still correct as a fallback
+  > for the no-pcmanfm case, but the layer the user actually looks at is
+  > pcmanfm's, and that is what v0.2.60 fixes:
+  > [`INPUT_AND_PAINT_v0.2.60.md`](INPUT_AND_PAINT_v0.2.60.md) §2.
 * **picom is opt-in** (`touch /tmp/emux_want_picom`). A compositing manager
   redirects every client to an offscreen pixmap and re-composites onto the root
   — one extra full-screen render per frame to buy translucency that a ~10 fps

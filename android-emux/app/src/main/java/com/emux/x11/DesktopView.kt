@@ -5,6 +5,7 @@ import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
 import android.graphics.Rect
+import android.graphics.RectF
 import android.util.AttributeSet
 import android.view.MotionEvent
 import android.view.ScaleGestureDetector
@@ -23,11 +24,20 @@ import kotlin.math.min
  * chasing when idle).
  *
  * Input mapping (this is what makes touch feel native instead of VNC-ish):
- *  - tap            → button-1 press+release at mapped point
- *  - drag           → motion events coalesced to ≤30/s (radio/CPU friendly)
- *  - long-press     → button-3 (right-click), the classic mobile-X convention
- *  - two-finger     → pan/zoom the VIEWPORT only (does not touch X coords)
- *  - pinch-to-zoom clamped so one X px ≥ 0.25 screen px (no mushy aliasing)
+ *  - tap             → button-1 press+release at the mapped point
+ *  - drag            → motion events coalesced to ≤30/s (radio/CPU friendly)
+ *  - long-press      → button-3 DOWN and HELD, so long-press-then-drag is a
+ *                      right-drag; released where the finger lifts
+ *  - two-finger tap  → button-2 (middle click) — the only practical way to
+ *                      paste into an X terminal
+ *  - two-finger drag → X scroll wheel (4/5 vertical, 6/7 horizontal) at
+ *                      fit-to-screen; VIEWPORT pan once zoomed, where panning
+ *                      is what you actually need
+ *  - pinch-to-zoom   → viewport only, clamped so one X px ≥ 0.25 screen px
+ *  - double-tap      → toggle letterbox-fit ↔ fill-screen
+ *  - "keys" toggle   → on-screen Esc/Tab/Ctrl/Alt/Super/BackSpace + wheel.
+ *                      Ctrl/Alt/Super are STICKY: arm one and the next key from
+ *                      the soft keyboard becomes that shortcut (Ctrl+C).
  */
 class DesktopView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attrs) {
 
@@ -109,11 +119,19 @@ class DesktopView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attrs) 
                 android.view.KeyEvent.KEYCODE_MOVE_END -> 0xFF57
                 else -> {
                     val uc = event.unicodeChar
-                    if (uc != 0) { d.injectChar(uc.toChar()); return true }
+                    if (uc != 0) {
+                        // Ctrl/Alt from the helper bar apply to hardware keys
+                        // too, so Ctrl+C works without a physical keyboard.
+                        if (stickyCtrl || stickyAlt || stickyMeta) {
+                            d.injectKeysymCombo(keysymFor(uc.toChar()), stickyCtrl, stickyAlt, stickyMeta)
+                            clearSticky()
+                        } else d.injectChar(uc.toChar())
+                        return true
+                    }
                     return super.onKeyDown(keyCode, event)
                 }
             }
-            d.injectKeysymTap(ks)
+            sendKeysym(ks)
             return true
         }
         return super.onKeyDown(keyCode, event)
@@ -132,7 +150,19 @@ class DesktopView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attrs) 
                 // v0.2.59: one call, not one-per-character. Over the FIFO path
                 // each character used to cost a whole xdotool process under
                 // proot, which made the soft keyboard unusable.
-                text?.let { desktop?.injectText(it.toString()) }
+                text?.let { t ->
+                    val d = desktop
+                    if (d != null && (stickyCtrl || stickyAlt || stickyMeta)) {
+                        // A sticky modifier turns the commit into a shortcut:
+                        // tap Ctrl on the helper bar, type "c", get Ctrl+C.
+                        // Sent per character because xdotool/XTEST combos are
+                        // keysym-based, not text-based.
+                        for (ch in t) d.injectKeysymCombo(keysymFor(ch), stickyCtrl, stickyAlt, stickyMeta)
+                        clearSticky()
+                    } else {
+                        d?.injectText(t.toString())
+                    }
+                }
                 return true
             }
             override fun deleteSurroundingText(before: Int, after: Int): Boolean {
@@ -143,11 +173,16 @@ class DesktopView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attrs) 
                 if (event.action == android.view.KeyEvent.ACTION_DOWN) {
                     when {
                         event.keyCode == android.view.KeyEvent.KEYCODE_DEL ->
-                            desktop?.injectKeysymTap(0xFF08)
+                            sendKeysym(0xFF08)
                         event.keyCode == android.view.KeyEvent.KEYCODE_ENTER ->
-                            desktop?.injectKeysymTap(0xFF0D)
-                        event.unicodeChar != 0 ->
-                            desktop?.injectChar(event.unicodeChar.toChar())
+                            sendKeysym(0xFF0D)
+                        event.unicodeChar != 0 -> {
+                            val uc = event.unicodeChar
+                            if (stickyCtrl || stickyAlt || stickyMeta) {
+                                desktop?.injectKeysymCombo(keysymFor(uc.toChar()), stickyCtrl, stickyAlt, stickyMeta)
+                                clearSticky()
+                            } else desktop?.injectChar(uc.toChar())
+                        }
                     }
                 }
                 return true
@@ -291,7 +326,11 @@ class DesktopView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attrs) 
                     "agent" -> "INPUT: guest xdotool agent (slow fallback)"
                     else    -> "INPUT: down - no XTEST, no agent"
                 }, 16f, sp(28f), ib)
+            drawGestureHint(canvas)
         }
+        // v0.2.60: on-screen Esc/Tab/Ctrl/Alt/Super + wheel, drawn last so it
+        // sits above the framebuffer.
+        drawOverlay(canvas)
     }
 
     /** screen px → X px (clamped into server geometry). */
@@ -309,18 +348,62 @@ class DesktopView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attrs) 
     }
 
     // ------------------------- gestures -------------------------
+    // v0.2.60 gesture set. Everything here is reachable with one or two
+    // fingers on a phone, and nothing requires a hardware keyboard:
+    //   tap                     -> button 1 click
+    //   drag                    -> X motion with button 1 semantics (window drag)
+    //   long-press              -> button 3 DOWN, held; drag it for a right-drag,
+    //                              released where the finger lifts
+    //   two-finger tap          -> button 2 (middle) - the only practical way to
+    //                              paste into an X terminal
+    //   two-finger drag         -> X scroll wheel (buttons 4/5 vertical, 6/7
+    //                              horizontal) while at fit-to-screen; viewport
+    //                              pan while zoomed, where panning is the thing
+    //                              you actually need
+    //   pinch                   -> zoom the viewport (unchanged)
+    //   double-tap              -> toggle letterbox-fit <-> fill-screen
+    //   helper bar (toggle "keys")-> Esc/Tab/Ctrl/Alt/Super/BackSpace + wheel, for
+    //                              the keys a soft keyboard does not have
     private var downTime = 0L
     private var downX = 0f; private var downY = 0f
     private var dragging = false
-    private var panning = false
+    private var panning = false            // >=2 fingers down: suppresses tap->click
     private var lastMotionSendTs = 0L
     private var longPressFired = false
+    private var rightHeld = false          // long-press armed button 3 and has not released it
+
+    /** True while the in-progress gesture started on an overlay control. */
+    private var overlayDown = false
+    private var twoFingerMoved = false
+    private var twoFingerDownTs = 0L
+    private var twoFingerX = 0f; private var twoFingerY = 0f
+    private var twoFingerStartX = 0f; private var twoFingerStartY = 0f
+    private var scrollAccumY = 0f; private var scrollAccumX = 0f
+    private var lastPanX = 0f; private var lastPanY = 0f
+
+    // Sticky modifiers: tap Ctrl on the helper bar, then type 'c' on the soft
+    // keyboard and get Ctrl+C. Cleared by the next key that consumes them.
+    private var stickyCtrl = false
+    private var stickyAlt = false
+    private var stickyMeta = false
+    private var helperBarVisible = false
+
+    private fun dp(v: Float) =
+        TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_DIP, v, resources.displayMetrics)
+
+    /** True when the viewport is zoomed/cropped, so two fingers must pan. */
+    private fun zoomed() = scale > 1.01f || coverMode
+
+    private fun centroidX(e: MotionEvent): Float {
+        var t = 0f; for (i in 0 until e.pointerCount) t += e.getX(i); return t / e.pointerCount
+    }
+    private fun centroidY(e: MotionEvent): Float {
+        var t = 0f; for (i in 0 until e.pointerCount) t += e.getY(i); return t / e.pointerCount
+    }
 
     private val scaleDetector = ScaleGestureDetector(ctx, object : ScaleGestureDetector.SimpleOnScaleGestureListener() {
         override fun onScale(detector: ScaleGestureDetector): Boolean {
-            val d = detector
-            d ?: return false
-            scale = (scale * d.scaleFactor).coerceIn(1f, 6f)
+            scale = (scale * detector.scaleFactor).coerceIn(1f, 6f)
             invalidate(); return true
         }
     })
@@ -330,31 +413,68 @@ class DesktopView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attrs) 
         val multiTouch = event.pointerCount > 1
         when (event.actionMasked) {
             MotionEvent.ACTION_DOWN -> {
+                // Consume the whole gesture here. Hit-testing on ACTION_UP as
+                // well would fire every chip twice - a Ctrl tap would toggle
+                // itself back off and Esc would be sent twice.
+                overlayDown = onOverlayTouch(event.x, event.y)
+                if (overlayDown) return true
                 downTime = System.currentTimeMillis()
                 downX = event.x; downY = event.y
                 lastHistY = event.y
                 dragging = false; panning = false; longPressFired = false
+                twoFingerMoved = false
                 removeCallbacks(longPressRunnable)
                 // v0.2.3: no X server behind a frameless pane - a long-press
                 // right-click there injects into nothing, so don't arm it.
-                if (!frameless) postDelayed(longPressRunnable, 450)
+                if (!frameless) postDelayed(longPressRunnable, LONG_PRESS_MS)
                 return true
             }
             MotionEvent.ACTION_POINTER_DOWN -> {
                 panning = true
                 removeCallbacks(longPressRunnable)
+                // A second finger ends any right-button hold, otherwise the
+                // button stays down with nothing left to release it.
+                releaseRightButton(event)
+                twoFingerDownTs = System.currentTimeMillis()
+                twoFingerMoved = false
+                scrollAccumY = 0f; scrollAccumX = 0f
+                val cx = centroidX(event); val cy = centroidY(event)
+                twoFingerStartX = cx; twoFingerStartY = cy
+                twoFingerX = cx; twoFingerY = cy
+                lastPanX = cx; lastPanY = cy
                 return true
             }
             MotionEvent.ACTION_MOVE -> {
                 if (panning || multiTouch) {
-                    // two-finger: pan viewport
-                    if (event.historySize == 0 && event.pointerCount >= 2) {
-                        // use centroid delta approximation
-                        val cx = (event.getX(0) + event.getX(1)) / 2
-                        val cy = (event.getY(0) + event.getY(1)) / 2
+                    if (event.pointerCount < 2) return true
+                    val cx = centroidX(event); val cy = centroidY(event)
+                    val dx = cx - twoFingerX; val dy = cy - twoFingerY
+                    if (abs(cx - twoFingerStartX) > TWO_FINGER_TAP_SLOP ||
+                        abs(cy - twoFingerStartY) > TWO_FINGER_TAP_SLOP) twoFingerMoved = true
+                    twoFingerX = cx; twoFingerY = cy
+                    if (zoomed()) {
                         tx += cx - lastPanX; ty += cy - lastPanY
                         lastPanX = cx; lastPanY = cy
                         invalidate()
+                    } else if (twoFingerMoved && !frameless) {
+                        // At fit-to-screen there is nothing to pan, so the same
+                        // gesture drives the X scroll wheel. Wheel events are
+                        // accumulated and quantised: one click per
+                        // SCROLL_STEP_PX of travel, so a slow drag does not
+                        // machine-gun the server.
+                        val (x, y) = mapToX(cx, cy)
+                        scrollAccumY += dy; scrollAccumX += dx
+                        var n = (scrollAccumY / SCROLL_STEP_PX).toInt()
+                        if (n != 0) {
+                            scrollAccumY -= n * SCROLL_STEP_PX
+                            // fingers travel DOWN (dy>0) => content scrolls down => button 5
+                            desktop?.injectScroll(x, y, if (n > 0) 5 else 4, abs(n))
+                        }
+                        n = (scrollAccumX / SCROLL_STEP_PX).toInt()
+                        if (n != 0) {
+                            scrollAccumX -= n * SCROLL_STEP_PX
+                            desktop?.injectScroll(x, y, if (n > 0) 7 else 6, abs(n))
+                        }
                     }
                     return true
                 }
@@ -375,18 +495,40 @@ class DesktopView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attrs) 
                 }
                 if (dragging) {
                     val now = System.currentTimeMillis()
-                    if (now - lastMotionSendTs > 33) {          // ≤30 motion events/s
+                    if (now - lastMotionSendTs > 33) {          // <=30 motion events/s
                         lastMotionSendTs = now
                         val (x, y) = mapToX(event.x, event.y)
+                        // While a long-press holds button 3 this is a right-drag.
                         desktop?.injectMotion(x, y)
                     }
                 }
                 return true
             }
+            MotionEvent.ACTION_POINTER_UP -> {
+                // Two-finger TAP = middle click: little travel, short window.
+                if (!twoFingerMoved && !frameless &&
+                    System.currentTimeMillis() - twoFingerDownTs < TWO_FINGER_TAP_MS) {
+                    val i = event.actionIndex
+                    val (x, y) = mapToX(event.getX(i), event.getY(i))
+                    desktop?.injectClick(x, y, button = 2, press = true)
+                    postDelayed({ desktop?.injectClick(x, y, button = 2, press = false) }, 45)
+                    requestFocus()
+                }
+                // Whatever the remaining finger does next must not become a
+                // tap->click of its own.
+                twoFingerMoved = true
+                return true
+            }
             MotionEvent.ACTION_UP -> {
                 removeCallbacks(longPressRunnable)
-                // Double-tap zoom (see field above) — checked before
-                // the click, so the zooming tap does not also click.
+                if (rightHeld) {
+                    releaseRightButton(event)
+                    dragging = false; panning = false
+                    return true
+                }
+                if (overlayDown) { overlayDown = false; dragging = false; panning = false; return true }
+                // Double-tap zoom (see field below) - checked before the click,
+                // so the zooming tap does not also click.
                 val nowMs = System.currentTimeMillis()
                 val isDoubleTap = !dragging && !panning && !longPressFired &&
                     nowMs - lastTapUpMs < 300 &&
@@ -428,21 +570,16 @@ class DesktopView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attrs) 
                 return true
             }
             MotionEvent.ACTION_CANCEL -> {
-                removeCallbacks(longPressRunnable); dragging = false; panning = false
+                removeCallbacks(longPressRunnable)
+                releaseRightButton(event)
+                overlayDown = false
+                dragging = false; panning = false
                 return true
             }
         }
         return super.onTouchEvent(event)
     }
 
-    private var lastPanX = 0f; private var lastPanY = 0f
-    // v0.1.101 MOBILE: double-tap zoom. On a phone the fit-to-screen
-    // desktop makes X controls (titlebar buttons, menus) a few px
-    // wide and untappable; pinch exists but is undiscoverable and
-    // awkward one-handed. Double-tap toggles fit <-> 2.5x centred on
-    // the tap; a second double-tap returns to fit. Trade-off: the
-    // second tap of a double-tap is NOT sent as an X click (the first
-    // tap already was), so X double-click is sacrificed for zoom.
     private var lastTapUpMs = 0L
     private var lastTapUpX = 0f
     private var lastTapUpY = 0f
@@ -451,9 +588,147 @@ class DesktopView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attrs) 
         if (!dragging && !panning) {
             longPressFired = true
             val (x, y) = mapToX(downX, downY)
+            // v0.2.60: hold button 3 DOWN instead of tapping it. The old
+            // press+60ms+release made a right-drag impossible and released the
+            // button wherever the finger had first touched, so context menus
+            // that track the pointer closed immediately.
             desktop?.injectClick(x, y, button = 3, press = true)
-            postDelayed({ desktop?.injectClick(x, y, button = 3, press = false) }, 60)
+            rightHeld = true
+            performHapticFeedback(android.view.HapticFeedbackConstants.LONG_PRESS)
         }
+    }
+
+    private fun releaseRightButton(e: MotionEvent) {
+        if (!rightHeld) return
+        rightHeld = false
+        val (x, y) = mapToX(e.x, e.y)
+        desktop?.injectClick(x, y, button = 3, press = false)
+    }
+
+    // ------------------------- on-screen key helpers -------------------------
+    private class Chip(val label: String, val id: Int)
+    private val chips = listOf(
+        Chip("Esc", CHIP_ESC), Chip("Tab", CHIP_TAB), Chip("Ctrl", CHIP_CTRL),
+        Chip("Alt", CHIP_ALT), Chip("Super", CHIP_META), Chip("\u25B2", CHIP_UP),
+        Chip("\u25BC", CHIP_DOWN), Chip("\u232B", CHIP_BKSP),
+    )
+    private val chipRects = ArrayList<RectF>()
+    private var toggleRect = RectF()
+    private fun barHeight() = dp(40f)
+
+    /** Keysym for a character: Latin-1 maps 1:1, everything else is 0x01000000+cp. */
+    private fun keysymFor(ch: Char) = if (ch.code < 0x100) ch.code else 0x01000000 + ch.code
+
+    private fun clearSticky() {
+        if (!stickyCtrl && !stickyAlt && !stickyMeta) return
+        stickyCtrl = false; stickyAlt = false; stickyMeta = false
+        invalidate()
+    }
+
+    /** Inject a keysym, spending any sticky modifiers on it. */
+    private fun sendKeysym(ks: Int) {
+        val d = desktop ?: return
+        if (stickyCtrl || stickyAlt || stickyMeta) {
+            d.injectKeysymCombo(ks, stickyCtrl, stickyAlt, stickyMeta)
+            clearSticky()
+        } else {
+            d.injectKeysymTap(ks)
+        }
+    }
+
+    private fun handleChip(id: Int) {
+        val d = desktop ?: return
+        val (cx, cy) = mapToX(width / 2f, height / 2f)
+        when (id) {
+            CHIP_ESC -> sendKeysym(0xFF1B)
+            CHIP_TAB -> sendKeysym(0xFF09)
+            CHIP_BKSP -> sendKeysym(0xFF08)
+            CHIP_CTRL -> { stickyCtrl = !stickyCtrl; invalidate() }
+            CHIP_ALT -> { stickyAlt = !stickyAlt; invalidate() }
+            CHIP_META -> { stickyMeta = !stickyMeta; invalidate() }
+            CHIP_UP -> d.injectScroll(cx, cy, 4, 3)
+            CHIP_DOWN -> d.injectScroll(cx, cy, 5, 3)
+            CHIP_TOGGLE -> { helperBarVisible = !helperBarVisible; invalidate() }
+        }
+        performHapticFeedback(android.view.HapticFeedbackConstants.KEYBOARD_TAP)
+    }
+
+    /** Overlay hit-test. Returns true when the touch was consumed by a control. */
+    private fun onOverlayTouch(sx: Float, sy: Float): Boolean {
+        if (toggleRect.contains(sx, sy)) { handleChip(CHIP_TOGGLE); return true }
+        if (!helperBarVisible || sy < height - barHeight()) return false
+        for (i in chips.indices) {
+            if (i >= chipRects.size) return false
+            val r = chipRects[i]
+            if (sx >= r.left && sx <= r.right) { handleChip(chips[i].id); return true }
+        }
+        return false
+    }
+
+    private fun drawOverlay(canvas: Canvas) {
+        // Always-on toggle: the bar itself is hidden by default because tint2
+        // lives at the bottom of the X screen and a permanent strip would cover
+        // the panel the user is trying to click.
+        val ts = dp(30f)
+        toggleRect = RectF(width - ts - dp(6f), dp(6f), width - dp(6f), dp(6f) + ts)
+        val boxP = Paint().apply { color = Color.argb(0xB0, 0x1B, 0x24, 0x30); style = Paint.Style.FILL }
+        canvas.drawRoundRect(toggleRect, dp(6f), dp(6f), boxP)
+        val lbl = Paint().apply {
+            textSize = sp(9f); isAntiAlias = true; textAlign = Paint.Align.CENTER
+            color = if (helperBarVisible) Color.argb(0xF0, 0x4F, 0xC3, 0xF7) else Color.argb(0xC0, 0xFF, 0xFF, 0xFF)
+        }
+        canvas.drawText("keys", toggleRect.centerX(), toggleRect.centerY() + sp(3.5f), lbl)
+
+        if (helperBarVisible) {
+            val h = barHeight(); val top = height - h
+            chipRects.clear()
+            canvas.drawRect(0f, top, width.toFloat(), height.toFloat(),
+                Paint().apply { color = Color.argb(0xD8, 0x10, 0x16, 0x1E) })
+            val n = chips.size
+            val pad = dp(4f)
+            val cw = (width - pad * (n + 1)) / n
+            val tp = Paint().apply { textSize = sp(11f); isAntiAlias = true; textAlign = Paint.Align.CENTER }
+            for (i in 0 until n) {
+                val l = pad + i * (cw + pad)
+                val r = RectF(l, top + pad, l + cw, height - pad)
+                chipRects.add(r)
+                val on = when (chips[i].id) {
+                    CHIP_CTRL -> stickyCtrl; CHIP_ALT -> stickyAlt; CHIP_META -> stickyMeta; else -> false
+                }
+                canvas.drawRoundRect(r, dp(5f), dp(5f), Paint().apply {
+                    color = if (on) Color.argb(0xE8, 0x4F, 0xC3, 0xF7) else Color.argb(0x44, 0xFF, 0xFF, 0xFF)
+                    style = Paint.Style.FILL
+                })
+                tp.color = if (on) Color.argb(0xFF, 0x08, 0x14, 0x1C) else Color.argb(0xE8, 0xFF, 0xFF, 0xFF)
+                canvas.drawText(chips[i].label, r.centerX(), r.centerY() + sp(4f), tp)
+            }
+        }
+        if (stickyCtrl || stickyAlt || stickyMeta) {
+            val mods = buildString {
+                if (stickyCtrl) append("Ctrl ")
+                if (stickyAlt) append("Alt ")
+                if (stickyMeta) append("Super ")
+            }.trim()
+            val mp = Paint().apply { color = Color.argb(0xE0, 0x4F, 0xC3, 0xF7); textSize = sp(10f) }
+            canvas.drawText("next key: $mods + ...", 16f, sp(52f), mp)
+        }
+    }
+
+    private fun drawGestureHint(canvas: Canvas) {
+        val hp = Paint().apply { color = Color.argb(0x78, 0xFF, 0xFF, 0xFF); textSize = sp(9f) }
+        canvas.drawText("tap=click  long-press=right(hold+drag)  2-finger tap=middle", 16f, sp(40f), hp)
+        canvas.drawText("2-finger drag=scroll (pan when zoomed)  pinch=zoom  double-tap=fill  keys=Esc/Tab/Ctrl/Alt",
+            16f, sp(50f), hp)
+    }
+
+    private companion object {
+        const val LONG_PRESS_MS = 450L
+        const val TWO_FINGER_TAP_MS = 260L
+        const val TWO_FINGER_TAP_SLOP = 26f
+        const val SCROLL_STEP_PX = 44f
+        const val CHIP_ESC = 1; const val CHIP_TAB = 2; const val CHIP_CTRL = 3
+        const val CHIP_ALT = 4; const val CHIP_META = 5; const val CHIP_UP = 6
+        const val CHIP_DOWN = 7; const val CHIP_BKSP = 8; const val CHIP_TOGGLE = 9
     }
 }
 

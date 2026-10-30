@@ -1778,6 +1778,83 @@ class DesktopService(
         return inputLine("T $ch")
     }
 
+    /**
+     * Scroll wheel. X encodes the wheel as BUTTONS, not a separate event type:
+     * 4 = up, 5 = down, 6 = left, 7 = right (buttons 6/7 are the XFree86
+     * horizontal extension and are ignored by clients that do not know them).
+     * Each "click" is a press+release pair at the pointer's current position.
+     */
+    fun injectScroll(xInXSpace: Int, yInXSpace: Int, button: Int, clicks: Int) {
+        if (clicks <= 0 || button !in 4..7) return
+        val c = xtest()
+        if (c != null) {
+            runCatching {
+                // fakeButton() emits the motion itself, so the wheel lands
+                // wherever the fingers are rather than at the last click.
+                repeat(clicks.coerceAtMost(12)) {
+                    c.fakeButton(button, xInXSpace, yInXSpace, true)
+                    c.fakeButton(button, xInXSpace, yInXSpace, false)
+                }
+                surfaceXtestErrors(c)
+            }.onFailure { noteInputDropped("XTEST scroll failed: $it") }
+            return
+        }
+        ensureInputWriter()
+        inputLine("M $xInXSpace $yInXSpace 0")
+        repeat(clicks.coerceAtMost(12)) {
+            inputLine("D $button 0 0")
+            inputLine("U $button 0 0")
+        }
+    }
+
+    /**
+     * Tap a keysym with Ctrl / Alt / Super held down.
+     *
+     * Shift is deliberately NOT a parameter: [X11Client.typeKeysymTap] already
+     * applies the shift level it read out of the server's own keymap, so holding
+     * Shift here too would double-apply it. Ctrl+Shift+T therefore works by
+     * passing the keysym for 'T' with ctrl=true.
+     *
+     * Over XTEST the modifiers are real key presses around the tap. Over the
+     * FIFO agent they are folded into one `xdotool key ctrl+alt+<name>`, which
+     * xdotool resolves through XStringToKeysym - so a single ASCII char is a
+     * valid name and no keysym table is needed for letters.
+     */
+    fun injectKeysymCombo(ks: Int, ctrl: Boolean = false, alt: Boolean = false,
+                          meta: Boolean = false): Boolean {
+        if (!ctrl && !alt && !meta) return injectKeysymTap(ks)
+        val c = xtest()
+        if (c != null) {
+            val held = ArrayList<Int>(3)
+            val ok = runCatching {
+                // Order matters only for tidiness; release is the reverse.
+                if (ctrl) c.keysymKeycode(0xFFE3).takeIf { it > 0 }?.let { held.add(it); c.fakeKey(it, true) }
+                if (alt)  c.keysymKeycode(0xFFE9).takeIf { it > 0 }?.let { held.add(it); c.fakeKey(it, true) }
+                if (meta) c.keysymKeycode(0xFFEB).takeIf { it > 0 }?.let { held.add(it); c.fakeKey(it, true) }
+                val r = c.typeKeysymTap(ks)
+                held.asReversed().forEach { c.fakeKey(it, false) }
+                r
+            }.getOrDefault(false)
+            if (ok) { surfaceXtestErrors(c); return true }
+            if (held.isEmpty()) {
+                noteInputDropped("modifier keysym is not in the server keymap (no Ctrl/Alt/Super)")
+                return false
+            }
+        }
+        ensureInputWriter()
+        val name = keysymNames[ks] ?: if (ks in 0x20..0x7E) ks.toChar().toString() else null
+        if (name == null) {
+            noteInputDropped("no agent encoding for keysym 0x${Integer.toHexString(ks)}")
+            return false
+        }
+        val parts = ArrayList<String>(4)
+        if (ctrl) parts.add("ctrl")
+        if (alt) parts.add("alt")
+        if (meta) parts.add("super")
+        parts.add(name)
+        return inputLine("N " + parts.joinToString("+"))
+    }
+
     /** Type a whole IME commit at once — one agent line, one xdotool process. */
     fun injectText(text: String): Boolean {
         if (text.isEmpty()) return true

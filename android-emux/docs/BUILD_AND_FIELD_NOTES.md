@@ -102,3 +102,64 @@
   Full module type-checks clean (23/23 files, 261 classes, 0 errors) against the real
   API 34 `android.jar` + AndroidX 1.13/1.7/2.8 jars via `probe/compile_all.sh`; the
   APK itself was NOT packaged here (1 GB sandbox OOM-kills the Gradle daemon).
+- **v0.2.60 / vc160** — THE DESKTOP-WAS-STILL-BLACK round, plus the requested
+  input UX. Evidence and measurements in `INPUT_AND_PAINT_v0.2.60.md`; every
+  number below comes from a live Xvfb + Openbox + pcmanfm stack, not from
+  reading code.
+  1. **Input UX (the task):** long-press now HOLDS button 3 (drag it for a
+     right-drag, released where the finger lifts) instead of the v0.2.59
+     press+60ms+release, which made right-drags impossible and dropped the
+     context menu the instant it appeared; two-finger tap = button 2 (the only
+     practical paste in an X terminal); two-finger drag = the X scroll wheel
+     (buttons 4/5 vertical, 6/7 horizontal) at fit-to-screen and viewport pan
+     while zoomed, accumulated and quantised one click per SCROLL_STEP_PX
+     (cap 12/call) so a slow drag does not machine-gun the server at 10 fps;
+     helper bar (toggle `keys`) with Esc/Tab/Ctrl/Alt/Super/arrows/BackSpace and
+     STICKY modifiers — tap Ctrl, type `c`, get Ctrl+C — consumed by the next
+     keysym/IME commit/hardware key. `injectKeysymCombo()` has no shift
+     parameter on purpose: `typeKeysymTap()` applies the shift level from the
+     server's own keymap, so passing Shift too would double-apply it (witnessed:
+     Ctrl+T arrives as `state 0x5, keycode 28 (keysym 0x54, T)`). The helper bar
+     was hit-tested on both DOWN and UP, so one tap fired twice; `overlayDown`
+     now consumes it once. Proven at the wire by `gesture_e2e.sh` + `xev`
+     (10/10, 0 X errors).
+  2. **The desktop was still 99.4% pure black on device.** v0.2.59 fixed one
+     reason and there was a second underneath it: `pcmanfm --desktop` OWNS the
+     root window (paints its own pixmap, publishes `_XROOTPMAP_ID`), so
+     `paint_root()`'s xsetroot could never be seen and the wedge watchdog —
+     which keys on that atom being ABSENT — never fired. Three defects in the
+     pcmanfm "rice", each alone sufficient: (a) it wrote pcmanfm.conf with
+     `2>/dev/null` but never mkdir'd `~/.config/pcmanfm/default`, which does not
+     exist until pcmanfm has run once, so on a fresh install the write failed
+     silently; (b) `wallpaper_mode=6` is not a value pcmanfm parses — the key
+     takes a STRING (none|color|stretch|fit|center|tile|crop) — so `wallpaper=`
+     was ignored and only `desktop_bg=#10141a` ever painted, i.e. RGB565 (2,5,3),
+     a black pane: **the shipped wall.png has never once been displayed on any
+     device**; (c) the authoritative file is the per-screen
+     `desktop-items-0.conf`, which OVERRIDES `[desktop]` in pcmanfm.conf, and
+     pcmanfm creates it on first run with `desktop_bg=#000000` — measured, a
+     valid fixed rice still leaves that install 100% black. Now: mkdir first,
+     `wallpaper_mode=crop` (or `color` + empty `wallpaper=` when wall.png is
+     missing), `desktop_bg=#20344d` matching paint_root, items file seeded in
+     full when absent and otherwise REPAIRED only when it is still pcmanfm's
+     untouched default (`desktop_bg=#000000` AND no `wallpaper=/…`) — a user's
+     own colour/wallpaper and icon layout are never touched. The repair appends
+     absent keys (pcmanfm's default file has NO `wallpaper=` key at all, so
+     rewriting alone left `crop` pointing at nothing) and is idempotent.
+     `show_wm_menu=1` in both files so a long-press on the desktop opens the
+     Openbox menu. Rice stamp v0.2.51 → v0.2.60. `desktop_paint_test.sh` 20/20,
+     including a "before" case that runs the seed extracted from commit 8e80f81
+     and reproduces 99.4% pure black.
+  3. **A user's own Openbox autostart was backed up and then dropped.** v0.2.59
+     copied it to `autostart.emux-bak` but the write condition did not know
+     about the backup, so nothing was written: no panel, no root colour, no
+     icons — the original "I can't see the desktop" report from a completely
+     different cause, hitting exactly the user who had customised Openbox once.
+     Condition gained `|| [ -n "$EMUX_USER_BAK" ]` and the generated file now
+     CHAINS the backup (absolute path written at generation time, so the
+     generated file needs no `$HOME` escaping). `seed_autostart_test.sh` 23/23,
+     extracting the block by MARKER — line-number extraction breaks on any edit.
+  ENV_VERSION 68→69 so §2 and §3 actually reach existing installs. Type-checks
+  clean (23/23 files, 263 classes, 0 errors); APK still NOT packaged here (1 GB
+  sandbox OOM-kills the Gradle daemon) — needs `./gradlew :app:assembleDebug`
+  on a real machine, and the root `emux-debug.apk` is still v0.2.58.
