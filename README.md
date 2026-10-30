@@ -35,6 +35,62 @@ instant, and app updates re-seed helpers/components WITHOUT re-downloading).
 the debug keystore is committed in `android-emux/debug-keystore/`, so the
 signature is stable across builds forever and `adb install -r` works again.
 
+## Using the X11 desktop
+
+Everything below works with one or two fingers; no hardware keyboard is needed.
+The first time you open the desktop, a card listing these gestures fades in over
+the session and the on-screen key bar opens itself — any touch dismisses the
+card, and your choice about the bar is remembered after that.
+
+| gesture | what the desktop receives |
+|---|---|
+| tap | left click |
+| drag | move / window drag |
+| **long-press** | **right click, held** — keep holding and drag for a right-drag (range select in a terminal); release for the context menu |
+| **two-finger tap** | **middle click** — how you paste into an X terminal |
+| **two-finger drag** | **scroll wheel** (up/down and left/right); pans the viewport instead once you are zoomed in |
+| pinch | zoom the viewport |
+| double-tap | toggle letterbox-fit ↔ fill-screen |
+| `keys` button (top-right) | on-screen **Esc, Tab, Ctrl, Alt, Super, ▲, ▼, ⌫** |
+
+`Ctrl`, `Alt` and `Super` are **sticky**: tap `Ctrl`, then type `c` on the soft
+keyboard and the desktop receives Ctrl+C. The chip lights up while armed and
+clears itself after the next key, so a modifier can never get stuck down.
+
+## If the desktop is black
+
+Run this inside the Linux terminal (Terminal tab, or any shell in the distro):
+
+```bash
+emux-x11 doctor
+```
+
+It is **read-only** — it changes nothing and is safe against a live session —
+and prints one screen covering the X server, the window manager and panel, what
+colour the root window actually is (five sampled points, not a guess), the
+`pcmanfm` background configuration, whether input can be injected at all, and
+whether frames are being produced, then names the problem it found:
+
+```
+== desktop ==
+  openbox:      RUNNING (pid 19617)
+  tint2 panel:  RUNNING (pid 19627)
+  pcmanfm:      RUNNING (pid 19628)
+  root colour:  #000000 #000000 #000000 #000000 #000000
+  verdict:      PURE BLACK at all 5 sample points
+== verdict ==
+  - desktop-items-0.conf is still pcmanfm's untouched default
+    (desktop_bg=#000000). It OVERRIDES pcmanfm.conf, so the desktop is
+    black no matter what the rice says.
+```
+
+That distinction matters because "black" is the same pixels for six different
+failures — X never came up, the WM died, the autostart never ran, `pcmanfm`
+painted its own black root pixmap, capture died, or frames never reached the
+app. Paste the doctor output into an issue and the cause is already identified.
+The desktop pane also runs a shorter version of this check ~6 s after launch, so
+a black root is reported without you asking.
+
 ## Distros & package management (v0.1.47)
 
 | Distro | Version | Download | Package manager | Notes |

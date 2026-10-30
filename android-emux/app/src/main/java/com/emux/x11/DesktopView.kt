@@ -38,6 +38,11 @@ import kotlin.math.min
  *  - "keys" toggle   → on-screen Esc/Tab/Ctrl/Alt/Super/BackSpace + wheel.
  *                      Ctrl/Alt/Super are STICKY: arm one and the next key from
  *                      the soft keyboard becomes that shortcut (Ctrl+C).
+ *
+ * Discoverability (v0.2.61): the bar is hidden behind that toggle, so on the
+ * FIRST desktop session after install the bar opens itself and a gesture card
+ * fades in over the live desktop for a few seconds. Any touch dismisses the
+ * card; the user's own bar choice is remembered from then on.
  */
 class DesktopView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attrs) {
 
@@ -216,6 +221,9 @@ class DesktopView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attrs) 
     fun onNewFrame(frameId: Int) {
         if (frameId != lastFrameId) {
             lastFrameId = frameId
+            // v0.2.61: the intro must key off the FIRST FRAME, not off view
+            // construction - before that there is no desktop to explain.
+            if (!introChecked) { introChecked = true; maybeShowIntro() }
             histScrollPx = 0f          // v0.2.3: history scroll is frameless-only
             histStickBottom = true     // v0.2.21: next frameless visit starts live
             val now = System.currentTimeMillis()
@@ -331,6 +339,8 @@ class DesktopView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attrs) 
         // v0.2.60: on-screen Esc/Tab/Ctrl/Alt/Super + wheel, drawn last so it
         // sits above the framebuffer.
         drawOverlay(canvas)
+        // v0.2.61: one-shot gesture card, on top of even the overlay.
+        drawIntroCard(canvas)
     }
 
     /** screen px → X px (clamped into server geometry). */
@@ -388,6 +398,65 @@ class DesktopView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attrs) 
     private var stickyMeta = false
     private var helperBarVisible = false
 
+    // v0.2.61 DISCOVERABILITY. Two things made the new input model hard to
+    // find: the gesture cheat-sheet was drawn only on the FRAMELESS pane, so it
+    // vanished at the exact moment the desktop appeared and the user could act
+    // on it, and the helper bar sat behind a "keys" toggle nobody knows to look
+    // for. Now, once per install, the first frame that arrives opens the helper
+    // bar and shows a fading card OVER the live desktop; any touch dismisses it.
+    // From then on the user's own choice of bar visibility is remembered.
+    // getSharedPreferences can throw on some OEM ROMs (see BootstrapManager),
+    // so every access is guarded and the intro simply never shows if it does.
+    private val uiPrefs
+        get() = runCatching {
+            context.getSharedPreferences("emux_desktop_ui", Context.MODE_PRIVATE)
+        }.getOrNull()
+    private var introChecked = false
+    private var hintUntilMs = 0L
+
+    private val fadeTick = object : Runnable {
+        override fun run() {
+            if (hintUntilMs <= System.currentTimeMillis()) return
+            invalidate()
+            postDelayed(this, FADE_TICK_MS)
+        }
+    }
+
+    /** Runs on the first frame: opens the bar + shows the card, once ever. */
+    private fun maybeShowIntro() {
+        val p = uiPrefs
+        val seen = runCatching { p?.getBoolean(KEY_INTRO_SEEN, false) ?: false }.getOrDefault(false)
+        if (seen) {
+            helperBarVisible = runCatching { p?.getBoolean(KEY_BAR_VISIBLE, false) ?: false }
+                .getOrDefault(false)
+            return
+        }
+        helperBarVisible = true
+        hintUntilMs = System.currentTimeMillis() + HINT_MS
+        runCatching {
+            p?.edit()?.putBoolean(KEY_INTRO_SEEN, true)
+                ?.putBoolean(KEY_BAR_VISIBLE, true)?.apply()
+        }
+        removeCallbacks(fadeTick)
+        postDelayed(fadeTick, FADE_TICK_MS)
+    }
+
+    private fun persistBarVisibility() {
+        runCatching { uiPrefs?.edit()?.putBoolean(KEY_BAR_VISIBLE, helperBarVisible)?.apply() }
+    }
+
+    private fun dismissIntroCard() {
+        if (hintUntilMs == 0L) return
+        hintUntilMs = 0L
+        removeCallbacks(fadeTick)
+        invalidate()
+    }
+
+    override fun onDetachedFromWindow() {
+        super.onDetachedFromWindow()
+        removeCallbacks(fadeTick)
+    }
+
     private fun dp(v: Float) =
         TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_DIP, v, resources.displayMetrics)
 
@@ -413,6 +482,9 @@ class DesktopView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attrs) 
         val multiTouch = event.pointerCount > 1
         when (event.actionMasked) {
             MotionEvent.ACTION_DOWN -> {
+                // v0.2.61: the intro card is dismissed by the first touch, so
+                // it can never sit between the user and the desktop.
+                dismissIntroCard()
                 // Consume the whole gesture here. Hit-testing on ACTION_UP as
                 // well would fire every chip twice - a Ctrl tap would toggle
                 // itself back off and Esc would be sent twice.
@@ -648,7 +720,7 @@ class DesktopView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attrs) 
             CHIP_META -> { stickyMeta = !stickyMeta; invalidate() }
             CHIP_UP -> d.injectScroll(cx, cy, 4, 3)
             CHIP_DOWN -> d.injectScroll(cx, cy, 5, 3)
-            CHIP_TOGGLE -> { helperBarVisible = !helperBarVisible; invalidate() }
+            CHIP_TOGGLE -> { helperBarVisible = !helperBarVisible; persistBarVisibility(); invalidate() }
         }
         performHapticFeedback(android.view.HapticFeedbackConstants.KEYBOARD_TAP)
     }
@@ -721,6 +793,54 @@ class DesktopView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attrs) 
             16f, sp(50f), hp)
     }
 
+    /**
+     * v0.2.61: the one-shot "how do I drive this" card.
+     *
+     * Drawn over the LIVE desktop (the frameless pane already has its own
+     * cheat-sheet), faded out over the last third of [HINT_MS], dismissed by
+     * any touch. Kept clear of the top-right "keys" toggle so the thing the
+     * card tells you about stays tappable while you read it.
+     */
+    private fun drawIntroCard(canvas: Canvas) {
+        val now = System.currentTimeMillis()
+        if (hintUntilMs <= now) return
+        val remain = hintUntilMs - now
+        val fadeMs = HINT_MS / 3
+        val a = if (remain < fadeMs) (255f * remain / fadeMs).toInt().coerceIn(0, 255) else 255
+        val lines = arrayOf(
+            "tap  =  left click",
+            "long-press  =  right click (hold + drag to right-drag)",
+            "two-finger tap  =  middle click (paste in a terminal)",
+            "two-finger drag  =  scroll wheel  \u00b7  pans when zoomed",
+            "pinch  =  zoom  \u00b7  double-tap  =  fit / fill",
+            "keys  =  Esc Tab Ctrl Alt Super arrows \u232b",
+            "Ctrl/Alt/Super are sticky: tap Ctrl, then type c \u2192 Ctrl+C",
+        )
+        val pad = dp(10f)
+        val lh = sp(12.5f)
+        val titleH = sp(16f)
+        val cardW = width - dp(52f)          // leave the "keys" toggle clear
+        val cardH = pad * 2 + titleH + lh * lines.size
+        val top = dp(46f)
+        val card = RectF(dp(8f), top, dp(8f) + cardW, top + cardH)
+        canvas.drawRoundRect(card, dp(8f), dp(8f), Paint().apply {
+            color = Color.argb((0xE6 * a / 255).coerceIn(0, 255), 0x10, 0x16, 0x1E)
+            style = Paint.Style.FILL
+        })
+        val title = Paint().apply {
+            isAntiAlias = true; textSize = sp(11.5f)
+            color = Color.argb((0xFF * a / 255).toInt().coerceIn(0, 255), 0x4F, 0xC3, 0xF7)
+        }
+        canvas.drawText("Using the desktop   (tap to dismiss)", card.left + pad,
+            card.top + pad + titleH * 0.75f, title)
+        val body = Paint().apply {
+            isAntiAlias = true; textSize = sp(9.5f)
+            color = Color.argb((0xE8 * a / 255).toInt().coerceIn(0, 255), 0xFF, 0xFF, 0xFF)
+        }
+        var y = card.top + pad + titleH + lh * 0.8f
+        for (l in lines) { canvas.drawText(l, card.left + pad, y, body); y += lh }
+    }
+
     private companion object {
         const val LONG_PRESS_MS = 450L
         const val TWO_FINGER_TAP_MS = 260L
@@ -729,6 +849,12 @@ class DesktopView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attrs) 
         const val CHIP_ESC = 1; const val CHIP_TAB = 2; const val CHIP_CTRL = 3
         const val CHIP_ALT = 4; const val CHIP_META = 5; const val CHIP_UP = 6
         const val CHIP_DOWN = 7; const val CHIP_BKSP = 8; const val CHIP_TOGGLE = 9
+        // v0.2.61 intro card: long enough to read seven lines on a phone,
+        // short enough that it is gone before the user wants the screen back.
+        const val HINT_MS = 11_000L
+        const val FADE_TICK_MS = 200L
+        const val KEY_INTRO_SEEN = "gesture_intro_seen"
+        const val KEY_BAR_VISIBLE = "helper_bar_visible"
     }
 }
 

@@ -10,6 +10,11 @@
 # not exist and Xvfb dies with "Failed to activate virtual core keyboard"
 # (verified). proot's execve/PT_INTERP path translation is exactly the fix.
 WM="${1:-openbox}"
+# v0.2.61: `emux-x11 doctor` is a READ-ONLY field report. Detected here, before
+# the session-state reset below, because clearing the launch markers is exactly
+# what would make the report lie - "WM launched: NO" on a healthy session.
+DOCTOR_MODE=""
+case "$WM" in doctor|--doctor|-d) DOCTOR_MODE=1 ;; esac
 # v0.2.5 FIELD FIX: display number comes from the app (rotated to a free
 # one; see DesktopService). Everything below (:0, 6000, X0 lock/socket)
 # keys off DN/XP so a stale server on another display cannot block us.
@@ -38,13 +43,15 @@ if [ -n "$ROOT" ] && [ -d "$ROOT/lib" ]; then
 fi
 
 # ---------------- inside the distro (proot / chroot) ----------------
-: > /tmp/emux_sess_marker 2>/dev/null   # v0.2.28: freshness baseline for X0
+# v0.2.61: skipped in doctor mode - truncating the session marker would make
+# the report claim this session never started.
+[ -n "$DOCTOR_MODE" ] || : > /tmp/emux_sess_marker 2>/dev/null   # v0.2.28: freshness baseline for X0
 # v0.2.32 FIELD FIX: launch markers live in the rootfs /tmp and SURVIVED
 # across sessions - so every session after the first silently skipped the
 # WM AND the visibility xterm (field v0.2.31: a perfectly streaming,
 # pure-black desktop = X root window with zero clients). Markers are
 # per-session by definition: clear them at every launcher start.
-rm -f /tmp/emux_wm_launched /tmp/emux_xterm_launched /tmp/emux_vis_launched /tmp/emux_obx_reconf /tmp/emux_agent_launched /tmp/emux_apt_updated 2>/dev/null
+[ -n "$DOCTOR_MODE" ] || rm -f /tmp/emux_wm_launched /tmp/emux_xterm_launched /tmp/emux_vis_launched /tmp/emux_obx_reconf /tmp/emux_agent_launched /tmp/emux_apt_updated 2>/dev/null
 export HOME="${HOME:-/root}"
 export DISPLAY=:$DN
 export TMPDIR=/tmp
@@ -677,6 +684,25 @@ verify_desktop() {
   sleep 6
   {
     echo "emux-x11: desktop check: openbox=$(running openbox && echo yes || echo no) tint2=$(running tint2 && echo yes || echo no) pcmanfm=$(running pcmanfm && echo yes || echo no) xterm=$(running xterm && echo yes || echo no)"
+    # v0.2.61: "furniture is running" is NOT "the user can see something" -
+    # pcmanfm owns the root window and happily paints it black (see the rice
+    # fix in seed_desktop_config). Sample the actual pixels so the pane can
+    # distinguish the two, and name the diagnostic that explains a black one.
+    DSP=$(tr -dc '0-9' < /tmp/emux_display_num 2>/dev/null)
+    [ -n "$DSP" ] || DSP=$DN
+    for DC in "127.0.0.1:$DSP" ":$DSP"; do
+      DS=$(root_samples "$DC" 2>/dev/null) || continue
+      case "$DS" in *[a-z-]*) continue ;; esac
+      set -- $(echo "$DS" | tr ';' '\n' | awk '
+        NF==3 { t++; if ($1+$2+$3 < 24) b++ } END { printf "%d %d", b+0, t+0 }')
+      DB=$1; DT=$2
+      if [ "$DT" -gt 0 ] && [ "$DB" = "$DT" ]; then
+        echo "emux-x11: desktop check: ROOT IS PURE BLACK at all $DT samples - run: emux-x11 doctor"
+      elif [ "$DT" -gt 0 ]; then
+        echo "emux-x11: desktop check: root shows colour at $((DT-DB))/$DT samples (not black)"
+      fi
+      break
+    done
     if ! running tint2 && [ -e /tmp/emux_rest.log ]; then
       echo "emux-x11: desktop check: REST log tail (furniture missing):"
       tail -6 /tmp/emux_rest.log 2>/dev/null
@@ -696,6 +722,230 @@ verify_desktop() {
   } > /tmp/emux_desktop_check 2>&1
   cat /tmp/emux_desktop_check >&2
 }
+
+# v0.2.61: `emux-x11 doctor` - a read-only, one-screen field diagnostic.
+#
+# WHY THIS EXISTS: "the desktop is black" is the SAME PIXELS for at least six
+# different failures - X never came up, the WM died, the autostart never ran,
+# pcmanfm painted its own black root pixmap, capture died, or frames never
+# reached the host. Three rounds of this project were spent telling those apart
+# over adb. Every one of them leaves a distinct trace in /tmp or on the wire, so
+# print all of those traces at once and let the field report BE the data.
+#
+# It changes nothing: no kills, no restarts, no config writes, one extra root
+# grab. Safe against a live session. Narrow-terminal friendly (~68 cols).
+
+# Sample the root window at five points. Binary PPM (P6) from xwdtopnm has the
+# fixed header "P6\n<w> <h>\n255\n", so a pixel is a byte offset - no netpbm
+# plain conversion (its ASCII output WRAPS at 8 pixels per line, so rows are not
+# lines) and no float arithmetic (neither exists in a minimal guest).
+# Echoes "R G B;R G B;..." or a one-word reason on failure.
+root_samples() {
+  command -v xwd >/dev/null 2>&1 || { echo "no-xwd"; return 1; }
+  command -v xwdtopnm >/dev/null 2>&1 || { echo "no-xwdtopnm"; return 1; }
+  command -v xwininfo >/dev/null 2>&1 || { echo "no-xwininfo"; return 1; }
+  DW=$(DISPLAY="$1" xwininfo -root 2>/dev/null | sed -n 's/^  Width: //p')
+  DH=$(DISPLAY="$1" xwininfo -root 2>/dev/null | sed -n 's/^  Height: //p')
+  [ -n "$DW" ] && [ -n "$DH" ] || { echo "no-geometry"; return 1; }
+  DF=/tmp/emux_doctor_root.ppm
+  DISPLAY="$1" xwd -root -silent 2>/dev/null | xwdtopnm > "$DF" 2>/dev/null || {
+    rm -f "$DF"; echo "grab-failed"; return 1; }
+  DSZ=$(wc -c < "$DF" 2>/dev/null || echo 0)
+  DHDR=$(( 3 + ${#DW} + 1 + ${#DH} + 1 + 3 + 1 ))
+  if [ "$DSZ" -lt $(( DHDR + 3 * DW * DH )) ]; then
+    rm -f "$DF"; echo "short-grab($DSZ)"; return 1
+  fi
+  DOUT=""
+  for DPT in "$((DW/4)) $((DH/4))" "$((DW/2)) $((DH/4))" "$((DW/2)) $((DH/2))" \
+             "$((DW/4)) $((3*DH/4))" "$((3*DW/4)) $((3*DH/4))"; do
+    set -- $DPT
+    DOFF=$(( DHDR + 3 * ($2 * DW + $1) ))
+    DRGB=$(tail -c +$((DOFF+1)) "$DF" | head -c 3 | od -A n -t u1 | tr -s ' ' ' ' | sed 's/^ //')
+    DOUT="$DOUT$DRGB;"
+  done
+  rm -f "$DF"
+  echo "$DOUT"
+}
+
+doctor() {
+  # --- which display? Prefer the one the session recorded, then probe. ---
+  DDN=$(tr -dc '0-9' < /tmp/emux_display_num 2>/dev/null)
+  [ -n "$DDN" ] || DDN=$DN
+  DDSP=""
+  if command -v xwininfo >/dev/null 2>&1; then
+    for DCAND in "127.0.0.1:$DDN" ":$DDN"; do
+      DISPLAY="$DCAND" xwininfo -root >/dev/null 2>&1 && { DDSP="$DCAND"; break; }
+    done
+  fi
+
+  hdr() { printf '\n== %s ==\n' "$1"; }
+  kv()  { printf '  %-13s %s\n' "$1:" "$2"; }
+  # pid of a LIVE (non-zombie) process whose EXECUTABLE is $1. Two traps here,
+  # both previously bitten elsewhere in this project:
+  #  - grepping the whole cmdline matches any process that merely mentions the
+  #    name in an argument. The shell running `emux-x11 doctor` has the report
+  #    text in its own argv, so it matched Xvfb, openbox, tint2 AND pcmanfm at
+  #    once. Only argv[0] (and argv[1], for `/bin/sh /path/emux-capture`) is
+  #    compared, by basename.
+  #  - pgrep -x and kill -0 both report ZOMBIES as alive, and this container's
+  #    PID 1 does not reap, so a furniture process killed earlier still looks
+  #    "RUNNING". The /proc state field is read and Z is skipped.
+  livepid() {
+    DT=$1
+    for f in /proc/[0-9]*/cmdline; do
+      p=${f#/proc/}; p=${p%/cmdline}
+      [ "$p" = "$$" ] && continue
+      pst=$(sed 's/.*) //' "/proc/$p/stat" 2>/dev/null | cut -d' ' -f1)
+      [ -n "$pst" ] && [ "$pst" != Z ] || continue
+      tr '\0' '\n' < "$f" 2>/dev/null | head -2 | while read -r a; do
+        case "$a" in */*) a=${a##*/} ;; esac
+        [ "$a" = "$DT" ] && echo match
+      done | grep -q match || continue
+      echo "$p"; return 0
+    done
+    return 1
+  }
+  pst() { p=$(livepid "$1"); if [ -n "$p" ]; then echo "RUNNING (pid $p)"; else echo "not running"; fi; }
+  age() {
+    [ -e "$1" ] || { echo "-"; return; }
+    echo "$(( $(date +%s) - $(stat -c %Y "$1" 2>/dev/null || echo 0) ))s ago"
+  }
+  mk() { [ -e "$1" ] && echo "yes ($(age "$1"))" || echo "NO"; }
+  hexs() {  # "R G B;R G B;..." -> "#rrggbb #rrggbb ..."
+    echo "$1" | tr ';' '\n' | while read -r r g b; do
+      [ -n "$r" ] || continue
+      printf '#%02x%02x%02x ' "$r" "$g" "$b"
+    done
+  }
+  PROBLEMS=""
+  bad() { PROBLEMS="$PROBLEMS
+  - $1"; }
+
+  printf 'emux-x11 doctor (read-only; nothing was changed)\n'
+  kv "script" "$(command -v emux-x11 2>/dev/null || echo "$0")"
+  kv "autostart" "$(sed -n '1p' "$HOME/.config/openbox/autostart" 2>/dev/null || echo 'none seeded')"
+  kv "pcmanfm rice" "$(sed -n '1p' "$HOME/.config/pcmanfm/default/pcmanfm.conf" 2>/dev/null || echo 'none seeded')"
+
+  hdr "X server"
+  if [ -n "$DDSP" ]; then
+    kv "display" "$DDSP  (answering)"
+    kv "geometry" "$(DISPLAY="$DDSP" xwininfo -root 2>/dev/null | sed -n 's/^  Width: /W=/p;s/^  Height: / H=/p;s/^  Depth: / D=/p' | tr -d '\n')"
+    kv "Xvfb" "$(pst Xvfb)"
+    kv "x_up marker" "$(mk /tmp/emux_x_up)"
+    kv "attempts" "$(cat /tmp/emux_attempts 2>/dev/null || echo '-')"
+    kv "lock/socket" "$(ls /tmp/.X$DDN-lock /tmp/.X11-unix/X$DDN 2>/dev/null | tr '\n' ' ' || echo 'none')"
+  else
+    kv "display" ":$DDN - NOTHING ANSWERS (probed 127.0.0.1:$DDN and :$DDN)"
+    kv "Xvfb" "$(pst Xvfb)"
+    kv "xvfb.log" "$(tail -2 /tmp/xvfb.log 2>/dev/null | tr '\n' '|' || echo '-')"
+    bad "X server is not answering on :$DDN - the pane cannot show anything."
+  fi
+
+  hdr "desktop"
+  kv "openbox" "$(pst openbox)"
+  kv "tint2 panel" "$(pst tint2)"
+  kv "pcmanfm" "$(pst pcmanfm)"
+  kv "xterm" "$(pst xterm)"
+  kv "WM launched" "$(mk /tmp/emux_wm_launched)"
+  kv "root painted" "$(mk /tmp/emux_root_painted)"
+  kv "pcmanfm wedges" "$(cat /tmp/emux_pcmanfm_wedges 2>/dev/null || echo 0)"
+  if [ -n "$DDSP" ]; then
+    DSAMP=$(root_samples "$DDSP")
+    case "$DSAMP" in
+      *[a-z-]*) kv "root colour" "$DSAMP (sampler could not read the root)" ;;
+      *)
+        kv "root colour" "$(hexs "$DSAMP")"
+        # One awk pass: the samples are "R G B;R G B;...", and a `for` loop
+        # over that splits on every space, so each iteration would see a single
+        # number and $2/$3 would be empty (dash: "arithmetic expression:
+        # expecting primary").
+        set -- $(echo "$DSAMP" | tr ';' '\n' | awk '
+          NF==3 { t++; if ($1+$2+$3 < 24) b++ } END { printf "%d %d", b+0, t+0 }')
+        DBLACK=$1; DTOT=$2
+        if [ "$DBLACK" = "$DTOT" ]; then
+          kv "verdict" "PURE BLACK at all $DTOT sample points"
+          bad "the root window is pure black. See 'pcmanfm config' below - if
+    desktop-items-0.conf still says desktop_bg=#000000, the seeded
+    v0.2.60 rice has not run yet (re-seed: bump ENV_VERSION / tap Install)."
+        else
+          kv "verdict" "not black ($((DTOT-DBLACK))/$DTOT points show colour) - OK"
+        fi
+        ;;
+    esac
+  fi
+
+  hdr "pcmanfm config"
+  DWALL=/usr/share/emux/wall.png
+  kv "wallpaper" "$([ -e "$DWALL" ] && echo "present ($DWALL)" || echo "MISSING ($DWALL)")"
+  for DF in "$HOME/.config/pcmanfm/default/pcmanfm.conf" \
+            "$HOME/.config/pcmanfm/default/desktop-items-0.conf"; do
+    DN2=$(basename "$DF")
+    if [ -e "$DF" ]; then
+      kv "$DN2" "$(grep -E '^(wallpaper_mode|wallpaper|desktop_bg)=' "$DF" 2>/dev/null | tr '\n' ' ')"
+      case "$DN2" in
+        desktop-items-0.conf)
+          if grep -q '^desktop_bg=#000000' "$DF" 2>/dev/null && \
+             ! grep -q '^wallpaper=/.' "$DF" 2>/dev/null; then
+            bad "desktop-items-0.conf is still pcmanfm's untouched default
+    (desktop_bg=#000000). It OVERRIDES pcmanfm.conf, so the desktop is
+    black no matter what the rice says. v0.2.60 repairs it at seed time."
+          fi ;;
+        pcmanfm.conf)
+          if grep -q '^wallpaper_mode=[0-9]' "$DF" 2>/dev/null; then
+            bad "wallpaper_mode is numeric. pcmanfm parses STRINGS
+    (none|color|stretch|fit|center|tile|crop); a number means the
+    wallpaper is ignored and only desktop_bg is painted."
+          fi ;;
+      esac
+    else
+      kv "$DN2" "absent"
+    fi
+  done
+
+  hdr "input"
+  kv "xdotool" "$(command -v xdotool 2>/dev/null || echo 'NOT INSTALLED')"
+  if command -v xdpyinfo >/dev/null 2>&1 && [ -n "$DDSP" ]; then
+    kv "XTEST ext" "$(DISPLAY="$DDSP" xdpyinfo -ext XTEST 2>/dev/null | grep -ci xtest | { read n; [ "${n:-0}" -gt 0 ] && echo present || echo MISSING; })"
+  fi
+  kv "FIFO" "$([ -p /tmp/emux_in ] && echo '/tmp/emux_in (fifo)' || { [ -e /tmp/emux_in ] && echo '/tmp/emux_in (NOT a fifo)' || echo 'absent'; })"
+  kv "agent" "launched=$(mk /tmp/emux_agent_launched) noxdotool=$(mk /tmp/emux_agent_noxtool)"
+  kv "agent input" "last activity $(age /tmp/emux_agent_firstclick)"
+  if ! command -v xdotool >/dev/null 2>&1; then
+    bad "xdotool is missing, so the FIFO fallback cannot inject. Input needs
+    the XTEST control plane (host side) to work."
+  fi
+
+  hdr "capture / frames"
+  kv "emux-capture" "$(pst emux-capture)"
+  kv "converter" "$([ -x /usr/local/lib/emux/emux-rgb565 ] && echo native || echo 'fallback chain (native missing)')"
+  kv "last frame" "$([ -e /tmp/emux_frame.rgb ] && echo "$(wc -c < /tmp/emux_frame.rgb) bytes, $(age /tmp/emux_frame.rgb)" || echo 'none written')"
+  kv "cap.err tail" "$(tail -2 /tmp/emux_cap.err 2>/dev/null | tr '\n' '|' || echo '-')"
+  if [ -n "$DDSP" ] && [ -e /tmp/emux_frame.rgb ]; then
+    DAGE=$(( $(date +%s) - $(stat -c %Y /tmp/emux_frame.rgb 2>/dev/null || echo 0) ))
+    [ "$DAGE" -gt 30 ] && bad "no frame has been produced for ${DAGE}s even though X is up -
+    the host pane will look frozen/black while the desktop itself is fine."
+  fi
+
+  hdr "logs"
+  for DL in /tmp/xvfb.log /tmp/wm.log /tmp/pcmanfm.log /tmp/tint2.log; do
+    [ -s "$DL" ] || continue
+    printf '  -- %s (last 3)\n' "$DL"
+    tail -3 "$DL" 2>/dev/null | sed 's/^/     /'
+  done
+
+  hdr "verdict"
+  if [ -z "$PROBLEMS" ]; then
+    printf '  OK: X answering, root is not black, furniture and input present.\n'
+  else
+    printf '  %d problem(s) found:%s\n' "$(echo "$PROBLEMS" | grep -c '^  - ')" "$PROBLEMS"
+  fi
+  printf '\n  Full detail: /tmp/emux_desktop_check, /tmp/emux_probes, /tmp/emux_cap.err\n'
+}
+
+# Dispatch BEFORE any side effect below (kill_stale_x, Xvfb launch, traps), so
+# `emux-x11 doctor` can never disturb a live session. Also reachable from the
+# host side: the proot re-exec above forwards $1 verbatim.
+if [ -n "$DOCTOR_MODE" ]; then doctor; exit 0; fi
 # v0.2.36 FIELD FIX (the thirty-five-round bug): emux-x11 EXITS by design
 # once X+WM are launched - and when its PTY session closes, the kernel
 # SIGHUPs the entire process group: the WM, every visibility client and

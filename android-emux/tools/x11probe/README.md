@@ -22,6 +22,7 @@ apt-get install -y xvfb openbox xdotool x11-apps netpbm x11-xserver-utils \
 | `desktop_visible_ab.sh` | **A/B, pixel-level.** Bare `openbox` (v0.2.58) vs `openbox --sm-disable --startup <autostart>` (v0.2.59). Reports a marker file, live process list and an `xwd` root-window colour census. |
 | `desktop_paint_test.sh` | **What colour is the desktop, really?** Pixel census of the root window for every `pcmanfm` state a real install can be in (pristine black `desktop-items-0.conf`, fresh HOME, missing `wall.png`, user-chosen colour, seeded twice). The "before" half runs the seed extracted from the newest commit that still contains `wallpaper_mode=6`, so it keeps reproducing the original bug after the fix is committed. |
 | `gesture_e2e.sh` + `GestureDriver.kt` | **Input, witnessed at the wire.** The real compiled input path drives a live server while `xev` records what the server delivered: middle click, wheel 4/5/6/7 with exact click counts, held button 3 right-drag, and Ctrl/Alt/Super sticky modifiers by modifier mask. |
+| `doctor_test.sh` | **`emux-x11 doctor` against three real states** — healthy desktop, pcmanfm's pristine black `desktop-items-0.conf`, and no X server at all — asserting the report text, that each process gets its OWN pid, and the read-only invariants (session markers survive, no grab file left behind, nothing on stderr). |
 | `seed_autostart_test.sh` | The generated `~/.config/openbox/autostart` against four filesystem states: fresh, 4× (idempotency), user-written (backed up **and chained**), older EmuX stamp. Extracts the generation block by marker. |
 | `agent_test.sh` | Runs the guest FIFO input agent **as embedded in `emux-x11`** against a live xterm and asserts the typed text arrives. Covers `M`/`D`/`U`/`T`/`N` and the legacy `K <keysym>` path. |
 | `protocol_audit.sh` + `ProtocolAudit.kt` | Runs the **real compiled `X11Client`** on a plain JVM against a live server and audits handshake, XTEST discovery, atoms, properties and keysym→keycode mapping, cross-checked against `xprop`. This is what caught the `InternAtom`/`GetProperty` BadLength bugs. |
@@ -39,6 +40,7 @@ apt-get install -y xvfb openbox xdotool x11-apps netpbm x11-xserver-utils \
 sh tools/x11probe/desktop_paint_test.sh     # needs xvfb, pcmanfm, xwd, netpbm  -> 20/20
 sh tools/x11probe/desktop_visible_ab.sh     # needs xvfb, openbox, tint2, pcmanfm, netpbm -> 8/8
 sh tools/x11probe/seed_autostart_test.sh    # needs nothing but sh             -> 23/23
+sh tools/x11probe/doctor_test.sh            # needs xvfb, openbox, x11-utils, netpbm -> 20/20
 sh tools/x11probe/agent_test.sh             # needs xvfb, openbox, xdotool, xterm -> 4/4
 sh tools/x11probe/sweep_test.sh             # needs nothing but /proc
 
@@ -84,9 +86,13 @@ the harnesses rather than left as tribal knowledge:
    `emux-x11` silently returns the wrong block after any edit; the harnesses use
    `awk '/^seed_desktop_config\(\) \{/{f=1} f{print} f&&/^\}/{exit}'` and assert
    the extraction succeeded.
-6. **Pin the "before" revision.** A harness that reads the old behaviour from
-   `HEAD` stops reproducing the bug the moment the fix is committed.
-   `desktop_paint_test.sh` scans history for the newest commit whose
-   `emux-x11` still contains `wallpaper_mode=6` and skips (never fakes) the
-   case if there is none.
+6. **Pin the "before" revision — and pin it precisely.** A harness that reads
+   the old behaviour from `HEAD` stops reproducing the bug the moment the fix is
+   committed, so `desktop_paint_test.sh` scans history for the newest commit
+   that still has the broken code, and skips (never fakes) the case if there is
+   none. The scan must match the EMITTED code (`grep -F 'echo
+   "wallpaper_mode=6"'`), not any mention of it: the fix commit documents the
+   bug in a comment containing that same literal, so a plain grep selected the
+   FIXED revision and the "before" case quietly started passing for the wrong
+   reason.
 

@@ -163,3 +163,45 @@
   clean (23/23 files, 263 classes, 0 errors); APK still NOT packaged here (1 GB
   sandbox OOM-kills the Gradle daemon) — needs `./gradlew :app:assembleDebug`
   on a real machine, and the root `emux-debug.apk` is still v0.2.58.
+- **v0.2.61 / vc161** — DISCOVERABILITY + FIELD DIAGNOSTICS. v0.2.60 made the
+  desktop visible and interactive; this makes it findable and debuggable. Two
+  things a first-time user could not do: work out how to drive the desktop, or
+  tell anyone why it was still black.
+  1. **The gesture cheat-sheet was drawn only on the FRAMELESS pane**, i.e. it
+     vanished at the exact moment the desktop appeared and the user could act on
+     it, and the on-screen key bar sat behind a "keys" toggle nobody knows to
+     look for. Now, once per install, the first frame that arrives opens the
+     helper bar and fades in a card OVER the live desktop (11 s, faded over the
+     last third, dismissed by any touch, kept clear of the top-right toggle so
+     the thing it describes stays tappable). The user's own bar choice is
+     persisted from then on (`emux_desktop_ui` prefs). getSharedPreferences can
+     throw on some OEM ROMs, so every access is guarded and the intro simply
+     never shows if it does.
+  2. **`emux-x11 doctor`** — a read-only, one-screen field report: X server
+     (display probe, geometry, Xvfb pid, lock/socket), desktop (openbox/tint2/
+     pcmanfm/xterm pids, launch markers, wedge strikes), WHAT COLOUR THE ROOT
+     WINDOW ACTUALLY IS (five sampled points), the pcmanfm background config
+     from both files, input (xdotool, XTEST extension, FIFO, agent markers),
+     capture (converter, last frame age, cap.err tail), log tails, then a verdict
+     that names the problem. Dispatched before kill_stale_x and every other side
+     effect, and the two session-marker resets are skipped in doctor mode —
+     otherwise the report would claim "WM launched: NO" for a healthy session.
+     Root sampling is binary PPM + `tail -c` at a computed offset: the header is
+     a fixed "P6\n<w> <h>\n255\n", and netpbm's ASCII output WRAPS at 8 pixels
+     per line so rows are not lines (that broke the first version), and dash has
+     no float arithmetic (that broke the second).
+     `verify_desktop()` now samples the same five points, so the pane itself says
+     "ROOT IS PURE BLACK - run: emux-x11 doctor" instead of implying that
+     furniture running means something is visible.
+  Two bugs found by the new `doctor_test.sh` while testing it, both now guarded
+  by assertions: `livepid()` grepped the whole cmdline, so the shell running the
+  report matched Xvfb, openbox, tint2 AND pcmanfm at once (one pid for all four)
+  — only argv[0]/argv[1] basenames are compared now; and `for x in $(... | tr
+  ';' ' ')` hands one NUMBER per iteration, so `$2`/`$3` were empty and dash died
+  with "arithmetic expression: expecting primary" — one awk pass computes the
+  black/total counts instead.
+  Docs: README gains user-facing "Using the X11 desktop" (gesture table, sticky
+  modifiers) and "If the desktop is black" (doctor + a real transcript) sections.
+  Harnesses: doctor_test.sh 20/20 (healthy / pristine-black-items / no X server,
+  plus read-only invariants: markers survive, no grab file left behind, no shell
+  errors on stderr). ENV_VERSION 69→70.

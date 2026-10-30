@@ -55,7 +55,11 @@ if [ -n "$TOP" ]; then
   ABS=$(cd "$(dirname "$EX")" && pwd)/$(basename "$EX")
   REL=${ABS#$TOP/}
   for r in $(git -C "$TOP" log --format=%H -n 40 -- "$REL" 2>/dev/null); do
-    if git -C "$TOP" show "$r:$REL" 2>/dev/null | grep -q "wallpaper_mode=6"; then
+    # Match the EMITTED code, not any mention of it: the fix commit documents
+    # the bug in a comment containing the literal `wallpaper_mode=6`, so a plain
+    # grep picks the FIXED revision and the "before" case silently starts
+    # testing the fix (measured: distinct=1061, 0% black, assertion fails).
+    if git -C "$TOP" show "$r:$REL" 2>/dev/null | grep -qF 'echo "wallpaper_mode=6"'; then
       if git -C "$TOP" show "$r:$REL" 2>/dev/null | extract_seed - /tmp/dpt_seedfn_old.sh; then
         SEED_OLD=/tmp/dpt_seedfn_old.sh
         echo "  pre-fix seed from commit $(echo "$r" | cut -c1-7)"
