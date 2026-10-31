@@ -27,8 +27,8 @@ android {
         // (adb install / GitHub Releases), same distribution model as Termux
         // on F-Droid.
         targetSdk = 28
-        versionCode = 164
-        versionName = "0.2.64"
+        versionCode = 165
+        versionName = "0.2.65"
 
         ndk {
             abiFilters += listOf("arm64-v8a", "armeabi-v7a", "x86_64")

@@ -1347,6 +1347,12 @@ class DesktopService(
                     "${c.keymapSize()} keysyms, ${c.screenWidth}x${c.screenHeight}@${c.depth}, " +
                     "WM ${if (wmUp) "running" else "NOT running"}")
                 Log.i(TAG, "X connected: ${c.screenWidth}x${c.screenHeight}@${c.depth} vendor=${c.vendor}")
+                // v0.2.65: connected is not the same as WORKING. Prove injection
+                // end-to-end before trusting it with the user's fingers, and if
+                // the server ignores us, hand input to the guest agent instead.
+                inputProof = "pending"
+                xtestIgnored = false
+                Thread({ runInputProof(c) }, "emux-input-proof").apply { isDaemon = true }.start()
                 return true
             } catch (e: Exception) {
                 last = e
@@ -1584,6 +1590,58 @@ class DesktopService(
     /** Back-compat for the pane badge: true when ANY input path is live. */
     @Volatile var inputAgentUp = false; private set
 
+    /**
+     * v0.2.65 INPUT PROOF.
+     *
+     * Field v0.2.64: the desktop paints and the badge says
+     * "INPUT: XTEST (control plane)" in green, yet no click or key does
+     * anything. Every leg of the input path was individually plausible —
+     * touches reach the view, the transform is correct, the control plane
+     * handshakes, the 36-byte FakeInput body was measured against a live
+     * Xvfb — and FakeInput is sendNoReply, so a server that IGNORES an event
+     * looks exactly like one that honoured it. Nothing on the device could
+     * tell the difference, and with no adb there was no way to find out.
+     *
+     * So the app now proves its own input on-device, the same way it already
+     * proves the control plane ("prove the control plane is real, not just
+     * connected"): inject a motion to a known point, read the pointer back
+     * with QueryPointer, compare. Values:
+     *   pending     - control plane not up yet, or proof not yet run
+     *   ok          - the server moved the pointer where we asked
+     *   ignored     - pointer did not move and the server sent no error
+     *   rejected:E  - the server answered X error E for the injection
+     *   no-ptr-reply- the server would not answer QueryPointer at all
+     * On anything but `ok` the XTEST path is switched OFF (see [xtest]) and
+     * input falls back to the guest xdotool agent, which injects from INSIDE
+     * the guest and therefore does not depend on our wire encoding at all.
+     */
+    @Volatile var inputProof: String = "pending"; private set
+
+    /** Set when the proof showed the server ignoring/rejecting FakeInput. */
+    @Volatile private var xtestIgnored = false
+
+    /** Touches that reached DesktopView.onTouchEvent (ACTION_DOWN). */
+    @Volatile var touchCount: Long = 0L
+
+    /** Injection calls the service actually made (any transport). */
+    @Volatile var injectCount: Long = 0L
+
+    fun noteTouch() { touchCount++ }
+
+    /** What the guest agent's own markers say, for the pane badge. */
+    fun agentEvidence(): String {
+        val rt = com.emux.core.FsLayout.linuxRoot(ctx)
+        val launched = java.io.File(rt, "tmp/emux_agent_launched").isFile
+        val nox = java.io.File(rt, "tmp/emux_agent_noxtool").isFile
+        val clicked = java.io.File(rt, "tmp/emux_agent_firstclick").isFile
+        return when {
+            !launched -> "agent=never-started"
+            nox -> "agent=no-xdotool"
+            clicked -> "agent=clicked"
+            else -> "agent=idle"
+        }
+    }
+
     // X11 keysym -> xdotool key NAME, for the keysyms DesktopView produces.
     // xdotool resolves names through XStringToKeysym and the live keymap, so
     // this is layout-independent.
@@ -1663,6 +1721,21 @@ class DesktopService(
                 inputPending.pollFirst()
             } ?: continue
             runCatching {
+                // v0.2.65: open(2) on a FIFO BLOCKS until a reader appears. If
+                // the agent never started — or started and found no xdotool, in
+                // which case its read loop is gone — this thread would park
+                // here forever with no error anywhere, and the pane would keep
+                // advertising a transport that cannot deliver. The agent's own
+                // markers answer the question before we touch the FIFO.
+                val rt = com.emux.core.FsLayout.linuxRoot(ctx)
+                if (!java.io.File(rt, "tmp/emux_agent_launched").isFile) {
+                    noteInputDropped("input dropped: the guest input agent never started (no /tmp/emux_agent_launched)")
+                    runCatching { Thread.sleep(1_000) }; return@runCatching
+                }
+                if (java.io.File(rt, "tmp/emux_agent_noxtool").isFile) {
+                    noteInputDropped("input dropped: guest xdotool is missing, the agent cannot replay events")
+                    runCatching { Thread.sleep(1_000) }; return@runCatching
+                }
                 val f = fifoFile()
                 // Reopen when the agent recreated the FIFO (it rm+mkfifo's on
                 // every session start); a cached stream then points at an
@@ -1695,14 +1768,54 @@ class DesktopService(
 
     // --- injection entry points --------------------------------------------
     /** True when the XTEST control plane is live and owning input. */
-    private fun xtest(): X11Client? = x11?.takeIf { it.connected && it.xtestOpcode > 127 }
+    private fun xtest(): X11Client? =
+        x11?.takeIf { it.connected && it.xtestOpcode > 127 && !xtestIgnored }
 
     private fun surfaceXtestErrors(c: X11Client) {
         val errs = c.takeErrors()
         if (errs.isNotEmpty()) noteInfo("XTEST rejected an event: ${errs.first().describe()}")
     }
 
+    /**
+     * v0.2.65: see [inputProof]. Runs once per control-plane connection, on its
+     * own daemon thread — never the FIFO writer's single thread (which would
+     * stall real input behind it) and never the UI thread.
+     */
+    private fun runInputProof(c: X11Client) {
+        runCatching {
+            val p0 = c.queryPointerRoot()
+            if (p0 == null) { inputProof = "no-ptr-reply"; return }
+            // Aim 48 px away from wherever the pointer currently sits, clamped
+            // inside the server geometry so server-side clamping cannot fake or
+            // mask the delta we are looking for.
+            val txp = (p0.first + 48).coerceIn(4, (c.screenWidth - 4).coerceAtLeast(8))
+            val typ = (p0.second + 48).coerceIn(4, (c.screenHeight - 4).coerceAtLeast(8))
+            c.fakeMotion(txp, typ)
+            Thread.sleep(250)
+            val p1 = c.queryPointerRoot()
+            val errs = c.takeErrors()
+            if (p1 != null && kotlin.math.abs(p1.first - txp) <= 4 &&
+                kotlin.math.abs(p1.second - typ) <= 4
+            ) {
+                inputProof = "ok"
+                com.emux.EmuXLog.i("input proof OK: server pointer moved to $txp,$typ as injected")
+            } else {
+                xtestIgnored = true
+                inputProof =
+                    if (errs.isNotEmpty()) "rejected:" + errs.first().describe().take(24)
+                    else "ignored"
+                noteInfo(
+                    "input proof FAILED (server $inputProof): ptr=$p1 wanted=$txp,$typ - " +
+                        "XTEST disabled, input falls back to the guest agent (${agentEvidence()})")
+            }
+        }.onFailure { e ->
+            inputProof = "proof-error"
+            com.emux.EmuXLog.e("input proof threw", e)
+        }
+    }
+
     fun injectClick(xInXSpace: Int, yInXSpace: Int, button: Int = 1, press: Boolean) {
+        injectCount++
         val c = xtest()
         if (c != null) {
             runCatching { c.fakeButton(button, xInXSpace, yInXSpace, press); surfaceXtestErrors(c) }
@@ -1715,6 +1828,7 @@ class DesktopService(
     }
 
     fun injectMotion(x: Int, y: Int) {
+        injectCount++
         val c = xtest()
         if (c != null) { runCatching { c.fakeMotion(x, y) }; return }
         ensureInputWriter(); inputLine("M $x $y 0")
@@ -1722,6 +1836,7 @@ class DesktopService(
 
     /** Drag ended outside a click: just release button 1 at position. */
     fun fakeButtonReleaseOnly(x: Int, y: Int) {
+        injectCount++
         val c = xtest()
         if (c != null) {
             runCatching { c.fakeButton(1, x, y, false); surfaceXtestErrors(c) }
@@ -1730,17 +1845,32 @@ class DesktopService(
         ensureInputWriter(); inputLine("M $x $y 0"); inputLine("U 1 0 0")
     }
 
-    fun injectKeycode(keycode: Int, press: Boolean) { x11?.fakeKey(keycode, press) }
+    fun injectKeycode(keycode: Int, press: Boolean) {
+        injectCount++
+        x11?.fakeKey(keycode, press)
+    }
 
     private var inputDroppedNoted = false
+    private var inputDroppedReason = ""
+
+    /**
+     * v0.2.65: re-note when the REASON changes. The old once-per-session flag
+     * meant the first (often transient) reason masked every later, more
+     * specific one — and the specific one is the one that names the remedy.
+     */
     private fun noteInputDropped(reason: String =
         "input dropped: no XTEST control plane and the guest FIFO agent is unreachable " +
         "(is xdotool installed? see /tmp/emux_agent.log)") {
-        if (!inputDroppedNoted) { inputDroppedNoted = true; noteInfo(reason) }
+        if (!inputDroppedNoted || reason != inputDroppedReason) {
+            inputDroppedNoted = true
+            inputDroppedReason = reason
+            noteInfo(reason)
+        }
     }
 
     /** Tap one X11 keysym (used for Return/BackSpace/arrows/... from DesktopView). */
     fun injectKeysymTap(ks: Int): Boolean {
+        injectCount++
         val c = xtest()
         if (c != null) {
             val ok = runCatching { c.typeKeysymTap(ks) }.getOrDefault(false)
@@ -1785,6 +1915,7 @@ class DesktopService(
      * Each "click" is a press+release pair at the pointer's current position.
      */
     fun injectScroll(xInXSpace: Int, yInXSpace: Int, button: Int, clicks: Int) {
+        injectCount++
         if (clicks <= 0 || button !in 4..7) return
         val c = xtest()
         if (c != null) {
@@ -1822,6 +1953,7 @@ class DesktopService(
      */
     fun injectKeysymCombo(ks: Int, ctrl: Boolean = false, alt: Boolean = false,
                           meta: Boolean = false): Boolean {
+        injectCount++
         if (!ctrl && !alt && !meta) return injectKeysymTap(ks)
         val c = xtest()
         if (c != null) {

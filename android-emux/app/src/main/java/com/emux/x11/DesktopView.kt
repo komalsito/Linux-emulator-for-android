@@ -363,6 +363,25 @@ class DesktopView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attrs) 
                     "agent" -> "INPUT: guest xdotool agent (slow fallback)"
                     else    -> "INPUT: down - no XTEST, no agent"
                 }, 16f, sp(28f), ib)
+            // v0.2.65: the INPUT PROOF line, painted on the framebuffer itself
+            // so it survives in any screenshot the user can take:
+            //   touch= ACTION_DOWNs that reached this view (finger leg)
+            //   inj=   injection calls the service actually made (app leg)
+            //   proof= the SERVER's verdict via a QueryPointer round-trip
+            //   agent= the guest agent's own forensic markers
+            // One line, four legs, no adb required.
+            val proof = desktop?.inputProof ?: "pending"
+            val pb = Paint().apply {
+                color = when {
+                    proof == "ok" -> Color.argb(0xC0, 0x66, 0xBB, 0x6A)
+                    proof == "pending" -> Color.argb(0xC0, 0xFF, 0xCA, 0x63)
+                    else -> Color.argb(0xC0, 0xEF, 0x53, 0x50)
+                }
+                textSize = sp(10f)
+            }
+            canvas.drawText(
+                "proof=$proof touch=${desktop?.touchCount ?: 0} inj=${desktop?.injectCount ?: 0} " +
+                    (desktop?.agentEvidence() ?: ""), 16f, sp(40f), pb)
             drawGestureHint(canvas)
         }
         // v0.2.60: on-screen Esc/Tab/Ctrl/Alt/Super + wheel, drawn last so it
@@ -514,6 +533,12 @@ class DesktopView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attrs) 
                 // v0.2.61: the intro card is dismissed by the first touch, so
                 // it can never sit between the user and the desktop.
                 dismissIntroCard()
+                // v0.2.65: proof that touches reach this view at all. Field
+                // v0.2.64 could not distinguish "the server ignores injection"
+                // from "the view never sees the finger"; the pane badge prints
+                // this counter next to the injection counter so one screenshot
+                // separates the two.
+                desktop?.noteTouch()
                 // Consume the whole gesture here. Hit-testing on ACTION_UP as
                 // well would fire every chip twice - a Ctrl tap would toggle
                 // itself back off and Esc would be sent twice.

@@ -97,6 +97,7 @@ class X11Client(
         const val OP_INTERN_ATOM = 16
         const val OP_GET_PROPERTY = 20
         const val OP_SEND_EVENT = 25
+        const val OP_QUERY_POINTER = 38            // v0.2.65: the input self-test
         const val OP_GET_INPUT_FOCUS = 43          // the real XSync round-trip
         const val OP_QUERY_EXTENSION = 98
         const val OP_LIST_EXTENSIONS = 99
@@ -669,6 +670,34 @@ class X11Client(
     }
 
     fun fakeMotion(x: Int, y: Int) = xtestFake(FAKE_MOTION, 0, x, y)
+
+    /**
+     * v0.2.65 INPUT SELF-TEST instrument: where does the server think the
+     * pointer is, in root coordinates?
+     *
+     * XTEST FakeInput is fire-and-forget (sendNoReply), so a server that
+     * silently ignores it is indistinguishable from one that honoured it —
+     * which is exactly the field symptom ("INPUT: XTEST (control plane)" in
+     * green while no click does anything). QueryPointer is the only way to
+     * close that loop: inject a motion to a known point, read the pointer back,
+     * compare.
+     *
+     * xQueryPointerReq  : reqType=38, pad, length=2, window CARD32
+     * xQueryPointerReply: @1 same-screen, @8 root, @12 child,
+     *                     @16 root-x INT16, @18 root-y INT16,
+     *                     @20 win-x, @22 win-y, @24 mask
+     */
+    fun queryPointerRoot(): Pair<Int, Int>? {
+        if (rootWindow == 0) return null
+        val body = ByteBuffer.allocate(4).order(order)
+        body.putInt(rootWindow)
+        val r = requestReply(OP_QUERY_POINTER, 0, body.array()) ?: return null
+        if (r[0].toInt() != PKT_REPLY) return null
+        val rb = ByteBuffer.wrap(r).order(order)
+        val x = rb.getShort(16).toInt()
+        val y = rb.getShort(18).toInt()
+        return x to y
+    }
 
     // ============================================================ event pump
     /** Read one packet (event, reply or error); null on timeout/EOF. */
