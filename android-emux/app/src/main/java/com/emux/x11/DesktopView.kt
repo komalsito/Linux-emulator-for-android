@@ -653,21 +653,16 @@ class DesktopView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attrs) 
                     return true
                 }
                 if (overlayDown) { overlayDown = false; dragging = false; panning = false; return true }
-                // Double-tap zoom (see field below) - checked before the click,
-                // so the zooming tap does not also click.
-                val nowMs = System.currentTimeMillis()
-                val isDoubleTap = !dragging && !panning && !longPressFired &&
-                    nowMs - lastTapUpMs < 300 &&
-                    abs(event.x - lastTapUpX) < 40 && abs(event.y - lastTapUpY) < 40
-                lastTapUpMs = nowMs; lastTapUpX = event.x; lastTapUpY = event.y
-                if (isDoubleTap) {
-                    // v0.2.37: fill-screen toggle (was 2.5x zoom).
-                    coverMode = !coverMode
-                    scale = 1f; tx = 0f; ty = 0f
-                    invalidate()
-                    dragging = false; panning = false
-                    return true
-                }
+                // v0.2.66 FIX (input-dead audit): a double-tap MUST reach X as a
+                // real double-click. pcmanfm desktop icons, GTK "Execute File"
+                // dialogs and file managers all activate on the SECOND
+                // ButtonPress; v0.2.37-v0.2.65 consumed the second tap here for
+                // the fit<->fill view toggle, so the desktop only ever saw ONE
+                // click per gesture - i.e. "the desktop shows but nothing
+                // opens", no matter how healthy the transport was. The view
+                // toggle now lives on the FIT chip of the helper bar.
+                lastTapUpMs = System.currentTimeMillis()
+                lastTapUpX = event.x; lastTapUpY = event.y
                 val (x, y) = mapToX(event.x, event.y)
                 // v0.2.58 EVIDENCE ROUND: one-shot pane note carrying the
                 // exact view->X mapping of the first tap, so a screenshot
@@ -736,7 +731,7 @@ class DesktopView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attrs) 
     private val chips = listOf(
         Chip("Esc", CHIP_ESC), Chip("Tab", CHIP_TAB), Chip("Ctrl", CHIP_CTRL),
         Chip("Alt", CHIP_ALT), Chip("Super", CHIP_META), Chip("\u25B2", CHIP_UP),
-        Chip("\u25BC", CHIP_DOWN), Chip("\u232B", CHIP_BKSP),
+        Chip("\u25BC", CHIP_DOWN), Chip("\u232B", CHIP_BKSP), Chip("FIT", CHIP_FILL),
     )
     private val chipRects = ArrayList<RectF>()
     private var toggleRect = RectF()
@@ -774,6 +769,12 @@ class DesktopView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attrs) 
             CHIP_META -> { stickyMeta = !stickyMeta; invalidate() }
             CHIP_UP -> d.injectScroll(cx, cy, 4, 3)
             CHIP_DOWN -> d.injectScroll(cx, cy, 5, 3)
+            // v0.2.66 FIX: the fit<->fill view toggle USED to live on double-tap,
+            // which made a real double-click impossible - and every desktop
+            // (pcmanfm icons, file managers, "Execute/Cancel" dialogs) needs a
+            // double-click to activate anything. Double-tap is now delivered to
+            // X as a genuine double-click; the view toggle lives here instead.
+            CHIP_FILL -> { coverMode = !coverMode; scale = 1f; tx = 0f; ty = 0f; invalidate() }
             CHIP_TOGGLE -> { helperBarVisible = !helperBarVisible; persistBarVisibility(); invalidate() }
         }
         performHapticFeedback(android.view.HapticFeedbackConstants.KEYBOARD_TAP)
@@ -903,6 +904,7 @@ class DesktopView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attrs) 
         const val CHIP_ESC = 1; const val CHIP_TAB = 2; const val CHIP_CTRL = 3
         const val CHIP_ALT = 4; const val CHIP_META = 5; const val CHIP_UP = 6
         const val CHIP_DOWN = 7; const val CHIP_BKSP = 8; const val CHIP_TOGGLE = 9
+        const val CHIP_FILL = 10
         // v0.2.61 intro card: long enough to read seven lines on a phone,
         // short enough that it is gone before the user wants the screen back.
         const val HINT_MS = 11_000L

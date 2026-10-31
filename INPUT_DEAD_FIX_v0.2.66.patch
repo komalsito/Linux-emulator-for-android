@@ -1,0 +1,242 @@
+diff --git a/README.md b/README.md
+index 03536a9..75f607b 100644
+--- a/README.md
++++ b/README.md
+@@ -50,7 +50,8 @@ card, and your choice about the bar is remembered after that.
+ | **two-finger tap** | **middle click** — how you paste into an X terminal |
+ | **two-finger drag** | **scroll wheel** (up/down and left/right); pans the viewport instead once you are zoomed in |
+ | pinch | zoom the viewport |
+-| double-tap | toggle letterbox-fit ↔ fill-screen |
++| double-tap | **double click** — opens desktop icons, files and dialogs (v0.2.66: it used to be eaten by the view toggle, which is why nothing on the desktop could ever be opened) |
++| `FIT` chip (`keys` bar) | toggle letterbox-fit ↔ fill-screen |
+ | `keys` button (top-right) | on-screen **Esc, Tab, Ctrl, Alt, Super, ▲, ▼, ⌫** |
+ 
+ `Ctrl`, `Alt` and `Super` are **sticky**: tap `Ctrl`, then type `c` on the soft
+diff --git a/android-emux/app/src/main/assets/bin/emux-x11 b/android-emux/app/src/main/assets/bin/emux-x11
+index ebc92ef..3af1a94 100644
+--- a/android-emux/app/src/main/assets/bin/emux-x11
++++ b/android-emux/app/src/main/assets/bin/emux-x11
+@@ -237,6 +237,17 @@ start_furniture() {
+ seed_desktop_config() {
+   mkdir -p "$HOME/.local/share/applications" "$HOME/Desktop" \
+     "$HOME/.config/tint2" "$HOME/.config/openbox" "$HOME/.config/pcmanfm/default" 2>/dev/null
++  # v0.2.66 FIX (input-dead audit): on a phone, opening things must not depend
++  # on click timing. pcmanfm/libfm activate desktop items on a DOUBLE click by
++  # default; double-tap now reaches X as a real double-click, but libfm also
++  # offers single-click-to-open, which is the friendlier contract for touch.
++  # Only seed it when the user has no opinion yet - never overwrite a choice.
++  mkdir -p "$HOME/.config/libfm" 2>/dev/null
++  if [ ! -e "$HOME/.config/libfm/libfm.conf" ]; then
++    printf '[config]\nsingle_click=1\n' > "$HOME/.config/libfm/libfm.conf" 2>/dev/null
++  elif ! grep -q '^single_click=' "$HOME/.config/libfm/libfm.conf" 2>/dev/null; then
++    printf 'single_click=1\n' >> "$HOME/.config/libfm/libfm.conf" 2>/dev/null
++  fi
+   # --- .desktop launchers (only for installed apps) ---
+   APPS=""
+   if [ -x /usr/bin/xterm ]; then
+@@ -1223,15 +1234,29 @@ else
+       # v0.2.45: previously this branch installed NO desktop furniture at
+       # all (no tint2/pcmanfm/mousepad) - on Arch the desktop could never
+       # be more than Xvfb + a terminal, if that.
+-      pacman -Sy --noconfirm --needed xorg-server-xvfb xorg-xkbcomp xkeyboard-config xorg-xwd netpbm openbox xterm tint2 pcmanfm mousepad galculator wmctrl >&2
++      pacman -Sy --noconfirm --needed xorg-server-xvfb xorg-xkbcomp xkeyboard-config xorg-xwd netpbm openbox xterm tint2 pcmanfm mousepad galculator wmctrl xdotool >&2
+     elif command -v dnf >/dev/null 2>&1; then
+-      dnf -y --skip-broken install xorg-x11-server-Xvfb xkbcomp xkeyboard-config xorg-x11-apps netpbm nmap-ncat openbox xterm tint2 pcmanfm mousepad galculator wmctrl >&2
++      dnf -y --skip-broken install xorg-x11-server-Xvfb xkbcomp xkeyboard-config xorg-x11-apps netpbm nmap-ncat openbox xterm tint2 pcmanfm mousepad galculator wmctrl xdotool >&2
+     else
+       # v0.2.45: previously Alpine got Xvfb + xwd only - no WM, no panel,
+       # no file manager, no terminal: a black screen by construction.
+       # Alpine is also the app's DEFAULT_DISTRO, so this branch is the
+       # likeliest explanation for "other versions only show a black screen".
+-      apk add --no-cache xvfb xkbcomp xkeyboard-config xwd netpbm openbox xterm tint2 pcmanfm mousepad galculator wmctrl >&2
++      # v0.2.66 FIX (input-dead audit): `wmctrl` DOES NOT EXIST on Alpine, and
++      # `apk add` aborts the WHOLE transaction on one unknown name - so on the
++      # app's DEFAULT distro this line silently installed NOTHING: no openbox,
++      # no tint2, no pcmanfm, no xterm, and no xdotool (which the input fallback
++      # needs and which DOES exist on Alpine but was never listed). Verified on
++      # a real alpine-minirootfs-3.20.3: "ERROR: unable to select packages:
++      # wmctrl (no such package)". Retry package-by-package so one bad name can
++      # never take the whole desktop down with it again.
++      APKLIST="xvfb xkbcomp xkeyboard-config xwd netpbm openbox xterm tint2 pcmanfm mousepad galculator xdotool"
++      if ! apk add --no-cache $APKLIST >&2; then
++        echo "emux-x11: apk add aborted on an unknown name - installing one-by-one" >&2
++        for p in $APKLIST; do
++          apk add --no-cache "$p" >&2 || echo "emux-x11: apk: '$p' unavailable on this Alpine" >&2
++        done
++      fi
+     fi
+     [ -x /usr/bin/Xvfb ] && XVFB=/usr/bin/Xvfb
+   fi
+diff --git a/android-emux/app/src/main/java/com/emux/core/FsLayout.kt b/android-emux/app/src/main/java/com/emux/core/FsLayout.kt
+index d8265e3..e5a7895 100644
+--- a/android-emux/app/src/main/java/com/emux/core/FsLayout.kt
++++ b/android-emux/app/src/main/java/com/emux/core/FsLayout.kt
+@@ -18,7 +18,7 @@ import java.io.File
+  *   cache/tmp        -> $TMPDIR (cleared by OS on demand = friendly to storage)
+  */
+ object FsLayout {
+-    const val ENV_VERSION = 70  // v0.2.61: `emux-x11 doctor` read-only field report + verify_desktop now samples the actual root pixels (a running pcmanfm can still paint black)  // v0.2.60: THE DESKTOP WAS STILL BLACK - pcmanfm rice never written on a fresh install (no mkdir), wallpaper_mode=6 unparseable, per-screen desktop-items-0.conf overriding it with #000000; autostart chains a user's own file  // v0.2.59: Openbox --startup autostart, painted root, FIFO agent T/N text protocol, opt-in picom re-seed  // v0.2.56: apt-lists update in governor/REST re-seed  // v0.2.55: agent display-follow re-seed  // v0.2.54: plasma-ish rice + xdotool governor re-seed  // v0.2.53: FIFO input agent re-seed  // v0.2.52: live display following re-seed  // v0.2.51: rice + XTEST fix re-seed  // v0.2.50: lock cleanup + governor re-seed  // v0.2.46: REST logging re-seed  // v0.2.45: full visual desktop (seeded tint2 panel, Openbox menu, desktop icons, furniture on all distros) re-seed  // v0.2.43: unconditional visibility launch re-seed  // v0.2.39: furniture bring-up re-seed  // v0.2.38: immediate WM + visibility watchdog re-seed  // v0.2.37: desktop furniture + autostart re-seed  // v0.2.36: SIGHUP-proof launches re-seed  // v0.2.35: immediate visibility client re-seed  // v0.2.34: half-configured gate + visibility chain re-seed  // v0.2.32: session-scoped WM/xterm markers re-seed  // v0.2.29: verify_x freshness/quiet + unix-first re-seed  // v0.2.28: stale-X0 freshness gate + connect probe re-seed  // v0.2.25: damage-driven capture pacing re-seed  // v0.2.23: fixed aarch64 emux-rgb565 (_start argv bug) re-seed  // v0.2.20: watcher rotation-follow + complete self-heal re-seed  // v0.2.18: verify_x instrumentation + self-heal re-seed  // v0.2.16: verify_x handshake gating re-seed  // v0.2.15: perl encoder fallback + verbose conv probe re-seed  // v0.2.14: per-connection header + xterm re-seed  // v0.2.13: adopt-don't-fight ladder re-seed  // v0.2.12: conv selftest + loud stages re-seed  // v0.2.11: killer-subshell bounds instead of timeout(1) re-seed  // v0.2.10: MIT-SHM off + stage-wise grab re-seed  // v0.2.9: ladder death-check + capture timeout/per-frame push re-seed  // v0.2.8: age-filtered kill_stale_x re-seed  // v0.2.6: socket-occupation rotation + display marker re-seed  // v0.2.5: display rotation + capture session-display preflight re-seed  // v0.2.4: Xvfb unix-socket ladder + capture DISPLAY preflight re-seed  // v0.1.63: selfcheck + LD_PRELOAD belt  // v0.1.62: split cascade + xvfb watchdog re-seed  // v0.1.61: settle-pass helpers + control-plane retry re-seed  // v0.1.60: capture-chain + package-name fixes re-seed  // v0.1.59: longer guest waits re-seed  // v0.1.58: apt-collision-proof cascade re-seed  // v0.1.57: capture-toolchain cascade + repair-aware emux-capture re-seed  // v0.1.55: probe tr fix + gap-healing re-seed  // v0.1.54: terminal scrollback + desktop lifecycle fixes re-seed helpers  // v0.1.53: emux-apt-repair helper + link()->linkat() preload shim re-seed  // v0.1.47: multi-distro layout (files/distros/<id>, marker carries distro id) — bump re-seeds helpers; existing rootfs is MIGRATED, never re-downloaded  // v0.1.39: winsize watcher + Xvfb shm fallback re-seed  // v0.1.37: guest-PTY emux-init re-seed  // v0.1.36: emux-init PROOT_LOADER re-seed  // v0.1.34: emux-init.sh proot TMPDIR bind re-seed  // v0.1.28: fixed hasCompleteRootfs (was always false → re-download loop), proot native-bridge seeding, apk-installed shell/desktop components; re-seed is now CHEAP (marker re-stamp, no re-download)
++    const val ENV_VERSION = 71  // v0.2.66: Alpine apk add aborted on nonexistent 'wmctrl' (no desktop furniture at all on the default distro), +xdotool on Alpine/Arch/Fedora, libfm single_click seed  // v0.2.61: `emux-x11 doctor` read-only field report + verify_desktop now samples the actual root pixels (a running pcmanfm can still paint black)  // v0.2.60: THE DESKTOP WAS STILL BLACK - pcmanfm rice never written on a fresh install (no mkdir), wallpaper_mode=6 unparseable, per-screen desktop-items-0.conf overriding it with #000000; autostart chains a user's own file  // v0.2.59: Openbox --startup autostart, painted root, FIFO agent T/N text protocol, opt-in picom re-seed  // v0.2.56: apt-lists update in governor/REST re-seed  // v0.2.55: agent display-follow re-seed  // v0.2.54: plasma-ish rice + xdotool governor re-seed  // v0.2.53: FIFO input agent re-seed  // v0.2.52: live display following re-seed  // v0.2.51: rice + XTEST fix re-seed  // v0.2.50: lock cleanup + governor re-seed  // v0.2.46: REST logging re-seed  // v0.2.45: full visual desktop (seeded tint2 panel, Openbox menu, desktop icons, furniture on all distros) re-seed  // v0.2.43: unconditional visibility launch re-seed  // v0.2.39: furniture bring-up re-seed  // v0.2.38: immediate WM + visibility watchdog re-seed  // v0.2.37: desktop furniture + autostart re-seed  // v0.2.36: SIGHUP-proof launches re-seed  // v0.2.35: immediate visibility client re-seed  // v0.2.34: half-configured gate + visibility chain re-seed  // v0.2.32: session-scoped WM/xterm markers re-seed  // v0.2.29: verify_x freshness/quiet + unix-first re-seed  // v0.2.28: stale-X0 freshness gate + connect probe re-seed  // v0.2.25: damage-driven capture pacing re-seed  // v0.2.23: fixed aarch64 emux-rgb565 (_start argv bug) re-seed  // v0.2.20: watcher rotation-follow + complete self-heal re-seed  // v0.2.18: verify_x instrumentation + self-heal re-seed  // v0.2.16: verify_x handshake gating re-seed  // v0.2.15: perl encoder fallback + verbose conv probe re-seed  // v0.2.14: per-connection header + xterm re-seed  // v0.2.13: adopt-don't-fight ladder re-seed  // v0.2.12: conv selftest + loud stages re-seed  // v0.2.11: killer-subshell bounds instead of timeout(1) re-seed  // v0.2.10: MIT-SHM off + stage-wise grab re-seed  // v0.2.9: ladder death-check + capture timeout/per-frame push re-seed  // v0.2.8: age-filtered kill_stale_x re-seed  // v0.2.6: socket-occupation rotation + display marker re-seed  // v0.2.5: display rotation + capture session-display preflight re-seed  // v0.2.4: Xvfb unix-socket ladder + capture DISPLAY preflight re-seed  // v0.1.63: selfcheck + LD_PRELOAD belt  // v0.1.62: split cascade + xvfb watchdog re-seed  // v0.1.61: settle-pass helpers + control-plane retry re-seed  // v0.1.60: capture-chain + package-name fixes re-seed  // v0.1.59: longer guest waits re-seed  // v0.1.58: apt-collision-proof cascade re-seed  // v0.1.57: capture-toolchain cascade + repair-aware emux-capture re-seed  // v0.1.55: probe tr fix + gap-healing re-seed  // v0.1.54: terminal scrollback + desktop lifecycle fixes re-seed helpers  // v0.1.53: emux-apt-repair helper + link()->linkat() preload shim re-seed  // v0.1.47: multi-distro layout (files/distros/<id>, marker carries distro id) — bump re-seeds helpers; existing rootfs is MIGRATED, never re-downloaded  // v0.1.39: winsize watcher + Xvfb shm fallback re-seed  // v0.1.37: guest-PTY emux-init re-seed  // v0.1.36: emux-init PROOT_LOADER re-seed  // v0.1.34: emux-init.sh proot TMPDIR bind re-seed  // v0.1.28: fixed hasCompleteRootfs (was always false → re-download loop), proot native-bridge seeding, apk-installed shell/desktop components; re-seed is now CHEAP (marker re-stamp, no re-download)
+ 
+     fun root(ctx: Context): File = rootOrFallback(ctx)
+     fun usr(ctx: Context): File = File(root(ctx), "usr")
+diff --git a/android-emux/app/src/main/java/com/emux/x11/DesktopService.kt b/android-emux/app/src/main/java/com/emux/x11/DesktopService.kt
+index 87801ef..e1592d7 100644
+--- a/android-emux/app/src/main/java/com/emux/x11/DesktopService.kt
++++ b/android-emux/app/src/main/java/com/emux/x11/DesktopService.kt
+@@ -247,8 +247,16 @@ class DesktopService(
+         // no double-tap needed. Pixel budget stays capped at the old
+         // 720x1280 (921,600 px) so capture cost never grows.
+         viewAspect?.takeIf { it in 0.4f..2.8f }?.let { a ->
++            // v0.2.66 FIX (input-dead audit): the SHORT side is long*aspect on a
++            // portrait pane and long/aspect on a landscape one. `longSide / a`
++            // on a portrait phone yields >1280 and clamps to longSide itself, so
++            // EVERY portrait device got a 1280x1280 SQUARE X screen: giant
++            // letterbox bars the "no bars" comment promised away, ~1.6M px of
++            // capture per frame (a large part of the 0.5 fps field readings),
++            // and a tap->X mapping whose fit the pane never actually had.
+             val longSide = 1280
+-            val shortSide = ((longSide / a).coerceIn(360f, 1280f).toInt() / 2 * 2)
++            val shortSide = ((if (a >= 1f) longSide / a else longSide * a)
++                .coerceIn(360f, 1280f).toInt() / 2 * 2)
+             val px = longSide * shortSide
+             if (px <= 921_600 * 2) return if (a >= 1f) "${longSide}x${shortSide}x24" else "${shortSide}x${longSide}x24"
+         }
+@@ -1690,8 +1698,15 @@ class DesktopService(
+      * reads to the user as "the desktop ignores my finger".
+      */
+     private fun inputLine(line: String): Boolean {
+-        val c = x11
+-        if (c != null && c.connected) return false            // XTEST owns input
++        // v0.2.66 FIX (input-dead audit): the gate must ask "is XTEST USABLE",
++        // not "is the control plane CONNECTED". The old test returned false
++        // whenever x11.connected, but this fallback branch is only reachable
++        // when xtest() == null, i.e. exactly when connected == true AND the
++        // v0.2.65 proof set xtestIgnored. So on a server that ignores FakeInput
++        // every event was silently dropped here and the advertised guest-agent
++        // fallback never received a single line. Use xtest() (which already
++        // factors in connected && opcode>127 && !ignored).
++        if (xtest() != null) return false                     // XTEST owns input
+         synchronized(inputLock) {
+             // Coalesce consecutive motion events into the newest one.
+             if (line.startsWith("M ")) {
+@@ -1785,11 +1800,14 @@ class DesktopService(
+         runCatching {
+             val p0 = c.queryPointerRoot()
+             if (p0 == null) { inputProof = "no-ptr-reply"; return }
+-            // Aim 48 px away from wherever the pointer currently sits, clamped
+-            // inside the server geometry so server-side clamping cannot fake or
+-            // mask the delta we are looking for.
+-            val txp = (p0.first + 48).coerceIn(4, (c.screenWidth - 4).coerceAtLeast(8))
+-            val typ = (p0.second + 48).coerceIn(4, (c.screenHeight - 4).coerceAtLeast(8))
++            // v0.2.66 FIX (input-dead audit): aim AWAY from the nearest edge.
++            // With a naive +48 the target clamps onto p0 when the pointer sits
++            // near the far edge, and the proof then "passes" on a server that
++            // ignored the motion entirely (p1 == p0 == target).
++            val dxp = if (p0.first + 48 <= c.screenWidth - 4) 48 else -48
++            val dyp = if (p0.second + 48 <= c.screenHeight - 4) 48 else -48
++            val txp = (p0.first + dxp).coerceIn(4, (c.screenWidth - 4).coerceAtLeast(8))
++            val typ = (p0.second + dyp).coerceIn(4, (c.screenHeight - 4).coerceAtLeast(8))
+             c.fakeMotion(txp, typ)
+             Thread.sleep(250)
+             val p1 = c.queryPointerRoot()
+@@ -1804,6 +1822,15 @@ class DesktopService(
+                 inputProof =
+                     if (errs.isNotEmpty()) "rejected:" + errs.first().describe().take(24)
+                     else "ignored"
++                // v0.2.66 FIX (input-dead audit): the pane badge painted from
++                // inputTransport, which was set to "xtest" at connect time and
++                // never revisited - so a server that ignores FakeInput still
++                // showed a GREEN "INPUT: XTEST (control plane)". Re-state the
++                // transport now, from what will actually carry the events.
++                val rt = com.emux.core.FsLayout.linuxRoot(ctx)
++                inputTransport =
++                    if (java.io.File(rt, "tmp/emux_agent_launched").isFile) "agent" else "down"
++                inputAgentUp = inputTransport == "agent"
+                 noteInfo(
+                     "input proof FAILED (server $inputProof): ptr=$p1 wanted=$txp,$typ - " +
+                         "XTEST disabled, input falls back to the guest agent (${agentEvidence()})")
+@@ -1847,7 +1874,16 @@ class DesktopService(
+ 
+     fun injectKeycode(keycode: Int, press: Boolean) {
+         injectCount++
+-        x11?.fakeKey(keycode, press)
++        // v0.2.66 FIX: was the one entry point that bypassed xtest(), so it
++        // kept injecting into a server the proof had just declared dead while
++        // every other path had fallen back.
++        val c = xtest()
++        if (c != null) {
++            runCatching { c.fakeKey(keycode, press); surfaceXtestErrors(c) }
++                .onFailure { noteInputDropped("XTEST key failed: $it") }
++            return
++        }
++        noteInputDropped("keycode $keycode dropped: no XTEST, and the agent protocol is keysym-name based")
+     }
+ 
+     private var inputDroppedNoted = false
+diff --git a/android-emux/app/src/main/java/com/emux/x11/DesktopView.kt b/android-emux/app/src/main/java/com/emux/x11/DesktopView.kt
+index 86eab04..5da056a 100644
+--- a/android-emux/app/src/main/java/com/emux/x11/DesktopView.kt
++++ b/android-emux/app/src/main/java/com/emux/x11/DesktopView.kt
+@@ -653,21 +653,16 @@ class DesktopView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attrs)
+                     return true
+                 }
+                 if (overlayDown) { overlayDown = false; dragging = false; panning = false; return true }
+-                // Double-tap zoom (see field below) - checked before the click,
+-                // so the zooming tap does not also click.
+-                val nowMs = System.currentTimeMillis()
+-                val isDoubleTap = !dragging && !panning && !longPressFired &&
+-                    nowMs - lastTapUpMs < 300 &&
+-                    abs(event.x - lastTapUpX) < 40 && abs(event.y - lastTapUpY) < 40
+-                lastTapUpMs = nowMs; lastTapUpX = event.x; lastTapUpY = event.y
+-                if (isDoubleTap) {
+-                    // v0.2.37: fill-screen toggle (was 2.5x zoom).
+-                    coverMode = !coverMode
+-                    scale = 1f; tx = 0f; ty = 0f
+-                    invalidate()
+-                    dragging = false; panning = false
+-                    return true
+-                }
++                // v0.2.66 FIX (input-dead audit): a double-tap MUST reach X as a
++                // real double-click. pcmanfm desktop icons, GTK "Execute File"
++                // dialogs and file managers all activate on the SECOND
++                // ButtonPress; v0.2.37-v0.2.65 consumed the second tap here for
++                // the fit<->fill view toggle, so the desktop only ever saw ONE
++                // click per gesture - i.e. "the desktop shows but nothing
++                // opens", no matter how healthy the transport was. The view
++                // toggle now lives on the FIT chip of the helper bar.
++                lastTapUpMs = System.currentTimeMillis()
++                lastTapUpX = event.x; lastTapUpY = event.y
+                 val (x, y) = mapToX(event.x, event.y)
+                 // v0.2.58 EVIDENCE ROUND: one-shot pane note carrying the
+                 // exact view->X mapping of the first tap, so a screenshot
+@@ -736,7 +731,7 @@ class DesktopView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attrs)
+     private val chips = listOf(
+         Chip("Esc", CHIP_ESC), Chip("Tab", CHIP_TAB), Chip("Ctrl", CHIP_CTRL),
+         Chip("Alt", CHIP_ALT), Chip("Super", CHIP_META), Chip("\u25B2", CHIP_UP),
+-        Chip("\u25BC", CHIP_DOWN), Chip("\u232B", CHIP_BKSP),
++        Chip("\u25BC", CHIP_DOWN), Chip("\u232B", CHIP_BKSP), Chip("FIT", CHIP_FILL),
+     )
+     private val chipRects = ArrayList<RectF>()
+     private var toggleRect = RectF()
+@@ -774,6 +769,12 @@ class DesktopView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attrs)
+             CHIP_META -> { stickyMeta = !stickyMeta; invalidate() }
+             CHIP_UP -> d.injectScroll(cx, cy, 4, 3)
+             CHIP_DOWN -> d.injectScroll(cx, cy, 5, 3)
++            // v0.2.66 FIX: the fit<->fill view toggle USED to live on double-tap,
++            // which made a real double-click impossible - and every desktop
++            // (pcmanfm icons, file managers, "Execute/Cancel" dialogs) needs a
++            // double-click to activate anything. Double-tap is now delivered to
++            // X as a genuine double-click; the view toggle lives here instead.
++            CHIP_FILL -> { coverMode = !coverMode; scale = 1f; tx = 0f; ty = 0f; invalidate() }
+             CHIP_TOGGLE -> { helperBarVisible = !helperBarVisible; persistBarVisibility(); invalidate() }
+         }
+         performHapticFeedback(android.view.HapticFeedbackConstants.KEYBOARD_TAP)
+@@ -903,6 +904,7 @@ class DesktopView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attrs)
+         const val CHIP_ESC = 1; const val CHIP_TAB = 2; const val CHIP_CTRL = 3
+         const val CHIP_ALT = 4; const val CHIP_META = 5; const val CHIP_UP = 6
+         const val CHIP_DOWN = 7; const val CHIP_BKSP = 8; const val CHIP_TOGGLE = 9
++        const val CHIP_FILL = 10
+         // v0.2.61 intro card: long enough to read seven lines on a phone,
+         // short enough that it is gone before the user wants the screen back.
+         const val HINT_MS = 11_000L
