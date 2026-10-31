@@ -164,14 +164,39 @@ fi
 # handshake is the broken path on this ROM/libX11. Probe every spelling with
 # a throwaway grab and export the winner BEFORE the real pipeline starts,
 # so a unix-socket-less server can still be reached over inet.
-for d in ":$DN" "127.0.0.1:$DN" ":0" "127.0.0.1:0"; do
-  if DISPLAY="$d" "$XWD" -root -silent >/dev/null 2>>/tmp/emux_cap.err; then
-    [ "$d" = ":0" ] || echo "emux-capture: DISPLAY=:0 unusable for xwd - using $d" >&2
-    export DISPLAY="$d"
-    break
-  fi
+# v0.2.67 FIX (input-dead audit, round 2): the probe list USED to end with
+# ":0" and "127.0.0.1:0" as a last resort. That fallback is the split-brain
+# generator behind ten versions of "desktop shows but nothing is clickable":
+# one transient failure on the SESSION display at capture start (server
+# restarting after an LMK kill, unix socket not created yet, proot socket
+# race) pinned the stream to :0 FOR THE WHOLE SESSION - and :0 is precisely
+# the display a zombie Xvfb from a previous app life keeps answering on
+# forever (see emux-x11's adopt-don't-fight history). The pane then filmed
+# the zombie's old desktop (icons, no panel, zero damage = "LIVE 0.5 fps")
+# while the control plane injected into the real session server
+# ("proof=ok touch=18 inj=36" over a desktop that opens nothing). recheck
+# below compares the marker with $DN, not with the DISPLAY actually in use,
+# so the split never healed. Now: probe ONLY spellings of the session
+# display, and WAIT for it - a capture that cannot reach its own server
+# must fail loudly (the app respawns it) instead of silently filming a
+# desktop nobody can click.
+CAPD=""
+i=0
+while [ "$i" -lt 40 ]; do
+  for d in ":$DN" "127.0.0.1:$DN"; do
+    if DISPLAY="$d" "$XWD" -root -silent >/dev/null 2>>/tmp/emux_cap.err; then
+      export DISPLAY="$d"; CAPD="${d##*:}"; break 2
+    fi
+  done
+  i=$((i + 1)); sleep 0.5
 done
+[ -n "$CAPD" ] || { echo "emux-capture: session display :$DN never openable for xwd - NOT falling back to another display (v0.2.67)" >&2; exit 1; }
 echo "emux-capture: display=$DISPLAY after xwd preflight" >&2
+# v0.2.67: publish "<display> <epoch>" every loop; the Android control plane
+# reads it and refuses to stay on a different display than the one being
+# streamed (the capture plane is the truth of what the user sees).
+publish_cap_display() { echo "${DISPLAY##*:} $(date +%s)" > /tmp/emux_cap_display 2>/dev/null; }
+publish_cap_display
 
 TMPF=/tmp/emux_frame.p3
 RAW=/tmp/emux_frame.rgb
@@ -370,12 +395,25 @@ IDLE=0
 # published marker each loop; on change, re-export DISPLAY and keep going.
 recheck_display() {
   ND=$(tr -dc '0-9' < /tmp/emux_display_num 2>/dev/null)
-  if [ -n "$ND" ] && [ "$ND" != "$DN" ]; then
+  # v0.2.67 FIX: compare the marker with the DISPLAY ACTUALLY IN USE, not
+  # with the $DN variable. Before this, a preflight fallback (the old ":0"
+  # last resort) left DISPLAY and DN disagreeing forever: the marker equalled
+  # DN, so this function never fired and the stream kept filming a display
+  # the control plane was not on.
+  CUR="${DISPLAY##*:}"
+  if [ -n "$ND" ] && [ "$ND" != "$CUR" ]; then
     DN="$ND"; XP=$((6000 + DN))
     if [ -e /tmp/.X11-unix/X$DN ]; then NDISP=":$DN"; else NDISP="127.0.0.1:$DN"; fi
-    echo "emux-capture: display rotated - following to $NDISP" >&2
-    export DISPLAY="$NDISP"
+    # only follow if the new display actually opens - never trade a living
+    # stream for a marker that points at a dead server.
+    if DISPLAY="$NDISP" "$XWD" -root -silent >/dev/null 2>>/tmp/emux_cap.err; then
+      echo "emux-capture: display rotated - following to $NDISP (was $DISPLAY)" >&2
+      export DISPLAY="$NDISP"
+    else
+      echo "emux-capture: marker says :$ND but it is not openable - staying on $DISPLAY" >&2
+    fi
   fi
+  publish_cap_display
 }
 PREV=/tmp/emux_frame.prev
 rm -f "$PREV" 2>/dev/null

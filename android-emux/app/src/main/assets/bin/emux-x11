@@ -1554,8 +1554,7 @@ fi
 # agent replays them with xdotool INSIDE the guest, on the session's
 # DISPLAY. The filesystem is the one channel proven bidirectional
 # (markers, logs, frames-config all ride it already).
-if [ ! -e /tmp/emux_agent_launched ]; then
-  touch /tmp/emux_agent_launched
+start_agent() {
   nohup /bin/sh -c '
     FIFO=/tmp/emux_in
     rm -f "$FIFO" 2>/dev/null
@@ -1659,6 +1658,14 @@ if [ ! -e /tmp/emux_agent_launched ]; then
       esac
     done
   ' >/tmp/emux_agent.log 2>&1 </dev/null &
+  echo $! > /tmp/emux_agent_pid 2>/dev/null
+}
+# v0.2.67 FIX: the agent became a FUNCTION so the governor can relaunch it
+# when the LMK reaps it mid-session (the fallback transport used to cease to
+# exist silently exactly when a dead control plane needed it).
+if [ ! -e /tmp/emux_agent_launched ]; then
+  touch /tmp/emux_agent_launched
+  start_agent
   # v0.2.58 EVIDENCE ROUND: delayed deep census. ~45 s in, dump pid +
   # process state + DISPLAY of every desktop participant plus the root
   # pixmap verdict into the agent log - proves who is alive, on which
@@ -1702,6 +1709,17 @@ fi
   # /tmp/emux_rest.log); start_furniture launches them the tick they land.
   while [ "$i" -lt 240 ]; do
     sleep 5
+    # v0.2.67: keep the FALLBACK transport alive. The agent is the only input
+    # path that does not depend on our persistent control-plane socket; if
+    # Android's LMK reaps it mid-session (no root => oom protection denied),
+    # relaunch it from its pidfile instead of ceasing to exist silently.
+    if [ -r /tmp/emux_agent_pid ]; then
+      APID=$(tr -dc '0-9' < /tmp/emux_agent_pid 2>/dev/null)
+      if [ -n "$APID" ] && ! kill -0 "$APID" 2>/dev/null; then
+        echo "emux-x11: governor: input agent (pid $APID) dead - relaunching" >&2
+        start_agent
+      fi
+    fi
     if { [ ! -x /usr/bin/tint2 ] || [ ! -x /usr/bin/pcmanfm ] || [ ! -x /usr/bin/xdotool ] || [ ! -x /usr/bin/picom ]; } && [ "$APTTRIED" = 0 ]; then
       if ! apt_busy; then
         APTTRIED=1

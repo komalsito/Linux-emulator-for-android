@@ -387,8 +387,16 @@ class DesktopView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attrs) 
                 }
                 textSize = sp(10f)
             }
+            // v0.2.67 FIX (input-dead audit, round 2): the line gains three
+            // fields that name the two failure classes a connect-time proof
+            // cannot see: fail= injection writes that THREW (a control plane
+            // whose socket died mid-session keeps counting inj= while every
+            // write fails), ctrl=/cap= the display each plane is actually on
+            // (a split means input goes to a desktop nobody sees).
             canvas.drawText(
                 "proof=$proof touch=${desktop?.touchCount ?: 0} inj=${desktop?.injectCount ?: 0} " +
+                    "fail=${desktop?.injectFail ?: 0} ctrl=:${desktop?.controlDisplay ?: -1} " +
+                    "cap=:${desktop?.captureDisplay ?: -1} " +
                     (desktop?.agentEvidence() ?: ""), 16f, sp(40f), pb)
             drawGestureHint(canvas)
         }
@@ -907,15 +915,22 @@ class DesktopView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attrs) 
                 if (stickyMeta) append("Super ")
             }.trim()
             val mp = Paint().apply { color = Color.argb(0xE0, 0x4F, 0xC3, 0xF7); textSize = sp(10f) }
-            canvas.drawText("next key: $mods + ...", 16f, sp(52f), mp)
+            canvas.drawText("next key: $mods + ...", 16f, sp(72f), mp)
         }
     }
 
     private fun drawGestureHint(canvas: Canvas) {
+        // v0.2.67 FIX: the legend used to paint at sp(40)/sp(50) - the SAME y
+        // as the v0.2.65 proof line (sp(40)) - so in every field screenshot
+        // the two overprinted into unreadable garbage and the one line that
+        // disambiguates the input path ("proof=ok touch=18 inj=36 ...") could
+        // not be read. Legend moves below the badges; text now matches the
+        // v0.2.66 gesture contract (double-tap is a real double-click; the
+        // fit<->fill toggle lives on the FIT chip).
         val hp = Paint().apply { color = Color.argb(0x78, 0xFF, 0xFF, 0xFF); textSize = sp(9f) }
-        canvas.drawText("tap=click  long-press=right(hold+drag)  2-finger tap=middle", 16f, sp(40f), hp)
-        canvas.drawText("2-finger drag=scroll (pan when zoomed)  pinch=zoom  double-tap=fill  keys=Esc/Tab/Ctrl/Alt",
-            16f, sp(50f), hp)
+        canvas.drawText("tap=click  long-press=right(hold+drag)  2-finger tap=middle", 16f, sp(52f), hp)
+        canvas.drawText("2-finger drag=scroll (pan when zoomed)  pinch=zoom  double-tap=2xclick  FIT=fill",
+            16f, sp(62f), hp)
     }
 
     /**
