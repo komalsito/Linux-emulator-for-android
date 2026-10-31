@@ -223,7 +223,50 @@ corner. The third badge line now disambiguates everything:
 - `touch=0` while tapping → an overlay/pointer-events problem in the view
   hierarchy (nothing in this audit; would be a new finding).
 
-## 6. Scope notes
+## 6. Field correlation, and the invisible cursor
+
+The device report that arrived with this audit pins the branch:
+
+- badge: **`proof=ok`** — the server really does honour FakeInput on this ROM;
+- distro: **Ubuntu 24.04** — so §3.3 (Alpine) is not this device's blocker;
+- "**there is no visible cursor coming from the app**".
+
+With `proof=ok` the transport is exonerated and §3.1 is the whole "nothing
+opens" story: every double-tap was consumed by the fit/fill toggle, so the
+desktop only ever saw single clicks — and single clicks select, they never
+open (measured in §2). Worse, each attempted double-tap also flipped
+`coverMode`, changing the scale that `mapToX` inverts, so repeated attempts
+made the mapping *worse* while looking like input failure.
+
+The missing cursor is a second, independent usability defect: an `xwd`/`GetImage`
+capture **can never contain the X cursor sprite** — the server's sprite layer
+(miSprite's GetImage hook) removes it from every grab. So on a phone the user
+has literally no visual evidence that a tap landed anywhere. v0.2.66 therefore
+draws a synthetic pointer in `DesktopView` at the last injected X position
+(inverse-mapped through the same transform as `mapToX`, so it stays glued to
+the finger through zoom/pan/fit changes), starts it at the screen centre where
+Xvfb parks the real pointer, and moves it on trackpad/mouse **hover** without
+clicking (`onHoverEvent`).
+
+## 7. Build + verification
+
+| Check | Result |
+|---|---|
+| kotlinc single pass | `exit=0 errors=0`, 25 kt → 254 classes |
+| class audit | 504 classes, all traceable |
+| `verify_apk.sh` on the built APK | **51 passed / 0 failed / 0 skipped** |
+| version stamp | `com.emux` versionCode **166**, versionName **0.2.66** |
+| signature | committed keystore, SHA-256 `5e3ef254…a1fa` (same as every release since v0.1.47, so `adb install -r` works) |
+| new code in dex | `FIT`, `drawCursor`, `onHoverEvent`, `xtestIgnored` FOUND |
+| guest asset in APK | Alpine `APKLIST` has no `wmctrl` and has `xdotool`; Arch/Fedora carry `xdotool`; `single_click=1` seed present |
+| regression test | `tools/x11probe/desktop_click_test.sh` → 4/4 PASS |
+| root `emux-debug.apk` | refreshed to the v0.2.66 build (6,856,541 B) |
+
+Install with `adb install -r emux-debug.apk` (same signature, no uninstall,
+rootfs survives). `ENV_VERSION` 71 re-seeds `emux-x11` onto existing installs,
+so the Alpine/libfm fixes reach devices without a reinstall.
+
+## 8. Scope notes
 
 - `ENV_VERSION` 70 → 71 (guest script changed: Alpine lists, libfm seed).
 - No new dependency, no protocol change, no manifest change.

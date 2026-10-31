@@ -221,6 +221,12 @@ class DesktopView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attrs) 
     fun onNewFrame(frameId: Int) {
         if (frameId != lastFrameId) {
             lastFrameId = frameId
+            // v0.2.66: Xvfb parks the pointer at the screen centre, so start the
+            // drawn cursor there - the pane must never be cursor-less again.
+            if (cursorX < 0f) {
+                val f = desktop?.currentFrame
+                if (f != null) { cursorX = f.width / 2f; cursorY = f.height / 2f }
+            }
             // v0.2.61: the intro must key off the FIRST FRAME, not off view
             // construction - before that there is no desktop to explain.
             if (!introChecked) { introChecked = true; maybeShowIntro() }
@@ -346,6 +352,8 @@ class DesktopView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attrs) 
         srcRect.set(0, 0, f.width, f.height)
         dstRect.set(left.toInt(), top.toInt(), (left + w).toInt(), (top + h).toInt())
         canvas.drawBitmap(f, srcRect, dstRect, bmpPaint)
+        // v0.2.66: the synthetic pointer, above the frame and below the badges
+        drawCursor(canvas)
         // v0.2.33 LIVE badge (see onNewFrame)
         val fps = frameTimes.size / 2f
         if (fps > 0f) {
@@ -392,7 +400,7 @@ class DesktopView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attrs) 
     }
 
     /** screen px → X px (clamped into server geometry). */
-    private fun mapToX(sx: Float, sy: Float): Pair<Int, Int> {
+    private fun mapToX(sx: Float, sy: Float, markCursor: Boolean = true): Pair<Int, Int> {
         val f = desktop?.currentFrame ?: return 0 to 0
         val fitScale = if (coverMode) max(width.toFloat() / f.width, height.toFloat() / f.height)
                        else min(width.toFloat() / f.width, height.toFloat() / f.height)
@@ -402,7 +410,69 @@ class DesktopView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attrs) 
         val top = (height - h) / 2 + ty
         val x = ((sx - left) / s).toInt().coerceIn(0, f.width - 1)
         val y = ((sy - top) / s).toInt().coerceIn(0, f.height - 1)
+        // v0.2.66: remember where the X pointer now is, so the pane can DRAW a
+        // cursor. A captured frame can never contain the real one: the X
+        // server's sprite layer removes the cursor from every GetImage, which
+        // is why the desktop has been cursor-less on device and every tap had
+        // no visible consequence at all.
+        if (markCursor) { cursorX = x.toFloat(); cursorY = y.toFloat() }
         return x to y
+    }
+
+    /** X px → view px, the exact inverse of [mapToX] (for the drawn cursor). */
+    private fun xToView(x: Float, y: Float): Pair<Float, Float> {
+        val f = desktop?.currentFrame ?: return -1f to -1f
+        val fitScale = if (coverMode) max(width.toFloat() / f.width, height.toFloat() / f.height)
+                       else min(width.toFloat() / f.width, height.toFloat() / f.height)
+        val s = fitScale * scale.coerceIn(1f, 6f)
+        val w = f.width * s; val h = f.height * s
+        val left = (width - w) / 2 + tx
+        val top = (height - h) / 2 + ty
+        return left + x * s to top + y * s
+    }
+
+    /**
+     * v0.2.66: draw the pointer. The capture pipeline cannot show the X cursor
+     * (the server strips the sprite from every GetImage), so without this the
+     * user gets no feedback at all that a tap landed - which read as "input is
+     * dead" even when the proof said ok. Trackpad/mouse hover moves it without
+     * clicking (see onHoverEvent).
+     */
+    private var cursorX = -1f
+    private var cursorY = -1f
+    private val cursorPath = android.graphics.Path()
+    private fun drawCursor(canvas: Canvas) {
+        if (cursorX < 0f || cursorY < 0f) return
+        val (vx, vy) = xToView(cursorX, cursorY)
+        if (vx < -40f || vy < -40f || vx > width + 40f || vy > height + 40f) return
+        val u = dp(1.2f)                       // one "cursor pixel" in view px
+        cursorPath.reset()
+        cursorPath.moveTo(vx, vy)
+        cursorPath.lineTo(vx, vy + 14 * u)
+        cursorPath.lineTo(vx + 3.6f * u, vy + 10.6f * u)
+        cursorPath.lineTo(vx + 6.2f * u, vy + 15.4f * u)
+        cursorPath.lineTo(vx + 8.4f * u, vy + 14.2f * u)
+        cursorPath.lineTo(vx + 5.8f * u, vy + 9.6f * u)
+        cursorPath.lineTo(vx + 10.4f * u, vy + 9.6f * u)
+        cursorPath.close()
+        canvas.drawPath(cursorPath, Paint().apply {
+            style = Paint.Style.FILL; color = Color.WHITE; isAntiAlias = true
+        })
+        canvas.drawPath(cursorPath, Paint().apply {
+            style = Paint.Style.STROKE; strokeWidth = 1.4f * u
+            color = Color.argb(0xE0, 0x10, 0x14, 0x1A); isAntiAlias = true
+        })
+    }
+
+    /** Trackpad / mouse hover: move the drawn cursor, never inject a click. */
+    override fun onHoverEvent(event: android.view.MotionEvent): Boolean {
+        if (event.actionMasked == android.view.MotionEvent.ACTION_HOVER_MOVE ||
+            event.actionMasked == android.view.MotionEvent.ACTION_HOVER_ENTER) {
+            mapToX(event.x, event.y)
+            invalidate()
+            return true
+        }
+        return super.onHoverEvent(event)
     }
 
     // ------------------------- gestures -------------------------
@@ -759,7 +829,7 @@ class DesktopView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attrs) 
 
     private fun handleChip(id: Int) {
         val d = desktop ?: return
-        val (cx, cy) = mapToX(width / 2f, height / 2f)
+        val (cx, cy) = mapToX(width / 2f, height / 2f, markCursor = false)
         when (id) {
             CHIP_ESC -> sendKeysym(0xFF1B)
             CHIP_TAB -> sendKeysym(0xFF09)
