@@ -791,6 +791,53 @@ class DesktopService(
                         }
                     }
                 }
+                // v0.2.67 FIX (input-dead audit, round 2): CONTINUOUS input
+                // proof + plane agreement. The connect-time proof certifies
+                // the server ONCE; nothing revisited it, and the rotation
+                // watcher above only reacts to a display NUMBER change. Two
+                // failure classes therefore stayed invisible for ten
+                // versions:
+                //  (A) the server behind our socket dies and is restarted on
+                //      the SAME number (LMK kill on a non-rooted device ->
+                //      xvfb watchdog relaunch): emux-capture opens a FRESH
+                //      xwd connection per frame and recovers transparently,
+                //      while our persistent control-plane socket is a corpse
+                //      - live desktop, green badge, zero response;
+                //  (B) the two planes disagree on the display (zombie socket
+                //      ladder / tcp-vs-unix fallbacks / marker races): input
+                //      lands on a desktop nobody streams.
+                // Every 5 s we (1) compare our display with the one
+                // emux-capture publishes (/tmp/emux_cap_display - the capture
+                // plane is by definition the truth of what the user sees),
+                // and (2) round-trip a QueryPointer on the control plane, the
+                // cheapest possible proof that OUR connection still has a
+                // living server on the end. Either miss recycles the control
+                // plane (and input rides the guest agent meanwhile).
+                scope.launch {
+                    while (isActive && state.value != State.IDLE) {
+                        kotlinx.coroutines.delay(5_000)
+                        val cap = freshCaptureDisplay()
+                        if (cap != null) captureDisplay = cap
+                        val c = xtest() ?: continue
+                        if (cap != null && cap != displayNum) {
+                            displayNum = cap
+                            recycleControlPlane(
+                                "capture streams :$cap but the control plane is on a different display")
+                            continue
+                        }
+                        val alive = runCatching { c.queryPointerRoot() }.getOrNull()
+                        if (alive == null) {
+                            keepaliveMiss++
+                            if (keepaliveMiss >= 2) {
+                                keepaliveMiss = 0
+                                recycleControlPlane(
+                                    "keepalive: the control-plane server missed 2 QueryPointer round-trips")
+                            } else {
+                                noteInfo("keepalive: QueryPointer miss #$keepaliveMiss (proot load?) - one more recycles the control plane")
+                            }
+                        } else keepaliveMiss = 0
+                    }
+                }
                 // v0.2.48 FIELD FIX: once frames flow, the frameless pane
                 // (and its history) is hidden behind the desktop bitmap and
                 // the 60 s terminal auto-dump never arms - so a furniture
@@ -1329,6 +1376,19 @@ class DesktopService(
                     java.io.File(com.emux.core.FsLayout.linuxRoot(ctx), "tmp/emux_display_num")
                         .readText().trim().toIntOrNull()
                 }.getOrNull()?.let { displayNum = it }
+                // v0.2.67 FIX: the CAPTURE plane is the truth of what the user
+                // sees; emux-capture publishes "<display> <epoch>" every loop.
+                // When that publication is fresh it outranks the marker (which
+                // a raced or orphaned guest writer can hold at a number nobody
+                // streams), so a reconnect can never re-land on a display the
+                // pane is not showing.
+                freshCaptureDisplay()?.let { cap ->
+                    if (cap != displayNum) {
+                        noteInfo("control plane: capture streams :$cap, marker said :$displayNum - following the capture")
+                        displayNum = cap
+                    }
+                    captureDisplay = cap
+                }
                 // v0.2.29: the old tcp pre-connect could NEVER succeed
                 // against a unix-only server (the field ROM's Xvfb binds
                 // unix, never tcp), so it threw every retry and the
@@ -1786,6 +1846,74 @@ class DesktopService(
     private fun xtest(): X11Client? =
         x11?.takeIf { it.connected && it.xtestOpcode > 127 && !xtestIgnored }
 
+    // ------------------------------------------------------------------
+    // v0.2.67 FIX (input-dead audit, round 2): a control plane that FAILS A
+    // WRITE IS A DEAD CONTROL PLANE - and until now nothing in the app could
+    // ever notice. `X11Client.connected` only flips in connect()/close(); the
+    // inject path never reads the socket, so a connection whose server went
+    // away mid-session (Xvfb restarted on the SAME display number after an
+    // LMK kill on a non-rooted device, xvfb watchdog recycle, proot socket
+    // translation drop, server-side client disconnect) kept "owning" input
+    // forever: every fakeButton threw inside runCatching, the note landed in
+    // the history ring that frames flow over (invisible), the badge stayed
+    // green on the connect-time proof, inj= kept counting writes that never
+    // arrived, and the FIFO fallback could not engage because xtest() still
+    // returned the corpse (connected == true). Field signature, verbatim
+    // from the v0.2.66 device screenshot: "INPUT: XTEST (control plane)" +
+    // "proof=ok touch=18 inj=36 agent=idle" over a desktop that opens
+    // nothing and never damages (steady "LIVE 0.5 fps" idle heartbeat).
+    // Two consecutive failed writes now recycle the connection: close it,
+    // hand input to the guest agent IMMEDIATELY (xtest() goes null so the
+    // inputLine gate opens), and reconnect + re-proof in the background.
+    @Volatile private var ctrlWriteFails = 0
+    @Volatile private var keepaliveMiss = 0
+    @Volatile var injectFail: Long = 0L; private set
+    @Volatile private var recycling = false
+
+    /** The display the control plane is currently connected to. */
+    val controlDisplay: Int get() = displayNum
+
+    /** The display emux-capture actually streams (published guest-side). */
+    @Volatile var captureDisplay: Int = -1; private set
+
+    private fun controlPlaneFailure(reason: String) {
+        injectFail++
+        ctrlWriteFails++
+        if (ctrlWriteFails >= 2) recycleControlPlane(reason)
+        else noteInfo("control plane write failed (#$ctrlWriteFails): ${reason.take(160)}")
+    }
+
+    private fun recycleControlPlane(reason: String) {
+        if (recycling) return
+        recycling = true
+        ctrlWriteFails = 0
+        noteInfo(
+            "v0.2.67: control plane DEAD (${reason.take(200)}) - input hands over to the " +
+                "guest agent now; reconnecting + re-proofing in the background")
+        runCatching { x11?.close() }
+        x11 = null
+        inputProof = "pending"
+        val rt = com.emux.core.FsLayout.linuxRoot(ctx)
+        inputTransport =
+            if (java.io.File(rt, "tmp/emux_agent_launched").isFile) "agent" else "down"
+        inputAgentUp = inputTransport == "agent"
+        scope.launch {
+            runCatching { connectControlPlane(30_000) }
+            recycling = false
+        }
+    }
+
+    /** v0.2.67: parse "<display> <epoch>" as published by emux-capture. */
+    private fun freshCaptureDisplay(maxAgeSec: Long = 30): Int? = runCatching {
+        val t = java.io.File(com.emux.core.FsLayout.linuxRoot(ctx), "tmp/emux_cap_display")
+            .readText().trim()
+        val parts = t.split(Regex("\\s+"))
+        val n = parts.getOrNull(0)?.toIntOrNull() ?: return@runCatching null
+        val ts = parts.getOrNull(1)?.toLongOrNull() ?: return@runCatching null
+        val age = System.currentTimeMillis() / 1000 - ts
+        if (age in 0..maxAgeSec) n else null
+    }.getOrNull()
+
     private fun surfaceXtestErrors(c: X11Client) {
         val errs = c.takeErrors()
         if (errs.isNotEmpty()) noteInfo("XTEST rejected an event: ${errs.first().describe()}")
@@ -1846,7 +1974,7 @@ class DesktopService(
         val c = xtest()
         if (c != null) {
             runCatching { c.fakeButton(button, xInXSpace, yInXSpace, press); surfaceXtestErrors(c) }
-                .onFailure { noteInputDropped("XTEST click failed: $it") }
+                .onFailure { controlPlaneFailure("XTEST click failed: $it") }
             return
         }
         ensureInputWriter()
@@ -1857,7 +1985,11 @@ class DesktopService(
     fun injectMotion(x: Int, y: Int) {
         injectCount++
         val c = xtest()
-        if (c != null) { runCatching { c.fakeMotion(x, y) }; return }
+        if (c != null) {
+            runCatching { c.fakeMotion(x, y) }
+                .onFailure { controlPlaneFailure("XTEST motion failed: $it") }
+            return
+        }
         ensureInputWriter(); inputLine("M $x $y 0")
     }
 
@@ -1867,6 +1999,7 @@ class DesktopService(
         val c = xtest()
         if (c != null) {
             runCatching { c.fakeButton(1, x, y, false); surfaceXtestErrors(c) }
+                .onFailure { controlPlaneFailure("XTEST release failed: $it") }
             return
         }
         ensureInputWriter(); inputLine("M $x $y 0"); inputLine("U 1 0 0")
@@ -1880,7 +2013,7 @@ class DesktopService(
         val c = xtest()
         if (c != null) {
             runCatching { c.fakeKey(keycode, press); surfaceXtestErrors(c) }
-                .onFailure { noteInputDropped("XTEST key failed: $it") }
+                .onFailure { controlPlaneFailure("XTEST key failed: $it") }
             return
         }
         noteInputDropped("keycode $keycode dropped: no XTEST, and the agent protocol is keysym-name based")
@@ -1937,8 +2070,15 @@ class DesktopService(
         if (ch == '\b') return injectKeysymTap(0xFF08)
         val c = xtest()
         if (c != null) {
-            val ok = runCatching { c.typeChar(ch) }.getOrDefault(false)
-            if (ok) { surfaceXtestErrors(c); return true }
+            // v0.2.67 FIX: falling through to inputLine() here was a silent
+            // drop - while XTEST owns input, inputLine()'s gate returns false,
+            // so a failed typeChar (write threw, or keysym not in keymap)
+            // vanished with no note at all. Distinguish the two.
+            val res = runCatching { c.typeChar(ch) }
+            res.onFailure { controlPlaneFailure("typeChar threw: $it"); return false }
+            if (res.getOrDefault(false)) { surfaceXtestErrors(c); return true }
+            noteInputDropped("char '$ch' has no keymap encoding on this server - dropped")
+            return false
         }
         ensureInputWriter()
         return inputLine("T $ch")
