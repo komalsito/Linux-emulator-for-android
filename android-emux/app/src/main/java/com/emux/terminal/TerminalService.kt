@@ -11,8 +11,14 @@ import com.emux.MainActivity
 import com.emux.R
 import com.emux.core.BootstrapProgress
 import com.emux.core.RootManager
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+
+/** v0.2.64: shorthand for the health-gate result (nested enum, so it cannot be
+ *  imported as a value any other way without repeating the qualifier). */
+private typealias GuestHealth = com.emux.core.BootstrapManager.GuestHealth
 
 /**
  * Hosts all TerminalSessions in one foreground process — exactly Termux's model:
@@ -143,6 +149,14 @@ class TerminalService : LifecycleService() {
     }
 
     private val root by lazy { RootManager(this) }
+
+    /**
+     * v0.2.64: used ONLY for the pre-session guest health gate. A single
+     * instance is shared by every session so the apt lock and the repair state
+     * stay coherent across respawns.
+     */
+    private val bootstrap by lazy { com.emux.core.BootstrapManager(this) }
+
     private val sessions = mutableListOf<TerminalSession>()
     private var nextId = 1
 
@@ -175,12 +189,91 @@ class TerminalService : LifecycleService() {
         return android.app.Service.START_STICKY // like Termux: survive task-swipe, restart only if killed
     }
 
-    private fun newSession(command: String) {
+    /** How long the gate will wait for a concurrent apt/dpkg transaction before
+     *  it gives up and starts the shell anyway. Matches the budget the desktop
+     *  cascade uses for the same lock ("up to 90 s"). */
+    private val APT_LOCK_WAIT_MS = 90_000L
+
+    /**
+     * v0.2.64: push host-side text onto the terminal screen. The gate below can
+     * hold a session for up to ~90 s while dpkg repairs; without this the user
+     * stares at a blank prompt and concludes the app broke again. Plain text, no
+     * ANSI — VtTerminalView renders it and we never risk a half-parsed escape
+     * sequence landing mid-prompt. Retried briefly because `scrollback` is
+     * BUFFERED and may not have a consumer attached yet.
+     */
+    private fun banner(s: TerminalSession, text: String) {
+        com.emux.EmuXLog.i("terminal-banner: $text")
+        val bytes = "\r\n$text\r\n".toByteArray()
+        repeat(3) {
+            if (s.scrollback.trySend(bytes).isSuccess) return
+            runCatching { Thread.sleep(200) }
+        }
+    }
+
+    /**
+     * v0.2.64 TERMINAL HEALTH GATE — the fix for `proot warning: signal 11` on
+     * every keystroke. See BootstrapManager.ensureGuestHealthy for the full
+     * post-mortem; in short: the desktop launch path has pre-repaired the rootfs
+     * since v0.1.72, the terminal path never did, so a half-installed libc-bin
+     * SIGSEGV'd every guest execve and then exhausted MAX_AUTO_RESTARTS.
+     *
+     * Runs on Dispatchers.IO. Cheap (a few file reads) when the guest is
+     * healthy, so the common path is unchanged; when the rootfs IS damaged this
+     * blocks the shell for the length of one dpkg repair — which is the point,
+     * because a shell spawned into a half-swapped library set cannot work.
+     */
+    private fun gateGuestHealth(s: TerminalSession, priorSegv: Int) {
+        var h = GuestHealth.HEALTHY
+        var waitedMs = 0L
+        var announcedLock = false
+        while (true) {
+            h = runCatching {
+                bootstrap.ensureGuestHealthy("terminal") { m -> banner(s, m) }
+            }.getOrElse { GuestHealth.HEALTHY }
+            if (h != GuestHealth.LOCK_BUSY || waitedMs >= APT_LOCK_WAIT_MS) break
+            if (!announcedLock) {
+                announcedLock = true
+                banner(s, "terminal: an apt/dpkg transaction is running - waiting for it, because a shell started now would crash into a half-swapped library set")
+            }
+            runCatching { Thread.sleep(3_000) }
+            waitedMs += 3_000
+        }
+        // Always fail OPEN: a damaged shell still beats no shell at all.
+        when (h) {
+            GuestHealth.REPAIR_FAILED ->
+                banner(s, "terminal: the rootfs could not be repaired automatically - the log tail (Settings > About) has the reason")
+            GuestHealth.NOT_READY ->
+                banner(s, "terminal: the Linux rootfs is not installed yet - starting in degraded mode until bootstrap finishes")
+            GuestHealth.LOCK_BUSY ->
+                banner(s, "terminal: still waiting on apt after ${APT_LOCK_WAIT_MS / 1000}s - starting anyway; if every command prints 'signal 11', close the Desktop tab and retry")
+            else -> {}
+        }
+        // dpkg looks clean yet the guest still segfaulted: the remaining
+        // documented causes are an ABI/loader mismatch or a kill-sweep hitting
+        // proot's own tracer. Say so rather than silently respawning into the
+        // same wall — the user has no adb and this screen is their only window.
+        if (priorSegv > 0 && h == GuestHealth.HEALTHY) {
+            banner(s, "terminal: the previous shell died with SIGSEGV $priorSegv time(s) but dpkg reports clean - if it repeats, the guest binaries do not match this device's ABI/loader; see the log tail (Settings > About)")
+        }
+    }
+
+    private fun newSession(command: String, priorSegv: Int = 0) {
         try {
             val s = TerminalSession(nextId++, this, root, command)
             sessions += s
-            s.start()
             refresh()
+            // v0.2.64: gate BEFORE start(). The session object exists first so
+            // the UI has something to attach to and the gate's banners have a
+            // screen to land on; the child process is only spawned once the
+            // rootfs is known-healthy (or the wait has been exhausted).
+            lifecycleScope.launch {
+                withContext(Dispatchers.IO) { gateGuestHealth(s, priorSegv) }
+                withContext(Dispatchers.Main) {
+                    s.start()
+                    refresh()
+                }
+            }
             // v0.1.18 BUGFIX #4: when a session's child dies (exit code != 0 or a
             // dead-on-arrival launcher), the registry kept the corpse forever and
             // MainActivity re-attached to it — the UI looked "bootstrapped but
@@ -210,8 +303,13 @@ class TerminalService : LifecycleService() {
                         lastAutoRestartMs = System.currentTimeMillis()
                         sessions.remove(s)
                         refresh()
-                        com.emux.EmuXLog.e("session ${s.id} died abnormally — respawning")
-                        newSession(command)
+                        com.emux.EmuXLog.e("session ${s.id} died abnormally — respawning" +
+                            if (s.segvDetected) " after ${s.segvCount} guest SIGSEGV(s)" else "")
+                        // v0.2.64: carry the crash evidence into the respawn so
+                        // the gate can heal the rootfs first (and, if dpkg turns
+                        // out clean, tell the user what else to look at) instead
+                        // of respawning straight back into the same SIGSEGV.
+                        newSession(command, priorSegv = if (s.segvDetected) s.segvCount else 0)
                     } else if (st == TerminalSession.State.DEAD) {
                         sessions -= s
                         refresh()

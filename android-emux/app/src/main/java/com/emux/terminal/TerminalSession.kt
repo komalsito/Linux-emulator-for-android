@@ -121,6 +121,33 @@ class TerminalSession(
      *  garble is diagnosed from what came LAST, not first). */
     val streamTail = StringBuilder()
 
+    /**
+     * v0.2.64: set the moment the child's output carries proot's crash
+     * signature. `proot warning: signal 11` means the TRACEE died with SIGSEGV —
+     * proot itself is fine, the guest exec did not survive. On a half-installed
+     * libc-bin (v0.2.41) EVERY execve dies this way, so the shell is unusable
+     * and the only remedy is a dpkg repair, which the terminal path never used
+     * to trigger. TerminalService watches this flag so the auto-respawn path
+     * heals the rootfs instead of burning MAX_AUTO_RESTARTS on a guest that can
+     * never run, and so the user gets a sentence instead of a bare "signal 11".
+     *
+     * Detected from streamTail rather than from a second collector on
+     * `scrollback`: that channel has exactly ONE consumer (the terminal view),
+     * and tapping it here would steal bytes off the user's screen. streamTail
+     * already retains the last 600 characters of the same stream, and the
+     * signature is pure printable ASCII so the <xx> escaping never splits it.
+     */
+    @Volatile var segvDetected: Boolean = false
+        private set
+
+    /** v0.2.64: how many times the signature appeared (one per failed exec). */
+    @Volatile var segvCount: Int = 0
+        private set
+
+    /** v0.2.64: previous read's scan result, so one crash counts once. Only
+     *  ever touched from the single-threaded read loop. */
+    private var segvInTail: Boolean = false
+
     /** v0.1.45: bytes handed to the scrollback channel (vs view.fedBytes). */
     @Volatile var pumpedBytes: Long = 0L
         private set
@@ -261,6 +288,22 @@ class TerminalSession(
                             streamTail.append(if (v in 0x20..0x7E) v.toChar() else "<%02x>".format(v))
                         }
                         if (streamTail.length > 600) streamTail.delete(0, streamTail.length - 600)
+                        // v0.2.64: proot prints this when a tracee takes SIGSEGV.
+                        // Counted on TRANSITION only — the signature stays inside
+                        // the 600-char ring across many reads, so matching every
+                        // read would inflate segvCount into the thousands for one
+                        // broken libc.
+                        val segvHit = streamTail.indexOf("signal 11") >= 0
+                        if (segvHit && !segvInTail) {
+                            segvCount++
+                            if (!segvDetected) {
+                                segvDetected = true
+                                com.emux.EmuXLog.e(
+                                    "session $id: guest exec died with SIGSEGV (proot signal 11) - " +
+                                    "rootfs damaged; health gate will repair before the next shell")
+                            }
+                        }
+                        segvInTail = segvHit
                     }
                     outputSeen.value = true   // v0.1.19: liveness proof for the UI
                     pumpedBytes += n          // v0.1.45 diag counter

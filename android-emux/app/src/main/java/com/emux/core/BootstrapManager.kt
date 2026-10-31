@@ -2290,6 +2290,91 @@ class BootstrapManager(private val ctx: Context) {
     }.getOrDefault(false)
 
     /**
+     * v0.2.64 TERMINAL HEALTH GATE.
+     *
+     * FIELD REPORT (v0.2.63): "It opens now" — the launch crash was fixed — but
+     * typing ANY command in the terminal printed `proot warning: signal 11`.
+     *
+     * The invariant has been written down since v0.2.41: "anything but
+     * `install ok installed` means the rootfs must be healed BEFORE any shell or
+     * client launches." But the gate enforcing it was only ever wired to two
+     * places — the desktop cascade (DesktopService:399) and the bootstrap
+     * pre-repair (desktopPreRepair, above). TerminalService.startSession checked
+     * nothing but `prootBin(ctx).isFile`, i.e. "does the proot binary EXIST",
+     * never "is the guest's libc sane". So a rootfs left half-configured by an
+     * interrupted apt/dpkg transaction — exactly what a run of crash-looping
+     * installs and force-stops produces — spawned proot happily and then
+     * SIGSEGV'd every single execve, with no detector and no repair on that
+     * path. Worse, each instant death fed the auto-respawn watcher, which burnt
+     * MAX_AUTO_RESTARTS on a rootfs that could never work, after which the
+     * terminal stayed permanently dead until an app restart.
+     *
+     * This is that missing gate, factored out so every launch path shares one
+     * implementation. It is deliberately CHEAP when the guest is healthy — one
+     * listFiles() plus two streamed reads of var/lib/dpkg/status, a few
+     * milliseconds — so it is safe before every session start, and it is
+     * FAIL-OPEN: any throw is swallowed and reported as HEALTHY, because a
+     * damaged terminal still beats no terminal.
+     *
+     * NOTE the damage-only trigger: unlike desktopPreRepair this does NOT repair
+     * on a missing emux-repair.stamp. That stamp is a desktop-completeness
+     * concern; keying on it here would put a ~1 min apt run in front of the very
+     * first shell on an otherwise-pristine rootfs.
+     */
+    enum class GuestHealth { HEALTHY, REPAIRED, REPAIR_FAILED, NOT_READY, LOCK_BUSY }
+
+    fun ensureGuestHealthy(tag: String, note: ((String) -> Unit)? = null): GuestHealth = runCatching {
+        val spec = DistroCatalog.requested(ctx)
+        if (spec.pkg != PkgManager.APT) return@runCatching GuestHealth.HEALTHY
+        val dest = FsLayout.linuxRoot(ctx)
+        if (!File(dest, "etc").isDirectory) return@runCatching GuestHealth.NOT_READY
+        val proot = FsLayout.prootBin(ctx)
+        if (!proot.isFile) return@runCatching GuestHealth.NOT_READY
+
+        val dirty = aptJournalDirty(dest)
+        val half = dpkgHalfConfigured(dest)
+        val libc = dpkgLibcBroken(dest)
+        if (!dirty && !half && !libc) return@runCatching GuestHealth.HEALTHY
+
+        // Name the actual damage: "signal 11" tells the user nothing, and the
+        // three failure modes have different remedies.
+        val why = listOfNotNull(
+            if (libc) "libc-bin not fully installed" else null,
+            if (half) "dpkg package(s) half-configured" else null,
+            if (dirty) "interrupted dpkg journal" else null,
+        ).joinToString("; ")
+        com.emux.EmuXLog.i("$tag: guest rootfs damaged ($why) - running pre-session dpkg repair")
+        note?.invoke("$tag: repairing guest rootfs ($why) - usually under a minute")
+
+        val r = runRepairProot(proot, dest)
+        com.emux.EmuXLog.i("$tag: repair ok=${r.ok} tail=${r.tail.take(240)}")
+        if (!r.ok) {
+            // An apt run already in flight is the documented SIGSEGV-wave source
+            // (see the v0.2.57 note below): the caller must WAIT, not spawn a
+            // shell into a library set dpkg is mid-swap on.
+            if (r.tail.contains("apt lock busy")) {
+                note?.invoke("$tag: another apt/dpkg run is in progress - waiting for it to finish")
+                return@runCatching GuestHealth.LOCK_BUSY
+            }
+            note?.invoke("$tag: repair failed - ${r.tail.take(160)}")
+            return@runCatching GuestHealth.REPAIR_FAILED
+        }
+        // Re-verify: apt can exit 0 and still leave libc-bin short — that is the
+        // whole reason dpkgLibcBroken exists as a separate detector.
+        if (aptJournalDirty(dest) || dpkgHalfConfigured(dest) || dpkgLibcBroken(dest)) {
+            com.emux.EmuXLog.e("$tag: repair reported ok but the rootfs is STILL damaged")
+            note?.invoke("$tag: repair ran but the rootfs is still damaged - shell may be unreliable")
+            GuestHealth.REPAIR_FAILED
+        } else {
+            note?.invoke("$tag: guest rootfs repaired")
+            GuestHealth.REPAIRED
+        }
+    }.getOrElse { e ->
+        com.emux.EmuXLog.e("$tag: health gate threw - failing open", e)
+        GuestHealth.HEALTHY
+    }
+
+    /**
      * One guest-side repair run inside the bundled proot — the same steps as
      * assets/bin/emux-apt-repair (inlined so it also works on rootfs trees
      * seeded by older APKs that lack the helper script).
