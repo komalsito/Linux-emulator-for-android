@@ -15,3 +15,5 @@ build/
 # the artifacts; these churned every round and vanish from sandbox snapshots)
 android-emux/app/build/
 android-emux/.gradle/
+__pycache__/
+*.pyc

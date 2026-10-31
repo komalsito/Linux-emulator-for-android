@@ -221,6 +221,12 @@ class DesktopView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attrs) 
     fun onNewFrame(frameId: Int) {
         if (frameId != lastFrameId) {
             lastFrameId = frameId
+            // v0.2.66: Xvfb parks the pointer at the screen centre, so start the
+            // drawn cursor there - the pane must never be cursor-less again.
+            if (cursorX < 0f) {
+                val f = desktop?.currentFrame
+                if (f != null) { cursorX = f.width / 2f; cursorY = f.height / 2f }
+            }
             // v0.2.61: the intro must key off the FIRST FRAME, not off view
             // construction - before that there is no desktop to explain.
             if (!introChecked) { introChecked = true; maybeShowIntro() }
@@ -346,6 +352,8 @@ class DesktopView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attrs) 
         srcRect.set(0, 0, f.width, f.height)
         dstRect.set(left.toInt(), top.toInt(), (left + w).toInt(), (top + h).toInt())
         canvas.drawBitmap(f, srcRect, dstRect, bmpPaint)
+        // v0.2.66: the synthetic pointer, above the frame and below the badges
+        drawCursor(canvas)
         // v0.2.33 LIVE badge (see onNewFrame)
         val fps = frameTimes.size / 2f
         if (fps > 0f) {
@@ -392,7 +400,7 @@ class DesktopView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attrs) 
     }
 
     /** screen px → X px (clamped into server geometry). */
-    private fun mapToX(sx: Float, sy: Float): Pair<Int, Int> {
+    private fun mapToX(sx: Float, sy: Float, markCursor: Boolean = true): Pair<Int, Int> {
         val f = desktop?.currentFrame ?: return 0 to 0
         val fitScale = if (coverMode) max(width.toFloat() / f.width, height.toFloat() / f.height)
                        else min(width.toFloat() / f.width, height.toFloat() / f.height)
@@ -402,7 +410,69 @@ class DesktopView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attrs) 
         val top = (height - h) / 2 + ty
         val x = ((sx - left) / s).toInt().coerceIn(0, f.width - 1)
         val y = ((sy - top) / s).toInt().coerceIn(0, f.height - 1)
+        // v0.2.66: remember where the X pointer now is, so the pane can DRAW a
+        // cursor. A captured frame can never contain the real one: the X
+        // server's sprite layer removes the cursor from every GetImage, which
+        // is why the desktop has been cursor-less on device and every tap had
+        // no visible consequence at all.
+        if (markCursor) { cursorX = x.toFloat(); cursorY = y.toFloat() }
         return x to y
+    }
+
+    /** X px → view px, the exact inverse of [mapToX] (for the drawn cursor). */
+    private fun xToView(x: Float, y: Float): Pair<Float, Float> {
+        val f = desktop?.currentFrame ?: return -1f to -1f
+        val fitScale = if (coverMode) max(width.toFloat() / f.width, height.toFloat() / f.height)
+                       else min(width.toFloat() / f.width, height.toFloat() / f.height)
+        val s = fitScale * scale.coerceIn(1f, 6f)
+        val w = f.width * s; val h = f.height * s
+        val left = (width - w) / 2 + tx
+        val top = (height - h) / 2 + ty
+        return left + x * s to top + y * s
+    }
+
+    /**
+     * v0.2.66: draw the pointer. The capture pipeline cannot show the X cursor
+     * (the server strips the sprite from every GetImage), so without this the
+     * user gets no feedback at all that a tap landed - which read as "input is
+     * dead" even when the proof said ok. Trackpad/mouse hover moves it without
+     * clicking (see onHoverEvent).
+     */
+    private var cursorX = -1f
+    private var cursorY = -1f
+    private val cursorPath = android.graphics.Path()
+    private fun drawCursor(canvas: Canvas) {
+        if (cursorX < 0f || cursorY < 0f) return
+        val (vx, vy) = xToView(cursorX, cursorY)
+        if (vx < -40f || vy < -40f || vx > width + 40f || vy > height + 40f) return
+        val u = dp(1.2f)                       // one "cursor pixel" in view px
+        cursorPath.reset()
+        cursorPath.moveTo(vx, vy)
+        cursorPath.lineTo(vx, vy + 14 * u)
+        cursorPath.lineTo(vx + 3.6f * u, vy + 10.6f * u)
+        cursorPath.lineTo(vx + 6.2f * u, vy + 15.4f * u)
+        cursorPath.lineTo(vx + 8.4f * u, vy + 14.2f * u)
+        cursorPath.lineTo(vx + 5.8f * u, vy + 9.6f * u)
+        cursorPath.lineTo(vx + 10.4f * u, vy + 9.6f * u)
+        cursorPath.close()
+        canvas.drawPath(cursorPath, Paint().apply {
+            style = Paint.Style.FILL; color = Color.WHITE; isAntiAlias = true
+        })
+        canvas.drawPath(cursorPath, Paint().apply {
+            style = Paint.Style.STROKE; strokeWidth = 1.4f * u
+            color = Color.argb(0xE0, 0x10, 0x14, 0x1A); isAntiAlias = true
+        })
+    }
+
+    /** Trackpad / mouse hover: move the drawn cursor, never inject a click. */
+    override fun onHoverEvent(event: android.view.MotionEvent): Boolean {
+        if (event.actionMasked == android.view.MotionEvent.ACTION_HOVER_MOVE ||
+            event.actionMasked == android.view.MotionEvent.ACTION_HOVER_ENTER) {
+            mapToX(event.x, event.y)
+            invalidate()
+            return true
+        }
+        return super.onHoverEvent(event)
     }
 
     // ------------------------- gestures -------------------------
@@ -653,21 +723,16 @@ class DesktopView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attrs) 
                     return true
                 }
                 if (overlayDown) { overlayDown = false; dragging = false; panning = false; return true }
-                // Double-tap zoom (see field below) - checked before the click,
-                // so the zooming tap does not also click.
-                val nowMs = System.currentTimeMillis()
-                val isDoubleTap = !dragging && !panning && !longPressFired &&
-                    nowMs - lastTapUpMs < 300 &&
-                    abs(event.x - lastTapUpX) < 40 && abs(event.y - lastTapUpY) < 40
-                lastTapUpMs = nowMs; lastTapUpX = event.x; lastTapUpY = event.y
-                if (isDoubleTap) {
-                    // v0.2.37: fill-screen toggle (was 2.5x zoom).
-                    coverMode = !coverMode
-                    scale = 1f; tx = 0f; ty = 0f
-                    invalidate()
-                    dragging = false; panning = false
-                    return true
-                }
+                // v0.2.66 FIX (input-dead audit): a double-tap MUST reach X as a
+                // real double-click. pcmanfm desktop icons, GTK "Execute File"
+                // dialogs and file managers all activate on the SECOND
+                // ButtonPress; v0.2.37-v0.2.65 consumed the second tap here for
+                // the fit<->fill view toggle, so the desktop only ever saw ONE
+                // click per gesture - i.e. "the desktop shows but nothing
+                // opens", no matter how healthy the transport was. The view
+                // toggle now lives on the FIT chip of the helper bar.
+                lastTapUpMs = System.currentTimeMillis()
+                lastTapUpX = event.x; lastTapUpY = event.y
                 val (x, y) = mapToX(event.x, event.y)
                 // v0.2.58 EVIDENCE ROUND: one-shot pane note carrying the
                 // exact view->X mapping of the first tap, so a screenshot
@@ -736,7 +801,7 @@ class DesktopView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attrs) 
     private val chips = listOf(
         Chip("Esc", CHIP_ESC), Chip("Tab", CHIP_TAB), Chip("Ctrl", CHIP_CTRL),
         Chip("Alt", CHIP_ALT), Chip("Super", CHIP_META), Chip("\u25B2", CHIP_UP),
-        Chip("\u25BC", CHIP_DOWN), Chip("\u232B", CHIP_BKSP),
+        Chip("\u25BC", CHIP_DOWN), Chip("\u232B", CHIP_BKSP), Chip("FIT", CHIP_FILL),
     )
     private val chipRects = ArrayList<RectF>()
     private var toggleRect = RectF()
@@ -764,7 +829,7 @@ class DesktopView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attrs) 
 
     private fun handleChip(id: Int) {
         val d = desktop ?: return
-        val (cx, cy) = mapToX(width / 2f, height / 2f)
+        val (cx, cy) = mapToX(width / 2f, height / 2f, markCursor = false)
         when (id) {
             CHIP_ESC -> sendKeysym(0xFF1B)
             CHIP_TAB -> sendKeysym(0xFF09)
@@ -774,6 +839,12 @@ class DesktopView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attrs) 
             CHIP_META -> { stickyMeta = !stickyMeta; invalidate() }
             CHIP_UP -> d.injectScroll(cx, cy, 4, 3)
             CHIP_DOWN -> d.injectScroll(cx, cy, 5, 3)
+            // v0.2.66 FIX: the fit<->fill view toggle USED to live on double-tap,
+            // which made a real double-click impossible - and every desktop
+            // (pcmanfm icons, file managers, "Execute/Cancel" dialogs) needs a
+            // double-click to activate anything. Double-tap is now delivered to
+            // X as a genuine double-click; the view toggle lives here instead.
+            CHIP_FILL -> { coverMode = !coverMode; scale = 1f; tx = 0f; ty = 0f; invalidate() }
             CHIP_TOGGLE -> { helperBarVisible = !helperBarVisible; persistBarVisibility(); invalidate() }
         }
         performHapticFeedback(android.view.HapticFeedbackConstants.KEYBOARD_TAP)
@@ -903,6 +974,7 @@ class DesktopView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attrs) 
         const val CHIP_ESC = 1; const val CHIP_TAB = 2; const val CHIP_CTRL = 3
         const val CHIP_ALT = 4; const val CHIP_META = 5; const val CHIP_UP = 6
         const val CHIP_DOWN = 7; const val CHIP_BKSP = 8; const val CHIP_TOGGLE = 9
+        const val CHIP_FILL = 10
         // v0.2.61 intro card: long enough to read seven lines on a phone,
         // short enough that it is gone before the user wants the screen back.
         const val HINT_MS = 11_000L

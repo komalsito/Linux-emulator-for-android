@@ -50,7 +50,8 @@ card, and your choice about the bar is remembered after that.
 | **two-finger tap** | **middle click** — how you paste into an X terminal |
 | **two-finger drag** | **scroll wheel** (up/down and left/right); pans the viewport instead once you are zoomed in |
 | pinch | zoom the viewport |
-| double-tap | toggle letterbox-fit ↔ fill-screen |
+| double-tap | **double click** — opens desktop icons, files and dialogs (v0.2.66: it used to be eaten by the view toggle, which is why nothing on the desktop could ever be opened) |
+| `FIT` chip (`keys` bar) | toggle letterbox-fit ↔ fill-screen |
 | `keys` button (top-right) | on-screen **Esc, Tab, Ctrl, Alt, Super, ▲, ▼, ⌫** |
 
 `Ctrl`, `Alt` and `Super` are **sticky**: tap `Ctrl`, then type `c` on the soft

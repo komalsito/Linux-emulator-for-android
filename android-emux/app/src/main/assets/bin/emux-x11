@@ -237,6 +237,17 @@ start_furniture() {
 seed_desktop_config() {
   mkdir -p "$HOME/.local/share/applications" "$HOME/Desktop" \
     "$HOME/.config/tint2" "$HOME/.config/openbox" "$HOME/.config/pcmanfm/default" 2>/dev/null
+  # v0.2.66 FIX (input-dead audit): on a phone, opening things must not depend
+  # on click timing. pcmanfm/libfm activate desktop items on a DOUBLE click by
+  # default; double-tap now reaches X as a real double-click, but libfm also
+  # offers single-click-to-open, which is the friendlier contract for touch.
+  # Only seed it when the user has no opinion yet - never overwrite a choice.
+  mkdir -p "$HOME/.config/libfm" 2>/dev/null
+  if [ ! -e "$HOME/.config/libfm/libfm.conf" ]; then
+    printf '[config]\nsingle_click=1\n' > "$HOME/.config/libfm/libfm.conf" 2>/dev/null
+  elif ! grep -q '^single_click=' "$HOME/.config/libfm/libfm.conf" 2>/dev/null; then
+    printf 'single_click=1\n' >> "$HOME/.config/libfm/libfm.conf" 2>/dev/null
+  fi
   # --- .desktop launchers (only for installed apps) ---
   APPS=""
   if [ -x /usr/bin/xterm ]; then
@@ -1223,15 +1234,29 @@ else
       # v0.2.45: previously this branch installed NO desktop furniture at
       # all (no tint2/pcmanfm/mousepad) - on Arch the desktop could never
       # be more than Xvfb + a terminal, if that.
-      pacman -Sy --noconfirm --needed xorg-server-xvfb xorg-xkbcomp xkeyboard-config xorg-xwd netpbm openbox xterm tint2 pcmanfm mousepad galculator wmctrl >&2
+      pacman -Sy --noconfirm --needed xorg-server-xvfb xorg-xkbcomp xkeyboard-config xorg-xwd netpbm openbox xterm tint2 pcmanfm mousepad galculator wmctrl xdotool >&2
     elif command -v dnf >/dev/null 2>&1; then
-      dnf -y --skip-broken install xorg-x11-server-Xvfb xkbcomp xkeyboard-config xorg-x11-apps netpbm nmap-ncat openbox xterm tint2 pcmanfm mousepad galculator wmctrl >&2
+      dnf -y --skip-broken install xorg-x11-server-Xvfb xkbcomp xkeyboard-config xorg-x11-apps netpbm nmap-ncat openbox xterm tint2 pcmanfm mousepad galculator wmctrl xdotool >&2
     else
       # v0.2.45: previously Alpine got Xvfb + xwd only - no WM, no panel,
       # no file manager, no terminal: a black screen by construction.
       # Alpine is also the app's DEFAULT_DISTRO, so this branch is the
       # likeliest explanation for "other versions only show a black screen".
-      apk add --no-cache xvfb xkbcomp xkeyboard-config xwd netpbm openbox xterm tint2 pcmanfm mousepad galculator wmctrl >&2
+      # v0.2.66 FIX (input-dead audit): `wmctrl` DOES NOT EXIST on Alpine, and
+      # `apk add` aborts the WHOLE transaction on one unknown name - so on the
+      # app's DEFAULT distro this line silently installed NOTHING: no openbox,
+      # no tint2, no pcmanfm, no xterm, and no xdotool (which the input fallback
+      # needs and which DOES exist on Alpine but was never listed). Verified on
+      # a real alpine-minirootfs-3.20.3: "ERROR: unable to select packages:
+      # wmctrl (no such package)". Retry package-by-package so one bad name can
+      # never take the whole desktop down with it again.
+      APKLIST="xvfb xkbcomp xkeyboard-config xwd netpbm openbox xterm tint2 pcmanfm mousepad galculator xdotool"
+      if ! apk add --no-cache $APKLIST >&2; then
+        echo "emux-x11: apk add aborted on an unknown name - installing one-by-one" >&2
+        for p in $APKLIST; do
+          apk add --no-cache "$p" >&2 || echo "emux-x11: apk: '$p' unavailable on this Alpine" >&2
+        done
+      fi
     fi
     [ -x /usr/bin/Xvfb ] && XVFB=/usr/bin/Xvfb
   fi

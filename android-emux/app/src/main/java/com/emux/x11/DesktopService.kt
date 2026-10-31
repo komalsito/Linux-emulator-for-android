@@ -247,8 +247,16 @@ class DesktopService(
         // no double-tap needed. Pixel budget stays capped at the old
         // 720x1280 (921,600 px) so capture cost never grows.
         viewAspect?.takeIf { it in 0.4f..2.8f }?.let { a ->
+            // v0.2.66 FIX (input-dead audit): the SHORT side is long*aspect on a
+            // portrait pane and long/aspect on a landscape one. `longSide / a`
+            // on a portrait phone yields >1280 and clamps to longSide itself, so
+            // EVERY portrait device got a 1280x1280 SQUARE X screen: giant
+            // letterbox bars the "no bars" comment promised away, ~1.6M px of
+            // capture per frame (a large part of the 0.5 fps field readings),
+            // and a tap->X mapping whose fit the pane never actually had.
             val longSide = 1280
-            val shortSide = ((longSide / a).coerceIn(360f, 1280f).toInt() / 2 * 2)
+            val shortSide = ((if (a >= 1f) longSide / a else longSide * a)
+                .coerceIn(360f, 1280f).toInt() / 2 * 2)
             val px = longSide * shortSide
             if (px <= 921_600 * 2) return if (a >= 1f) "${longSide}x${shortSide}x24" else "${shortSide}x${longSide}x24"
         }
@@ -1690,8 +1698,15 @@ class DesktopService(
      * reads to the user as "the desktop ignores my finger".
      */
     private fun inputLine(line: String): Boolean {
-        val c = x11
-        if (c != null && c.connected) return false            // XTEST owns input
+        // v0.2.66 FIX (input-dead audit): the gate must ask "is XTEST USABLE",
+        // not "is the control plane CONNECTED". The old test returned false
+        // whenever x11.connected, but this fallback branch is only reachable
+        // when xtest() == null, i.e. exactly when connected == true AND the
+        // v0.2.65 proof set xtestIgnored. So on a server that ignores FakeInput
+        // every event was silently dropped here and the advertised guest-agent
+        // fallback never received a single line. Use xtest() (which already
+        // factors in connected && opcode>127 && !ignored).
+        if (xtest() != null) return false                     // XTEST owns input
         synchronized(inputLock) {
             // Coalesce consecutive motion events into the newest one.
             if (line.startsWith("M ")) {
@@ -1785,11 +1800,14 @@ class DesktopService(
         runCatching {
             val p0 = c.queryPointerRoot()
             if (p0 == null) { inputProof = "no-ptr-reply"; return }
-            // Aim 48 px away from wherever the pointer currently sits, clamped
-            // inside the server geometry so server-side clamping cannot fake or
-            // mask the delta we are looking for.
-            val txp = (p0.first + 48).coerceIn(4, (c.screenWidth - 4).coerceAtLeast(8))
-            val typ = (p0.second + 48).coerceIn(4, (c.screenHeight - 4).coerceAtLeast(8))
+            // v0.2.66 FIX (input-dead audit): aim AWAY from the nearest edge.
+            // With a naive +48 the target clamps onto p0 when the pointer sits
+            // near the far edge, and the proof then "passes" on a server that
+            // ignored the motion entirely (p1 == p0 == target).
+            val dxp = if (p0.first + 48 <= c.screenWidth - 4) 48 else -48
+            val dyp = if (p0.second + 48 <= c.screenHeight - 4) 48 else -48
+            val txp = (p0.first + dxp).coerceIn(4, (c.screenWidth - 4).coerceAtLeast(8))
+            val typ = (p0.second + dyp).coerceIn(4, (c.screenHeight - 4).coerceAtLeast(8))
             c.fakeMotion(txp, typ)
             Thread.sleep(250)
             val p1 = c.queryPointerRoot()
@@ -1804,6 +1822,15 @@ class DesktopService(
                 inputProof =
                     if (errs.isNotEmpty()) "rejected:" + errs.first().describe().take(24)
                     else "ignored"
+                // v0.2.66 FIX (input-dead audit): the pane badge painted from
+                // inputTransport, which was set to "xtest" at connect time and
+                // never revisited - so a server that ignores FakeInput still
+                // showed a GREEN "INPUT: XTEST (control plane)". Re-state the
+                // transport now, from what will actually carry the events.
+                val rt = com.emux.core.FsLayout.linuxRoot(ctx)
+                inputTransport =
+                    if (java.io.File(rt, "tmp/emux_agent_launched").isFile) "agent" else "down"
+                inputAgentUp = inputTransport == "agent"
                 noteInfo(
                     "input proof FAILED (server $inputProof): ptr=$p1 wanted=$txp,$typ - " +
                         "XTEST disabled, input falls back to the guest agent (${agentEvidence()})")
@@ -1847,7 +1874,16 @@ class DesktopService(
 
     fun injectKeycode(keycode: Int, press: Boolean) {
         injectCount++
-        x11?.fakeKey(keycode, press)
+        // v0.2.66 FIX: was the one entry point that bypassed xtest(), so it
+        // kept injecting into a server the proof had just declared dead while
+        // every other path had fallen back.
+        val c = xtest()
+        if (c != null) {
+            runCatching { c.fakeKey(keycode, press); surfaceXtestErrors(c) }
+                .onFailure { noteInputDropped("XTEST key failed: $it") }
+            return
+        }
+        noteInputDropped("keycode $keycode dropped: no XTEST, and the agent protocol is keysym-name based")
     }
 
     private var inputDroppedNoted = false
