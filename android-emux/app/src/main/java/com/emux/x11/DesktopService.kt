@@ -288,14 +288,56 @@ class DesktopService(
                                 "no guest binaries in the frame path")
                     }
                     var misses = 0
+                    // v0.2.73 BANDED CAPTURE (the x11vnc model, completed).
+                    // Field v0.2.72 telemetry: `nat=no-reply(timeout/eof)` —
+                    // the 6-unit wire fix landed, but ONE 3.5 MB full-screen
+                    // reply cannot cross this device's proot-translated
+                    // socket inside any sane timeout. Small replies pass.
+                    // So: probe the pipe once per connection with a 16-row
+                    // band, size every later band to ~1.2 s of measured
+                    // pipe, and paint each band the moment it lands. The
+                    // pane goes live progressively instead of never.
+                    val w = c.screenWidth; val h = c.screenHeight
+                    var bandRows = 64
+                    var kbPerS = -1L
+                    var refreshes = 0
+                    run {
+                        val p0 = System.currentTimeMillis()
+                        val probe = runCatching { c.grabRegionArgb(0, 0, w, 16, 10_000, null) }.getOrNull()
+                        val pms = (System.currentTimeMillis() - p0).coerceAtLeast(1)
+                        if (probe != null) {
+                            kbPerS = (w * 16 * 4) / pms
+                            bandRows = ((kbPerS * 1024 * 6 / 5) / (w * 4)).toInt().coerceIn(8, h)
+                            noteInfo("native probe on :$displayNum: ${w}x16 in ${pms}ms -> ~${kbPerS}KB/s -> band ${bandRows} rows of $h")
+                        } else {
+                            bandRows = 8
+                            noteInfo("native probe FAILED on :$displayNum (${c.lastGrabError}) - minimal 8-row bands")
+                        }
+                    }
+                    val bandBuf = IntArray(w * bandRows)
+                    val bandTimeout = 8_000
                     while (isActive && state.value != State.IDLE && state.value != State.ERROR) {
                         val t0 = System.currentTimeMillis()
-                        val px = runCatching { c.grabRootArgb() }.getOrNull()
-                        if (px == null) {
+                        ensureBitmap(w, h)
+                        var y = 0
+                        var ok = true
+                        while (y < h) {
+                            val rows = minOf(bandRows, h - y)
+                            val b = runCatching { c.grabRegionArgb(0, y, w, rows, bandTimeout, bandBuf) }.getOrNull()
+                            if (b == null) { ok = false; break }
+                            synchronized(frameLock) {
+                                currentFrame?.setPixels(b, 0, w, 0, y, w, rows)
+                            }
+                            frameId++
+                            lastAnyFrameAtMs = System.currentTimeMillis()
+                            onUiInvalidated()          // progressive paint per band
+                            y += rows
+                        }
+                        if (!ok) {
                             misses++
                             nativeErr = c.lastGrabError.ifBlank { "null" }
                             if (misses <= 2 || misses % 10 == 0) {
-                                noteInfo("native grab miss #$misses on :$displayNum: $nativeErr")
+                                noteInfo("native band miss #$misses on :$displayNum at y=$y: $nativeErr")
                             }
                             if (misses >= 3) {
                                 throw java.io.IOException("native grab failed ${misses}x: $nativeErr")
@@ -306,22 +348,17 @@ class DesktopService(
                         misses = 0
                         nativeErr = ""
                         nativeGrabMs = System.currentTimeMillis() - t0
-                        val w = c.screenWidth; val h = c.screenHeight
-                        synchronized(frameLock) {
-                            ensureBitmap(w, h)
-                            currentFrame?.setPixels(px, 0, w, 0, 0, w, h)
-                        }
                         nativeFrames++
                         nativeFrameAtMs = System.currentTimeMillis()
-                        lastAnyFrameAtMs = nativeFrameAtMs
                         captureDisplay = displayNum
                         capturePubAtMs = nativeFrameAtMs   // capage badge follows the real source
-                        frameId++
                         if (state.value == State.AWAITING_FRAMES) state.value = State.CONNECTED
-                        onUiInvalidated()
+                        refreshes++
+                        if (refreshes % 25 == 0) {
+                            noteInfo("native capture: ${nativeGrabMs}ms/refresh, band ${bandRows}r, ~${kbPerS}KB/s, frames=$nativeFrames")
+                        }
                         val minFrameMs = if (foreground && screenOn) 333L else 1_000L
-                        val spent = System.currentTimeMillis() - t0
-                        if (spent < minFrameMs) kotlinx.coroutines.delay(minFrameMs - spent)
+                        if (nativeGrabMs < minFrameMs) kotlinx.coroutines.delay(minFrameMs - nativeGrabMs)
                         else kotlinx.coroutines.delay(30L)   // let the UI breathe under proot load
                     }
                 } catch (e: kotlinx.coroutines.CancellationException) {
