@@ -151,6 +151,11 @@ class X11Client(
      *  finish the reply — the proot pipe) vs "eof" (connection died). The
      *  v0.2.72 badge conflated them; the field answer was timeout. */
     var lastReadErr: String = ""
+    /** v0.2.74: code of the last X error packet that matched a request of
+     *  ours (BadLength=16, BadDrawable=9, BadMatch=8...). v0.2.73's field
+     *  round showed `nat=no-reply` — an error packet whose CODE the
+     *  telemetry discarded. Never again. */
+    var lastXErrCode: Int = -1
 
     /** An X error packet, kept for diagnostics instead of desyncing the stream. */
     class XErrorEvent(
@@ -452,7 +457,10 @@ class X11Client(
             val b = ByteBuffer.wrap(pkt).order(order)
             val kind = pkt[0].toInt()
             if (kind == PKT_REPLY && (b.getShort(2).toInt() and 0xFFFF) == mySeq) return pkt
-            if (kind == PKT_ERROR && (b.getShort(2).toInt() and 0xFFFF) == mySeq) return null
+            if (kind == PKT_ERROR && (b.getShort(2).toInt() and 0xFFFF) == mySeq) {
+                lastXErrCode = pkt[1].toInt() and 0xFF
+                return null
+            }
             // events and errors for other requests: keep looping
         }
         return null
@@ -769,31 +777,50 @@ class X11Client(
         // Wire format verified by tools/wiretest/xgetimage_wiretest.py:
         // 24 bytes / 6 units, ZPixmap format in header byte 1 (minor slot).
         val r = requestReply(OP_GET_IMAGE, 2, req.array(), timeoutMs)
-        if (r == null) { lastGrabError = lastReadErr.ifBlank { "no-reply" }; return null }
+        if (r == null) {
+            lastGrabError = lastReadErr.ifBlank {
+                if (lastXErrCode >= 0) "xerr=$lastXErrCode" else "no-reply"
+            }
+            return null
+        }
         if (r[0].toInt() != PKT_REPLY) {
             lastGrabError = "pkt=${r[0]} err=${r[1].toInt() and 0xFF}"
             return null
         }
         val replyDepth = r[1].toInt() and 0xFF
-        if (replyDepth != 24 && replyDepth != 32) {
+        // v0.2.74: depth 16 is the primary field path now (half the wire);
+        // its ZPixmap layout IS RGB565 little-endian, the format this app's
+        // frame path has always spoken.
+        if (replyDepth != 24 && replyDepth != 32 && replyDepth != 16) {
             lastGrabError = "depth=$replyDepth"
             return null
         }
-        if (r.size < 32 + w * h * 4) { lastGrabError = "short=${r.size}"; return null }
+        val bpp = if (replyDepth == 16) 2 else 4
+        if (r.size < 32 + w * h * bpp) { lastGrabError = "short=${r.size}"; return null }
         val data = r
         val stride = (data.size - 32) / h          // actual bytes per scanline
-        if (stride < w * 4) { lastGrabError = "stride=$stride"; return null }
+        if (stride < w * bpp) { lastGrabError = "stride=$stride"; return null }
         val out = if (reuse != null && reuse.size >= w * h) reuse else IntArray(w * h)
         var src = 32
         var dst = 0
         for (row in 0 until h) {
             var cx = 0
             while (cx < w) {
-                val o = src + cx * 4
-                val b = data[o].toInt() and 0xFF
-                val g = data[o + 1].toInt() and 0xFF
-                val red = data[o + 2].toInt() and 0xFF
-                out[dst + cx] = (0xFF shl 24) or (red shl 16) or (g shl 8) or b
+                if (bpp == 4) {
+                    val o = src + cx * 4
+                    val b = data[o].toInt() and 0xFF
+                    val g = data[o + 1].toInt() and 0xFF
+                    val red = data[o + 2].toInt() and 0xFF
+                    out[dst + cx] = (0xFF shl 24) or (red shl 16) or (g shl 8) or b
+                } else {
+                    val o = src + cx * 2
+                    val v = (data[o].toInt() and 0xFF) or ((data[o + 1].toInt() and 0xFF) shl 8)
+                    out[dst + cx] = android.graphics.Color.rgb(
+                        ((v shr 11) and 0x1F) * 255 / 31,
+                        ((v shr 5) and 0x3F) * 255 / 63,
+                        (v and 0x1F) * 255 / 31,
+                    )
+                }
                 cx++
             }
             src += stride

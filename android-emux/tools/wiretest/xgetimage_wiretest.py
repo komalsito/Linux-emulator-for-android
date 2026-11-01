@@ -63,9 +63,10 @@ r, dt = getimage(W, H)
 if r is None:
     print("FULL GRAB FAILED:", dt); sys.exit(1)
 depth_r, payload = r
+bpp = 2 if depth_r == 16 else 4
 print("full grab %dx%d: depth=%d payload=%d bytes (expect %d) in %.3fs"
-      % (W, H, depth_r, len(payload), W * H * 4, dt))
-print("derived stride=%d (w*4=%d)" % (len(payload) // H, W * 4))
+      % (W, H, depth_r, len(payload), W * H * bpp, dt))
+print("derived stride=%d (w*bpp=%d)" % (len(payload) // H, W * bpp))
 print("first pixel bytes:", payload[0:4].hex())
 for i in range(5):
     r, dt = getimage(W, H)
