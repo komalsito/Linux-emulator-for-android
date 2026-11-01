@@ -70,8 +70,11 @@ import kotlin.math.ceil
  *     permanently. Reads are now dispatched on byte 0.
  * ---------------------------------------------------------------------------
  *
- * Framebuffer capture deliberately avoids GetImage: the in-distro capture
- * helper streams raw RGB frames to [DesktopService] over a local socket.
+ * Framebuffer capture: v0.2.72 reads the root window IN-APP with GetImage
+ * (ZPixmap) over a dedicated connection — the x11vnc/x0vncserver model, wire
+ * format verified against a real Xvfb 21.1.7 by tools/xgetimage_wiretest.py.
+ * The in-distro helper (emux-capture -> [DesktopService] over a local socket)
+ * remains only as an automatic fallback.
  */
 class X11Client(
     private val host: String = "127.0.0.1",
@@ -139,6 +142,11 @@ class X11Client(
     }
 
     class XProtocolException(msg: String) : IOException(msg)
+
+    /** v0.2.72: why the last grabRootArgb() failed ("" = ok). Painted on the
+     *  STALE pane so a field screenshot names the rejection (BadLength=16,
+     *  BadDrawable=9, timeout...) instead of just saying "no frames". */
+    var lastGrabError: String = ""
 
     /** An X error packet, kept for diagnostics instead of desyncing the stream. */
     class XErrorEvent(
@@ -732,25 +740,38 @@ class X11Client(
         if (rootWindow == 0) return null
         val w = screenWidth; val h = screenHeight
         if (w <= 0 || h <= 0) return null
-        val req = ByteBuffer.allocate(24).order(order)
+        val req = ByteBuffer.allocate(20).order(order)
         req.putInt(rootWindow)
         req.putShort(0)                 // x
         req.putShort(0)                 // y
         req.putShort(w.toShort())       // width
         req.putShort(h.toShort())       // height
         req.putInt(-1)                  // plane-mask: all planes
-        req.put(2)                      // format: ZPixmap
-        req.put(0); req.put(0); req.put(0)
-        // The full-screen reply is multi-megabyte; give it room. 6 s matches
-        // what x11vnc tolerates for GetImage on a loaded software server.
-        val r = requestReply(OP_GET_IMAGE, 0, req.array(), 6_000) ?: return null
-        if (r[0].toInt() != PKT_REPLY) return null
+        // v0.2.72 WIRE FIX — caught in seconds by tools/xgetimage_wiretest.py
+        // against a real Xvfb 21.1.7 (ERROR packet code 16 = BadLength on
+        // every grab), which is exactly what the field saw on v0.2.71:
+        // `src=native` with ZERO frames while the control plane (which never
+        // calls GetImage) stayed healthy. xGetImageReq is 24 bytes = 6 units
+        // TOTAL, and the ZPixmap FORMAT lives in header byte 1 (the minor-
+        // opcode slot), NOT in the body. v0.2.71 built a 24-byte body with
+        // the format inside it => 28-byte / 7-unit request => the server
+        // rejected every single grab with BadLength and the pane kept the
+        // last photograph forever.
+        val r = requestReply(OP_GET_IMAGE, 2, req.array(), 6_000)
+        if (r == null) { lastGrabError = "no-reply(timeout/eof)"; return null }
+        if (r[0].toInt() != PKT_REPLY) {
+            lastGrabError = "pkt=${r[0]} err=${r[1].toInt() and 0xFF}"
+            return null
+        }
         val replyDepth = r[1].toInt() and 0xFF
-        if (replyDepth != 24 && replyDepth != 32) return null
-        if (r.size < 32 + w * h * 4) return null
+        if (replyDepth != 24 && replyDepth != 32) {
+            lastGrabError = "depth=$replyDepth"
+            return null
+        }
+        if (r.size < 32 + w * h * 4) { lastGrabError = "short=${r.size}"; return null }
         val data = r
         val stride = (data.size - 32) / h          // actual bytes per scanline
-        if (stride < w * 4) return null
+        if (stride < w * 4) { lastGrabError = "stride=$stride"; return null }
         val out = IntArray(w * h)
         var src = 32
         var dst = 0
@@ -767,6 +788,7 @@ class X11Client(
             src += stride
             dst += w
         }
+        lastGrabError = ""
         return out
     }
 

@@ -376,7 +376,13 @@ class DesktopView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attrs) 
                 val stale = Paint().apply { color = Color.argb(0xE0, 0xEF, 0x53, 0x50); textSize = sp(10f) }
                 canvas.drawText(
                     "STALE ${ageMs / 1000}s - no frames arriving (capture dead? respawning) " +
-                        "capage=${desktop?.capturePubAgeSec ?: -1}s", 16f, sp(16f), stale)
+                        // v0.2.72: and NAME the capture failure on the pane —
+                        // the wire-level rejection (BadLength=16 on v0.2.71's
+                        // GetImage, timeout, bad depth...) or "silent", so a
+                        // screenshot ends the archaeology instead of starting it.
+                        "capage=${desktop?.capturePubAgeSec ?: -1}s " +
+                        "nat=${(desktop?.nativeErr ?: "").ifBlank { "silent" }.take(22)}",
+                    16f, sp(16f), stale)
                 // v0.2.70: name the killer ON the pane - the capture's own
                 // error tail, so the next field screenshot ends the archaeology.
                 val ce = (desktop?.lastCapErr ?: "").takeIf { it.isNotBlank() }

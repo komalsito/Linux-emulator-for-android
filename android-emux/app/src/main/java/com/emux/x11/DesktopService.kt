@@ -245,6 +245,13 @@ class DesktopService(
     private var nativeJob: Job? = null
     private var nativeClient: X11Client? = null
 
+    // v0.2.72 telemetry: the STALE pane must name WHY capture is silent.
+    // v0.2.71's field round said only "no frames arriving" while the actual
+    // cause (BadLength on every GetImage) sat invisible in the protocol.
+    @Volatile var nativeGrabMs: Long = -1; private set
+    @Volatile var nativeErr: String = ""; private set
+    @Volatile private var lastAnyFrameAtMs = 0L
+
     /** True while native capture has delivered a frame in the last 15 s —
      *  the guest publication file is then stale BY DESIGN and must not be
      *  used for capage/plane-agreement/wedge decisions. */
@@ -286,11 +293,19 @@ class DesktopService(
                         val px = runCatching { c.grabRootArgb() }.getOrNull()
                         if (px == null) {
                             misses++
-                            if (misses >= 3) throw java.io.IOException("native grab failed ${misses}x")
+                            nativeErr = c.lastGrabError.ifBlank { "null" }
+                            if (misses <= 2 || misses % 10 == 0) {
+                                noteInfo("native grab miss #$misses on :$displayNum: $nativeErr")
+                            }
+                            if (misses >= 3) {
+                                throw java.io.IOException("native grab failed ${misses}x: $nativeErr")
+                            }
                             kotlinx.coroutines.delay(200L * misses)
                             continue
                         }
                         misses = 0
+                        nativeErr = ""
+                        nativeGrabMs = System.currentTimeMillis() - t0
                         val w = c.screenWidth; val h = c.screenHeight
                         synchronized(frameLock) {
                             ensureBitmap(w, h)
@@ -298,6 +313,7 @@ class DesktopService(
                         }
                         nativeFrames++
                         nativeFrameAtMs = System.currentTimeMillis()
+                        lastAnyFrameAtMs = nativeFrameAtMs
                         captureDisplay = displayNum
                         capturePubAtMs = nativeFrameAtMs   // capage badge follows the real source
                         frameId++
@@ -387,6 +403,7 @@ class DesktopService(
         runCatching { nativeJob?.cancel() }; nativeJob = null
         runCatching { nativeClient?.close() }; nativeClient = null
         nativeFrames = 0L; nativeFrameAtMs = 0L; captureMode = "-"
+        nativeGrabMs = -1L; nativeErr = ""; lastAnyFrameAtMs = 0L
         state.value = State.STARTING_X
         scope.launch {
             try {
@@ -1040,6 +1057,40 @@ class DesktopService(
                             noteInfo("furniture still missing 90s after CONNECT - " +
                                 "REST tail: " + (tail.ifBlank { "<no /tmp/emux_rest.log>" }))
                         }
+                    }
+                }
+
+                // v0.2.72 SILENCE WATCHDOG: the v0.2.71 field round proved a
+                // capture path can be "connected" (src=native on the badge)
+                // while delivering ZERO frames, and every existing guard
+                // (respawn watcher, wedge guard) keys off the LEGACY session
+                // or its publication file. This watchdog keys off the only
+                // truth that matters — pixels arriving — and brings the guest
+                // pipeline up if nothing has delivered for 25 s, whatever the
+                // reason (native wire rejection, proot wedge, server death).
+                scope.launch {
+                    kotlinx.coroutines.delay(30_000)
+                    while (isActive && state.value != State.IDLE && state.value != State.ERROR) {
+                        kotlinx.coroutines.delay(5_000)
+                        val silentMs = if (lastAnyFrameAtMs == 0L) Long.MAX_VALUE
+                            else System.currentTimeMillis() - lastAnyFrameAtMs
+                        if (silentMs <= 25_000 || captureSession != null) continue
+                        val tools = listOf("usr/bin/xwd", "usr/bin/pnmtoplainpnm", "bin/nc.openbsd")
+                            .all { java.io.File(rootfs, it).isFile }
+                        val why = nativeErr.ifBlank { if (nativeFrames > 0) "native silent" else "native no-frames" }
+                        if (!tools) {
+                            noteInfo("v0.2.72 watchdog: ${silentMs / 1000}s without ANY frame ($why) but guest toolchain absent - nothing to fall back to")
+                            kotlinx.coroutines.delay(30_000)
+                            continue
+                        }
+                        noteInfo(
+                            "v0.2.72 watchdog: ${silentMs / 1000}s without ANY frame ($why) - " +
+                                "starting guest emux-capture as fallback")
+                        captureSession = TerminalSession(
+                            9002 + captureRespawns, ctx, root,
+                            "emux-capture 127.0.0.1:$FRAME_PORT $displayNum",
+                        ).also { it.start() }
+                        kotlinx.coroutines.delay(30_000)   // give it room before judging again
                     }
                 }
 
@@ -1780,6 +1831,7 @@ class DesktopService(
                     }
                     writeDirtyRegion(dx, dy, dw, dh, rows)
                     frameId++
+                    lastAnyFrameAtMs = System.currentTimeMillis()
                     framesOnConn++
                     // v0.1.100: CONNECTED means "a frame was decoded",
                     // not "the reader was launched".
