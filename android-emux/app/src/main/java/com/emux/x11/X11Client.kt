@@ -156,6 +156,11 @@ class X11Client(
      *  round showed `nat=no-reply` — an error packet whose CODE the
      *  telemetry discarded. Never again. */
     var lastXErrCode: Int = -1
+    /** v0.2.75: full forensics of that error: code + major/minor opcode the
+     *  server was parsing + resource id. `maj` tells us WHICH request the
+     *  server considered malformed — desync vs. a genuinely rejected
+     *  GetImage are different fixes and the pane now says which. */
+    var lastXErr: String = ""
 
     /** An X error packet, kept for diagnostics instead of desyncing the stream. */
     class XErrorEvent(
@@ -459,6 +464,8 @@ class X11Client(
             if (kind == PKT_REPLY && (b.getShort(2).toInt() and 0xFFFF) == mySeq) return pkt
             if (kind == PKT_ERROR && (b.getShort(2).toInt() and 0xFFFF) == mySeq) {
                 lastXErrCode = pkt[1].toInt() and 0xFF
+                lastXErr = "xerr=$lastXErrCode:maj=${pkt[10].toInt() and 0xFF}" +
+                    ":min=${b.getShort(8).toInt() and 0xFFFF}:res=0x${Integer.toHexString(b.getInt(4))}"
                 return null
             }
             // events and errors for other requests: keep looping
@@ -776,11 +783,10 @@ class X11Client(
         req.putInt(-1)                  // plane-mask: all planes
         // Wire format verified by tools/wiretest/xgetimage_wiretest.py:
         // 24 bytes / 6 units, ZPixmap format in header byte 1 (minor slot).
+        lastXErr = ""; lastXErrCode = -1
         val r = requestReply(OP_GET_IMAGE, 2, req.array(), timeoutMs)
         if (r == null) {
-            lastGrabError = lastReadErr.ifBlank {
-                if (lastXErrCode >= 0) "xerr=$lastXErrCode" else "no-reply"
-            }
+            lastGrabError = lastReadErr.ifBlank { lastXErr.ifBlank { "no-reply" } }
             return null
         }
         if (r[0].toInt() != PKT_REPLY) {

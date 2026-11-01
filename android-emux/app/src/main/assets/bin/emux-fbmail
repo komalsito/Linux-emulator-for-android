@@ -1,0 +1,47 @@
+#!/bin/bash
+# emux-fbmail — v0.2.75 FILESYSTEM-MAILBOX CAPTURE.
+#
+# Why this exists (field rounds v0.2.71..v0.2.74, HUAWEI M-Pencil Pro):
+#   every socket-based framebuffer read died on this device in a different
+#   way — per-frame guest pipeline wedges (xwd|netpbm|nc), in-app full-screen
+#   GetImage times out (3.5 MB reply across the proot-translated socket),
+#   banded GetImage gets X error packets (BadLength) from a listener that
+#   answers QueryPointer fine. Meanwhile ONE transport has been rock solid
+#   since round one: the shared rootfs filesystem (every marker file the app
+#   and guest exchange — emux_x_up, emux_cap_display, emux_display_num —
+#   crosses it without a single failure).
+#
+# So: pixels travel by FILE, not by socket.
+#   guest: xwd -root (talks to Xvfb over the guest-LOCAL unix socket, which
+#          has always been fast — legacy capture proved ~1 fps through four
+#          worse processes) -> temp file -> atomic rename(2).
+#   host : polls the file, parses the XWD header, paints. The host read path
+#          never enters proot at all.
+#
+# Usage: emux-fbmail <display-number>
+DN="${1:-1}"
+OUT=/tmp/emux_fb.xwd
+TMP=/tmp/emux_fb.tmp.$DN
+ERR=/tmp/emux_fbmail.err
+export DISPLAY=":$DN"
+: > /tmp/emux_fbmail.up
+fails=0
+while :; do
+  if xwd -root -out "$TMP" 2>>"$ERR"; then
+    # rename(2) is atomic on the same fs: the host never sees a half frame.
+    mv -f "$TMP" "$OUT" 2>>"$ERR" || sleep 1
+    # reuse the publication format the Android watcher already understands
+    # ("<display> <epoch>") so plane-agreement and capage keep working.
+    echo "$DN $(date +%s)" > /tmp/emux_cap_display 2>/dev/null
+    fails=0
+    sleep 0.2
+  else
+    rc=$?
+    fails=$((fails + 1))
+    echo "xwd rc=$rc n=$fails t=$(date +%s)" >> "$ERR"
+    # a dead/restarting X server: back off, keep trying, never exit (the
+    # Android side watches the file, not this process).
+    [ "$fails" -gt 5 ] && fails=0 && sleep 2
+    sleep 1
+  fi
+done

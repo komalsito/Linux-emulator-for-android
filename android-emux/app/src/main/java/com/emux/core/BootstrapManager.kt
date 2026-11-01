@@ -1232,7 +1232,7 @@ class BootstrapManager(private val ctx: Context) {
      * wedged AAsset handle on OEM ROMs.
      */
     internal fun stageHelperAssets(): Map<String, ByteArray> {
-        val names = listOf("emux-init.sh", "emux-x11", "emux-capture", "emux-init-probe.sh", "emux-winsize", "emux-apt-repair")
+        val names = listOf("emux-init.sh", "emux-x11", "emux-capture", "emux-fbmail", "emux-init-probe.sh", "emux-winsize", "emux-apt-repair")
         val result = java.util.concurrent.ConcurrentHashMap<String, ByteArray>()
         withHardTimeout(4_000L) {
             for (name in names) {
