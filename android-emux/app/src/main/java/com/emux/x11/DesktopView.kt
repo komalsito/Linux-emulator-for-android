@@ -377,6 +377,13 @@ class DesktopView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attrs) 
                 canvas.drawText(
                     "STALE ${ageMs / 1000}s - no frames arriving (capture dead? respawning) " +
                         "capage=${desktop?.capturePubAgeSec ?: -1}s", 16f, sp(16f), stale)
+                // v0.2.70: name the killer ON the pane - the capture's own
+                // error tail, so the next field screenshot ends the archaeology.
+                val ce = (desktop?.lastCapErr ?: "").takeIf { it.isNotBlank() }
+                if (ce != null) {
+                    val cep = Paint().apply { color = Color.argb(0xE0, 0xEF, 0x53, 0x50); textSize = sp(9f) }
+                    canvas.drawText("cap.err: $ce", 16f, sp(84f), cep)
+                }
                 postInvalidateOnAnimation()   // keep ticking while stale
             } else {
                 val badge = Paint().apply { color = Color.argb(0xC0, 0x66, 0xBB, 0x6A); textSize = sp(10f) }
