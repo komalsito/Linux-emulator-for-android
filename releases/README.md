@@ -1,0 +1,21 @@
+# EmuX release APKs (every shipped version, kept in-repo by user request)
+
+`../emux-debug.apk` (repo root) is ALWAYS the newest build. This directory keeps
+every versioned APK so a device can be re-flashed with any exact build even if
+a branch or tag is lost. All are signed with the committed debug keystore
+(`android-emux/debug-keystore/emux-debug.jks`, SHA-256
+`5e3ef25492ec7e64802fd3e5a40beca04f1f86ae0472cbe44a0afe50aca9a1fa`), so they
+upgrade/downgrade in place with `adb install -r` against each other.
+
+| file | version | versionCode | verified | note |
+|---|---|---|---|---|
+| `emux-debug-v0.2.67-vc167.apk` | 0.2.67 | 167 | 51/0/0 | plane-agreement + continuous proof + dead-socket recycle |
+| `emux-debug-v0.2.68-vc168.apk` | 0.2.68 | 168 | 51/0/0 | respawn capture on ANY death; STALE badge |
+| `emux-debug-v0.2.69-vc169.apk` | 0.2.69 | 169 | 51/0/0 | wedge guard (no cap_display publication >20 s => kill+respawn) |
+| `emux-debug-v0.2.70-vc170.apk` | 0.2.70 | 170 | 51/0/0 | LMK: capture/xwd never the sacrifice; no positive bias without root; cap.err painted on the STALE pane |
+
+Rebuild any of them with the zero-Gradle pipeline:
+`android-emux/tools/build-apk/no-gradle-build.sh` (see
+`android-emux/docs/BUILDING_THE_APK.md`), then check with
+`android-emux/tools/verify_apk.sh` — a build that does not pass 51/0/0 must not
+be added here.

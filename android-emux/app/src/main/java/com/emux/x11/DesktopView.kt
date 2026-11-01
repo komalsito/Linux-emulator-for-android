@@ -210,6 +210,11 @@ class DesktopView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attrs) 
     // frame arrivals over a 2 s window and paint the rate on the bitmap so
     // "frames are flowing" is visible proof independent of guest windows.
     private val frameTimes = ArrayDeque<Long>()
+    // v0.2.68: wall-clock of the last frame that actually arrived. The fps
+    // badge used to freeze at its last value when capture died (frameTimes is
+    // only trimmed on NEW frames), so a dead stream kept advertising itself
+    // as LIVE over a frozen photograph forever.
+    private var lastFrameMs = 0L
 
     // v0.2.38: report the live view aspect so the next desktop start
     // sizes Xvfb to THIS pane (no letterbox bars by default).
@@ -234,6 +239,7 @@ class DesktopView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attrs) 
             histStickBottom = true     // v0.2.21: next frameless visit starts live
             val now = System.currentTimeMillis()
             frameTimes.addLast(now)
+            lastFrameMs = now
             while (frameTimes.isNotEmpty() && now - frameTimes.first() > 2_000) frameTimes.removeFirst()
             postInvalidateOnAnimation()
         }
@@ -357,8 +363,32 @@ class DesktopView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attrs) 
         // v0.2.33 LIVE badge (see onNewFrame)
         val fps = frameTimes.size / 2f
         if (fps > 0f) {
-            val badge = Paint().apply { color = Color.argb(0xC0, 0x66, 0xBB, 0x6A); textSize = sp(10f) }
-            canvas.drawText("LIVE %.1f fps".format(fps), 16f, sp(16f), badge)
+            // v0.2.68 FIX (input-dead audit, round 3): a capture helper that
+            // dies AFTER the first frame used to leave this badge frozen at
+            // "LIVE 0.5 fps" over the last bitmap FOREVER (frameTimes is only
+            // trimmed when a new frame arrives, and nothing repainted). The
+            // pane was a photograph that claimed to be alive - which is why
+            // "desktop shows but nothing opens" survived ten versions even
+            // with a healthy input path. Age the badge: >8 s without a frame
+            // is STALE, in red, ticking, and repainting itself.
+            val ageMs = System.currentTimeMillis() - lastFrameMs
+            if (ageMs > 8_000) {
+                val stale = Paint().apply { color = Color.argb(0xE0, 0xEF, 0x53, 0x50); textSize = sp(10f) }
+                canvas.drawText(
+                    "STALE ${ageMs / 1000}s - no frames arriving (capture dead? respawning) " +
+                        "capage=${desktop?.capturePubAgeSec ?: -1}s", 16f, sp(16f), stale)
+                // v0.2.70: name the killer ON the pane - the capture's own
+                // error tail, so the next field screenshot ends the archaeology.
+                val ce = (desktop?.lastCapErr ?: "").takeIf { it.isNotBlank() }
+                if (ce != null) {
+                    val cep = Paint().apply { color = Color.argb(0xE0, 0xEF, 0x53, 0x50); textSize = sp(9f) }
+                    canvas.drawText("cap.err: $ce", 16f, sp(84f), cep)
+                }
+                postInvalidateOnAnimation()   // keep ticking while stale
+            } else {
+                val badge = Paint().apply { color = Color.argb(0xC0, 0x66, 0xBB, 0x6A); textSize = sp(10f) }
+                canvas.drawText("LIVE %.1f fps".format(fps), 16f, sp(16f), badge)
+            }
             // v0.2.53: input health ON the bitmap - the history TextView is
             // invisible once frames flow, and "clicks do nothing" needed an
             // always-visible answer: INPUT: agent = FIFO writer connected.
@@ -396,7 +426,7 @@ class DesktopView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attrs) 
             canvas.drawText(
                 "proof=$proof touch=${desktop?.touchCount ?: 0} inj=${desktop?.injectCount ?: 0} " +
                     "fail=${desktop?.injectFail ?: 0} ctrl=:${desktop?.controlDisplay ?: -1} " +
-                    "cap=:${desktop?.captureDisplay ?: -1} " +
+                    "cap=:${desktop?.captureDisplay ?: -1} capage=${desktop?.capturePubAgeSec ?: -1}s " +
                     (desktop?.agentEvidence() ?: ""), 16f, sp(40f), pb)
             drawGestureHint(canvas)
         }

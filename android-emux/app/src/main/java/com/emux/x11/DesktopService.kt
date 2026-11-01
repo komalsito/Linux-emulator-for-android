@@ -571,9 +571,26 @@ class DesktopService(
                 // is make the desktop stack the preferred sacrifice and report
                 // the truth, so a field log distinguishes "bias applied" from
                 // "bias denied (needs root)" instead of implying success.
+                // v0.2.70 FIX (input-dead audit, round 4): THE STREAM WAS THE
+                // DESIGNATED LMK SACRIFICE. This ladder set emux-capture/xwd to
+                // oom_score_adj 950 (max killable) "so the desktop stack is the
+                // preferred sacrifice" while the terminal protection (-300)
+                // needs root and is DENIED on every unrooted device - i.e. on
+                // exactly the devices in the field the ladder bought NOTHING
+                // and guaranteed that the first memory-pressure event kills
+                // the capture helper. Field vc169 shows the cycle: capture
+                // dies minutes (or seconds) into every session, capage
+                // climbs, respawns repeat, the pane alternates LIVE/STALE and
+                // the user experiences "input dead" behind a photograph.
+                // New policy: (1) capture/xwd are NEVER bias-adjusted; (2) the
+                // positive ladder is applied ONLY when the terminal protection
+                // actually succeeded (root); without root we touch nothing and
+                // say so, instead of volunteering the eyes of the desktop.
                 var lmkRaised = 0; var lmkProtected = 0; var lmkDenied = 0
                 runCatching {
                     val myUid = android.os.Process.myUid().toString()
+                    val desktopAdj = mutableListOf<Pair<java.io.File, String>>()
+                    val terminalPids = mutableListOf<java.io.File>()
                     java.io.File("/proc").listFiles()?.forEach { d ->
                         val cmd = runCatching {
                             java.io.File(d, "cmdline").readBytes().decodeToString().replace('\u0000', ' ')
@@ -583,34 +600,46 @@ class DesktopService(
                             java.io.File(d, "status").readLines().firstOrNull { it.startsWith("Uid:") } ?: ""
                         }.getOrDefault("")
                         if (uidLine.split(Regex("\\s+")).getOrNull(1) != myUid) return@forEach
-                        // Desktop-side first (highest = most killable), then the
-                        // terminal side. Order matters: emux-x11's own launcher
-                        // cmdline also mentions Xvfb.
+                        // v0.2.70: emux-capture / xwd deliberately absent - the
+                        // stream is never the sacrifice (killing it frees
+                        // little and reads to the user as "desktop dead").
                         val adj = when {
-                            cmd.contains("emux-capture") || cmd.contains("/xwd") -> "950"
+                            cmd.contains("emux-capture") || cmd.contains("/xwd") -> return@forEach
                             cmd.contains("emux-x11") -> "900"
                             cmd.contains("Xvfb") || cmd.contains("Xorg") -> "850"
                             cmd.contains("openbox") || cmd.contains("tint2") ||
                             cmd.contains("pcmanfm") || cmd.contains("picom") ||
                             cmd.contains("xsetroot") || cmd.contains("feh") -> "800"
                             cmd.contains("proot") &&
-                            (cmd.contains("bash") || cmd.contains("/bin/sh") || cmd.contains("script")) -> "-300"
+                            (cmd.contains("bash") || cmd.contains("/bin/sh") || cmd.contains("script")) -> "TERM"
                             else -> return@forEach
                         }
+                        if (adj == "TERM") terminalPids.add(d) else desktopAdj.add(d to adj)
+                    }
+                    // Phase 1: try to protect the terminal; learn if we have root.
+                    terminalPids.forEach { d ->
+                        val ok = runCatching {
+                            val f = java.io.File(d, "oom_score_adj")
+                            f.writeText("-300")
+                            f.readText().trim() == "-300"   // verify: EPERM is silent
+                        }.getOrDefault(false)
+                        if (ok) lmkProtected++ else lmkDenied++
+                    }
+                    // Phase 2: positive bias only when protection worked (root).
+                    if (lmkDenied == 0) desktopAdj.forEach { (d, adj) ->
                         val ok = runCatching {
                             val f = java.io.File(d, "oom_score_adj")
                             f.writeText(adj)
-                            f.readText().trim() == adj   // verify: EPERM is silent
+                            f.readText().trim() == adj
                         }.getOrDefault(false)
-                        if (ok) { if (adj.startsWith("-")) lmkProtected++ else lmkRaised++ }
-                        else if (adj.startsWith("-")) lmkDenied++
+                        if (ok) lmkRaised++
                     }
                 }
                 if (lmkDenied > 0) noteInfo(
-                    "LMK: raised $lmkRaised desktop procs, but protecting the Terminal " +
-                    "(oom_score_adj -300) was DENIED on $lmkDenied procs - that needs root. " +
-                    "Under memory pressure Android can still reap the terminal's proot " +
-                    "(\"proot warning: signal 11\"). picom is now opt-in to cut the pressure.")
+                    "LMK: no root - terminal protection DENIED on $lmkDenied procs, so the " +
+                        "desktop bias ladder was SKIPPED entirely (v0.2.70: raising desktop " +
+                        "adjs without root only guaranteed the capture helper was killed " +
+                        "first; field vc169 died that way every session)")
                 else if (lmkRaised + lmkProtected > 0) noteInfo(
                     "LMK bias applied: $lmkRaised desktop procs raised, $lmkProtected terminal procs protected")
                 desktopStartUpTicks = runCatching {
@@ -816,6 +845,37 @@ class DesktopService(
                 scope.launch {
                     while (isActive && state.value != State.IDLE) {
                         kotlinx.coroutines.delay(5_000)
+                        // v0.2.68: record the publication even when STALE - a
+                        // climbing capage on the badge is the field-visible
+                        // proof of a dead capture helper (the frozen-photo
+                        // failure mode round 3 fixes).
+                        capturePubRaw()?.let { (n, ts) ->
+                            captureDisplay = n
+                            capturePubAtMs = ts * 1000
+                        }
+                        // v0.2.69 WEDGE GUARD: a capture helper can be ALIVE
+                        // but stuck (xwd hung inside grab_frame); its session
+                        // never reports DEAD, so the respawn watcher never
+                        // fires and the pane stays a photograph with a frozen
+                        // badge. emux-capture republishes /tmp/emux_cap_display
+                        // at the TOP of every loop, so >20 s without a
+                        // publication means the loop is not looping: stop the
+                        // session (the respawn watcher recreates it) and name
+                        // the likely killer from the capture's own error log.
+                        val pubAge = capturePubAgeSec
+                        if (pubAge in 21..3_600 && frameId > 0 &&
+                            state.value == State.CONNECTED) {
+                            errTail = runCatching {
+                                java.io.File(rootfs, "tmp/emux_cap.err").readText()
+                                    .lineSequence().filter { it.isNotBlank() }.toList().takeLast(3)
+                                    .joinToString(" | ").take(200)
+                            }.getOrDefault("<no cap.err>")
+                            lastCapErr = errTail
+                            noteInfo(
+                                "capture WEDGED or DEAD: no publication for ${pubAge}s - " +
+                                    "killing and respawning; cap.err tail: $errTail")
+                            runCatching { captureSession?.stop() }
+                        }
                         val cap = freshCaptureDisplay()
                         if (cap != null) captureDisplay = cap
                         val c = xtest() ?: continue
@@ -969,12 +1029,32 @@ class DesktopService(
                             pumpedCaptureSession = cur
                             pumpDiag("capture", cur)
                         }
-                        if (cur != null && cur.state.value == TerminalSession.State.DEAD &&
-                            frameId == 0) {
+                        if (cur != null && cur.state.value == TerminalSession.State.DEAD) {
+                            // v0.2.68 FIX (input-dead audit, round 3): the
+                            // `frameId == 0` gate meant a capture helper that
+                            // died AFTER delivering its first frame was never
+                            // respawned and never reported - the pane kept
+                            // painting its last bitmap forever while the
+                            // "LIVE x fps" badge froze at the last computed
+                            // rate (frameTimes is only trimmed when a NEW
+                            // frame arrives). On device that reads exactly
+                            // like "desktop shows, input dead": the screen is
+                            // a photograph, the synthetic cursor still moves
+                            // (app-side), taps inject into a real desktop the
+                            // user cannot see, and nothing ever damages the
+                            // frozen frame. Respawn on ANY death; the badge
+                            // now also paints STALE when frames stop.
+                            val pre = frameId == 0
                             if (captureRespawns < 40) {
                                 captureRespawns++
-                                com.emux.EmuXLog.i("desktop: capture died before first frame - respawning (#$captureRespawns)")
-                                noteInfo("capture died pre-frame (rc=${cur.exitCode}) - respawning #$captureRespawns")
+                                com.emux.EmuXLog.i("desktop: capture died ${if (pre) "before first frame" else "AFTER frame $frameId"} - respawning (#$captureRespawns)")
+                                capErr = runCatching {
+                                    java.io.File(rootfs, "tmp/emux_cap.err").readText()
+                                        .lineSequence().filter { it.isNotBlank() }.toList().takeLast(3)
+                                        .joinToString(" | ").take(200)
+                                }.getOrDefault("<no cap.err>")
+                                lastCapErr = capErr
+                                noteInfo("capture died ${if (pre) "pre-frame" else "post-frame #$frameId"} (rc=${cur.exitCode}) - respawning #$captureRespawns; cap.err: $capErr")
                                 delay(2_000)
                                 if (state.value == State.IDLE || state.value == State.ERROR) break
                                 captureSession = TerminalSession(
@@ -1913,6 +1993,29 @@ class DesktopService(
         val age = System.currentTimeMillis() / 1000 - ts
         if (age in 0..maxAgeSec) n else null
     }.getOrNull()
+
+    // v0.2.68: the publication's AGE is the on-screen proof that the capture
+    // helper is alive: emux-capture rewrites /tmp/emux_cap_display every loop,
+    // so a dead helper freezes the epoch and this number climbs forever.
+    private fun capturePubRaw(): Pair<Int, Long>? = runCatching {
+        val parts = java.io.File(com.emux.core.FsLayout.linuxRoot(ctx), "tmp/emux_cap_display")
+            .readText().trim().split(Regex("\\s+"))
+        val n = parts.getOrNull(0)?.toIntOrNull() ?: return@runCatching null
+        val ts = parts.getOrNull(1)?.toLongOrNull() ?: return@runCatching null
+        n to ts
+    }.getOrNull()
+
+    @Volatile private var capturePubAtMs = -1L
+
+    /** Seconds since emux-capture last published; -1 if it never did. */
+    val capturePubAgeSec: Long get() =
+        if (capturePubAtMs < 0) -1 else (System.currentTimeMillis() - capturePubAtMs) / 1000
+
+    /** v0.2.70: last capture error tail, painted on the pane while STALE so a
+     *  screenshot names the tool killing the stream (no adb, no terminal). */
+    @Volatile var lastCapErr: String = ""; private set
+    private var errTail: String = ""
+    private var capErr: String = ""
 
     private fun surfaceXtestErrors(c: X11Client) {
         val errs = c.takeErrors()
