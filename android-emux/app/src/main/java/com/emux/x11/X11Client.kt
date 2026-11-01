@@ -94,6 +94,7 @@ class X11Client(
         const val OP_CONFIGURE_WINDOW = 12
         const val OP_GET_GEOMETRY = 14
         const val OP_QUERY_TREE = 15              // <-- was mislabelled QueryExtension
+        const val OP_GET_IMAGE = 73               // v0.2.71: native framebuffer grab
         const val OP_INTERN_ATOM = 16
         const val OP_GET_PROPERTY = 20
         const val OP_SEND_EVENT = 25
@@ -704,6 +705,69 @@ class X11Client(
     fun readEvent(timeoutMs: Int = 100): ByteBuffer? {
         val pkt = readPacket(timeoutMs) ?: return null
         return ByteBuffer.wrap(pkt).order(order)
+    }
+
+    /**
+     * v0.2.71 — THE CAPTURE FIX. XGetImage(root, ZPixmap): the exact mechanism
+     * every proven X remoting project falls back to when MIT-SHM is
+     * unavailable (x11vnc's `-noxshm` path, TigerVNC's x0vncserver DumbFrame
+     * backend). One persistent connection, zero guest binaries per frame — the
+     * per-frame `xwd | xwdtopnm | pnmtoplainpnm | nc` chain it replaces was
+     * the component that kept dying/wedging on the field rootfs (whose package
+     * manager cannot run), freezing the desktop pane while input kept working.
+     *
+     * Wire format (xGetImageReq, 28 bytes = 7 units):
+     *   drawable CARD32, x INT16, y INT16, width CARD16, height CARD16,
+     *   plane-mask CARD32, format CARD8 (2 = ZPixmap) + 3 pad bytes.
+     * Reply: 32-byte header with depth@1 and visual@8, then
+     * length*4 bytes of ZPixmap data. For depth-24 TrueColor each pixel is
+     * 4 bytes in BGRx order (red_mask=0xFF0000), row-strided to a multiple
+     * of 4 bytes; the reply's scanlines are returned back-to-back from offset
+     * 32 and the stride is derived from the payload size (never assumed).
+     *
+     * Returns packed 0xFFRRGGBB ARGB ints (w*h) ready for Bitmap.setPixels,
+     * or null on any protocol failure so the caller can back off/reconnect.
+     */
+    fun grabRootArgb(): IntArray? {
+        if (rootWindow == 0) return null
+        val w = screenWidth; val h = screenHeight
+        if (w <= 0 || h <= 0) return null
+        val req = ByteBuffer.allocate(24).order(order)
+        req.putInt(rootWindow)
+        req.putShort(0)                 // x
+        req.putShort(0)                 // y
+        req.putShort(w.toShort())       // width
+        req.putShort(h.toShort())       // height
+        req.putInt(-1)                  // plane-mask: all planes
+        req.put(2)                      // format: ZPixmap
+        req.put(0); req.put(0); req.put(0)
+        // The full-screen reply is multi-megabyte; give it room. 6 s matches
+        // what x11vnc tolerates for GetImage on a loaded software server.
+        val r = requestReply(OP_GET_IMAGE, 0, req.array(), 6_000) ?: return null
+        if (r[0].toInt() != PKT_REPLY) return null
+        val replyDepth = r[1].toInt() and 0xFF
+        if (replyDepth != 24 && replyDepth != 32) return null
+        if (r.size < 32 + w * h * 4) return null
+        val data = r
+        val stride = (data.size - 32) / h          // actual bytes per scanline
+        if (stride < w * 4) return null
+        val out = IntArray(w * h)
+        var src = 32
+        var dst = 0
+        for (y in 0 until h) {
+            var x = 0
+            while (x < w) {
+                val o = src + x * 4
+                val b = data[o].toInt() and 0xFF
+                val g = data[o + 1].toInt() and 0xFF
+                val red = data[o + 2].toInt() and 0xFF
+                out[dst + x] = (0xFF shl 24) or (red shl 16) or (g shl 8) or b
+                x++
+            }
+            src += stride
+            dst += w
+        }
+        return out
     }
 
     fun close() {

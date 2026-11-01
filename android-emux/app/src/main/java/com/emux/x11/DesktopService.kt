@@ -188,6 +188,7 @@ class DesktopService(
             State.ERROR -> "X: error"
         }
         val cap = when {
+            nativeFresh -> "capture: native XGetImage ($nativeFrames frames)"
             captureSession == null -> "capture: not started"
             captureSession?.state?.value == TerminalSession.State.DEAD ->
                 "capture: exited (${captureSession?.exitCode})"
@@ -225,6 +226,105 @@ class DesktopService(
 
     /** Scratch buffer reused across frames → zero steady-state allocations. */
     private var scratchPx: IntArray? = null
+
+    // --------------------------------------------------------------------- v0.2.71
+    // NATIVE IN-APP CAPTURE — the x0vncserver/x11vnc model, finally.
+    // Every proven X-remoting project reads the framebuffer through ONE
+    // persistent X connection (MIT-SHM when available, GetImage(ZPixmap) as
+    // the universal fallback). Our per-frame guest pipeline
+    // (xwd | xwdtopnm | pnmtoplainpnm | nc → :7001) spawns 4+ proot'd
+    // processes PER FRAME on a rootfs whose package manager cannot run —
+    // the field verdicts (v0.2.69 capage=22s, v0.2.70 capage=15s with a
+    // healthy input plane) are that chain wedging/dying cyclically. Native
+    // capture needs only the X socket the control plane already proves
+    // works: zero guest binaries, zero FIFOs, zero per-frame processes.
+    // The legacy pipeline is kept as an automatic fallback.
+    @Volatile var captureMode: String = "-"; private set
+    @Volatile var nativeFrames: Long = 0; private set
+    @Volatile private var nativeFrameAtMs = 0L
+    private var nativeJob: Job? = null
+    private var nativeClient: X11Client? = null
+
+    /** True while native capture has delivered a frame in the last 15 s —
+     *  the guest publication file is then stale BY DESIGN and must not be
+     *  used for capage/plane-agreement/wedge decisions. */
+    private val nativeFresh: Boolean
+        get() = nativeFrameAtMs != 0L &&
+            System.currentTimeMillis() - nativeFrameAtMs < 15_000
+
+    /**
+     * Dedicated capture connection + GetImage loop. Runs until the session
+     * stops; reconnects (with backoff) across server deaths/rotations, so a
+     * display rotation or an LMK-kill of Xvfb self-heals without touching
+     * the control plane.
+     */
+    fun startNativeCapture(onUiInvalidated: () -> Unit) {
+        nativeJob?.cancel()
+        nativeJob = scope.launch {
+            var backoff = 500L
+            while (isActive && state.value != State.IDLE && state.value != State.ERROR) {
+                var c: X11Client? = null
+                try {
+                    c = X11Client(
+                        display = displayNum,
+                        unixSocketPath = java.io.File(
+                            com.emux.core.FsLayout.linuxRoot(ctx),
+                            "tmp/.X11-unix/X$displayNum").absolutePath,
+                    ).also { it.connect(10_000) }
+                    nativeClient = c
+                    backoff = 500L
+                    if (captureMode != "native") {
+                        captureMode = "native"
+                        noteInfo(
+                            "native capture UP: XGetImage(ZPixmap) on :$displayNum " +
+                                "${c.screenWidth}x${c.screenHeight} depth${c.depth} — " +
+                                "no guest binaries in the frame path")
+                    }
+                    var misses = 0
+                    while (isActive && state.value != State.IDLE && state.value != State.ERROR) {
+                        val t0 = System.currentTimeMillis()
+                        val px = runCatching { c.grabRootArgb() }.getOrNull()
+                        if (px == null) {
+                            misses++
+                            if (misses >= 3) throw java.io.IOException("native grab failed ${misses}x")
+                            kotlinx.coroutines.delay(200L * misses)
+                            continue
+                        }
+                        misses = 0
+                        val w = c.screenWidth; val h = c.screenHeight
+                        synchronized(frameLock) {
+                            ensureBitmap(w, h)
+                            currentFrame?.setPixels(px, 0, w, 0, 0, w, h)
+                        }
+                        nativeFrames++
+                        nativeFrameAtMs = System.currentTimeMillis()
+                        captureDisplay = displayNum
+                        capturePubAtMs = nativeFrameAtMs   // capage badge follows the real source
+                        frameId++
+                        if (state.value == State.AWAITING_FRAMES) state.value = State.CONNECTED
+                        onUiInvalidated()
+                        val minFrameMs = if (foreground && screenOn) 333L else 1_000L
+                        val spent = System.currentTimeMillis() - t0
+                        if (spent < minFrameMs) kotlinx.coroutines.delay(minFrameMs - spent)
+                        else kotlinx.coroutines.delay(30L)   // let the UI breathe under proot load
+                    }
+                } catch (e: kotlinx.coroutines.CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    if (nativeFrames > 0 || captureMode == "native") {
+                        noteInfo("native capture down (${e.message?.take(120) ?: e.javaClass.simpleName}) — reconnecting in ${backoff}ms")
+                    }
+                    captureMode = if (nativeFrames > 0) "native-retry" else captureMode
+                } finally {
+                    runCatching { c?.close() }
+                    if (nativeClient === c) nativeClient = null
+                }
+                if (!isActive || state.value == State.IDLE || state.value == State.ERROR) break
+                kotlinx.coroutines.delay(backoff)
+                backoff = (backoff * 2).coerceAtMost(8_000)
+            }
+        }
+    }
 
     /**
      * v0.1.101 MOBILE: X desktop size for this device, as "WxHx24".
@@ -281,6 +381,12 @@ class DesktopService(
         // desktop was permanently dead until app restart. Also stop() could leave
         // half-torn-down sessions behind. Reset cleanly before every start.
         if (state.value == State.ERROR) resetForRestart()
+        // v0.2.71: every session starts with clean native-capture state —
+        // a stale job from a stopped session must never be mistaken for a
+        // running one by the gate's `nativeJob?.isActive` check.
+        runCatching { nativeJob?.cancel() }; nativeJob = null
+        runCatching { nativeClient?.close() }; nativeClient = null
+        nativeFrames = 0L; nativeFrameAtMs = 0L; captureMode = "-"
         state.value = State.STARTING_X
         scope.launch {
             try {
@@ -849,9 +955,16 @@ class DesktopService(
                         // climbing capage on the badge is the field-visible
                         // proof of a dead capture helper (the frozen-photo
                         // failure mode round 3 fixes).
-                        capturePubRaw()?.let { (n, ts) ->
-                            captureDisplay = n
-                            capturePubAtMs = ts * 1000
+                        // v0.2.71: when NATIVE capture is the frame source the
+                        // guest publication file is stale BY DESIGN (nothing
+                        // rewrites it) — adopting it would climb capage and
+                        // trip the wedge guard against a perfectly healthy
+                        // stream.
+                        if (!nativeFresh) {
+                            capturePubRaw()?.let { (n, ts) ->
+                                captureDisplay = n
+                                capturePubAtMs = ts * 1000
+                            }
                         }
                         // v0.2.69 WEDGE GUARD: a capture helper can be ALIVE
                         // but stuck (xwd hung inside grab_frame); its session
@@ -863,7 +976,7 @@ class DesktopService(
                         // session (the respawn watcher recreates it) and name
                         // the likely killer from the capture's own error log.
                         val pubAge = capturePubAgeSec
-                        if (pubAge in 21..3_600 && frameId > 0 &&
+                        if (!nativeFresh && pubAge in 21..3_600 && frameId > 0 &&
                             state.value == State.CONNECTED) {
                             errTail = runCatching {
                                 java.io.File(rootfs, "tmp/emux_cap.err").readText()
@@ -875,6 +988,14 @@ class DesktopService(
                                 "capture WEDGED or DEAD: no publication for ${pubAge}s - " +
                                     "killing and respawning; cap.err tail: $errTail")
                             runCatching { captureSession?.stop() }
+                            // v0.2.71: if the NATIVE loop is the one that
+                            // stalled (job died or grab kept failing), the
+                            // legacy respawn watcher has nothing to respawn —
+                            // restart native directly.
+                            if (nativeFrames > 0 && nativeJob?.isActive != true) {
+                                noteInfo("wedge guard: restarting native XGetImage capture loop")
+                                startNativeCapture { frameCallback?.invoke() }
+                            }
                         }
                         val cap = freshCaptureDisplay()
                         if (cap != null) captureDisplay = cap
@@ -968,6 +1089,14 @@ class DesktopService(
                         }
                         tools = listOf("usr/bin/xwd", "usr/bin/pnmtoplainpnm", "bin/nc.openbsd")
                             .all { java.io.File(rootfs, it).isFile }
+                        // v0.2.71: native capture needs X ITSELF and nothing
+                        // else — no toolchain, no guest processes, no FIFO.
+                        // Start it the moment the server answers; on this
+                        // rootfs (package manager cannot run, musl loader
+                        // FAILED) it outranks the toolchain gate entirely.
+                        if (up && nativeJob?.isActive != true) {
+                            startNativeCapture { frameCallback?.invoke() }
+                        }
                         if (!(up && tools)) {
                             kotlinx.coroutines.delay(1_000); w++
                             // v0.1.99 PERF: 1 s poll (was 5); note cadence kept
@@ -977,6 +1106,15 @@ class DesktopService(
                         }
                     }
                     if (!(up && tools) || state.value == State.IDLE) {
+                        // v0.2.71: the toolchain gate is no longer fatal when
+                        // native capture is already delivering — the guest
+                        // pipeline (xwd/netpbm/nc) is OPTIONAL now.
+                        if (up && nativeFrames > 0 && state.value != State.IDLE) {
+                            noteInfo(
+                                "capture: toolchain never arrived but NATIVE XGetImage is " +
+                                    "delivering ($nativeFrames frames) - continuing without emux-capture")
+                            return@launch
+                        }
                         noteInfo("capture: gave up waiting (X up=$up tools=$tools)")
                         dumpDiagBundleToTerminal()
                         // v0.1.100: a gate timeout used to be silent in
@@ -994,7 +1132,18 @@ class DesktopService(
                         }
                         return@launch
                     }
-                    noteInfo("capture: X up and toolchain present - starting emux-capture")
+                    // v0.2.71: native capture won the race (it starts as soon
+                    // as X is up, minutes before the REST-pass toolchain
+                    // lands). The guest pipeline stays PARKED — zero per-frame
+                    // processes on the device. It only starts if native
+                    // produced nothing during the whole gate window.
+                    if (nativeFrames > 0) {
+                        noteInfo(
+                            "capture: NATIVE XGetImage is the frame source " +
+                                "($nativeFrames frames during gate) - guest emux-capture stays parked")
+                        return@launch
+                    }
+                    noteInfo("capture: X up + toolchain present but NATIVE capture produced no frames - starting emux-capture fallback")
                     captureSession = TerminalSession(
                         9002, ctx, root,
                         "emux-capture 127.0.0.1:$FRAME_PORT $displayNum",
