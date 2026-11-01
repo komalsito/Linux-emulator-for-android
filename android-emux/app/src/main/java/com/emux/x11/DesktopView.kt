@@ -427,6 +427,10 @@ class DesktopView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attrs) 
                 "proof=$proof touch=${desktop?.touchCount ?: 0} inj=${desktop?.injectCount ?: 0} " +
                     "fail=${desktop?.injectFail ?: 0} ctrl=:${desktop?.controlDisplay ?: -1} " +
                     "cap=:${desktop?.captureDisplay ?: -1} capage=${desktop?.capturePubAgeSec ?: -1}s " +
+                    // v0.2.71: name the frame SOURCE on the badge — a screenshot
+                    // must show whether pixels come from the in-app XGetImage
+                    // loop (src=native) or the parked guest pipeline (src=-).
+                    "src=${desktop?.captureMode ?: "-"} " +
                     (desktop?.agentEvidence() ?: ""), 16f, sp(40f), pb)
             drawGestureHint(canvas)
         }
