@@ -147,6 +147,10 @@ class X11Client(
      *  STALE pane so a field screenshot names the rejection (BadLength=16,
      *  BadDrawable=9, timeout...) instead of just saying "no frames". */
     var lastGrabError: String = ""
+    /** v0.2.73: why the last readPacket failed: "timeout" (server too slow to
+     *  finish the reply — the proot pipe) vs "eof" (connection died). The
+     *  v0.2.72 badge conflated them; the field answer was timeout. */
+    var lastReadErr: String = ""
 
     /** An X error packet, kept for diagnostics instead of desyncing the stream. */
     class XErrorEvent(
@@ -430,8 +434,8 @@ class X11Client(
                     else -> head
                 }
             }
-        } catch (_: SocketTimeoutException) { null }
-          catch (_: IOException) { null }
+        } catch (_: SocketTimeoutException) { lastReadErr = "timeout"; null }
+          catch (_: IOException) { lastReadErr = "eof"; null }
     }
 
     /**
@@ -736,29 +740,36 @@ class X11Client(
      * Returns packed 0xFFRRGGBB ARGB ints (w*h) ready for Bitmap.setPixels,
      * or null on any protocol failure so the caller can back off/reconnect.
      */
-    fun grabRootArgb(): IntArray? {
+    /** Full-root convenience wrapper (kept for callers/tests). */
+    fun grabRootArgb(): IntArray? =
+        grabRegionArgb(0, 0, screenWidth, screenHeight, 6_000, null)
+
+    /**
+     * v0.2.73 — BANDED CAPTURE. Field v0.2.72 proved the wire fix worked and
+     * then named the NEXT wall: `nat=no-reply(timeout/eof)` — one 3.5 MB
+     * full-screen reply cannot cross the proot-translated socket inside any
+     * sane timeout on this device, while small replies pass. x11vnc solves
+     * exactly this the same way: never request one giant image, request
+     * REGIONS sized to the measured pipe. Each band is decoded into [reuse]
+     * (or a fresh array) as w*rows packed ARGB ints, ready for
+     * Bitmap.setPixels at (0, y).
+     */
+    fun grabRegionArgb(
+        x: Int, y: Int, w: Int, h: Int, timeoutMs: Int, reuse: IntArray?,
+    ): IntArray? {
         if (rootWindow == 0) return null
-        val w = screenWidth; val h = screenHeight
         if (w <= 0 || h <= 0) return null
         val req = ByteBuffer.allocate(20).order(order)
         req.putInt(rootWindow)
-        req.putShort(0)                 // x
-        req.putShort(0)                 // y
-        req.putShort(w.toShort())       // width
-        req.putShort(h.toShort())       // height
+        req.putShort(x.toShort())
+        req.putShort(y.toShort())
+        req.putShort(w.toShort())
+        req.putShort(h.toShort())
         req.putInt(-1)                  // plane-mask: all planes
-        // v0.2.72 WIRE FIX — caught in seconds by tools/xgetimage_wiretest.py
-        // against a real Xvfb 21.1.7 (ERROR packet code 16 = BadLength on
-        // every grab), which is exactly what the field saw on v0.2.71:
-        // `src=native` with ZERO frames while the control plane (which never
-        // calls GetImage) stayed healthy. xGetImageReq is 24 bytes = 6 units
-        // TOTAL, and the ZPixmap FORMAT lives in header byte 1 (the minor-
-        // opcode slot), NOT in the body. v0.2.71 built a 24-byte body with
-        // the format inside it => 28-byte / 7-unit request => the server
-        // rejected every single grab with BadLength and the pane kept the
-        // last photograph forever.
-        val r = requestReply(OP_GET_IMAGE, 2, req.array(), 6_000)
-        if (r == null) { lastGrabError = "no-reply(timeout/eof)"; return null }
+        // Wire format verified by tools/wiretest/xgetimage_wiretest.py:
+        // 24 bytes / 6 units, ZPixmap format in header byte 1 (minor slot).
+        val r = requestReply(OP_GET_IMAGE, 2, req.array(), timeoutMs)
+        if (r == null) { lastGrabError = lastReadErr.ifBlank { "no-reply" }; return null }
         if (r[0].toInt() != PKT_REPLY) {
             lastGrabError = "pkt=${r[0]} err=${r[1].toInt() and 0xFF}"
             return null
@@ -772,18 +783,18 @@ class X11Client(
         val data = r
         val stride = (data.size - 32) / h          // actual bytes per scanline
         if (stride < w * 4) { lastGrabError = "stride=$stride"; return null }
-        val out = IntArray(w * h)
+        val out = if (reuse != null && reuse.size >= w * h) reuse else IntArray(w * h)
         var src = 32
         var dst = 0
-        for (y in 0 until h) {
-            var x = 0
-            while (x < w) {
-                val o = src + x * 4
+        for (row in 0 until h) {
+            var cx = 0
+            while (cx < w) {
+                val o = src + cx * 4
                 val b = data[o].toInt() and 0xFF
                 val g = data[o + 1].toInt() and 0xFF
                 val red = data[o + 2].toInt() and 0xFF
-                out[dst + x] = (0xFF shl 24) or (red shl 16) or (g shl 8) or b
-                x++
+                out[dst + cx] = (0xFF shl 24) or (red shl 16) or (g shl 8) or b
+                cx++
             }
             src += stride
             dst += w
