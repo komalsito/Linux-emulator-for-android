@@ -816,6 +816,14 @@ class DesktopService(
                 scope.launch {
                     while (isActive && state.value != State.IDLE) {
                         kotlinx.coroutines.delay(5_000)
+                        // v0.2.68: record the publication even when STALE - a
+                        // climbing capage on the badge is the field-visible
+                        // proof of a dead capture helper (the frozen-photo
+                        // failure mode round 3 fixes).
+                        capturePubRaw()?.let { (n, ts) ->
+                            captureDisplay = n
+                            capturePubAtMs = ts * 1000
+                        }
                         val cap = freshCaptureDisplay()
                         if (cap != null) captureDisplay = cap
                         val c = xtest() ?: continue
@@ -969,12 +977,26 @@ class DesktopService(
                             pumpedCaptureSession = cur
                             pumpDiag("capture", cur)
                         }
-                        if (cur != null && cur.state.value == TerminalSession.State.DEAD &&
-                            frameId == 0) {
+                        if (cur != null && cur.state.value == TerminalSession.State.DEAD) {
+                            // v0.2.68 FIX (input-dead audit, round 3): the
+                            // `frameId == 0` gate meant a capture helper that
+                            // died AFTER delivering its first frame was never
+                            // respawned and never reported - the pane kept
+                            // painting its last bitmap forever while the
+                            // "LIVE x fps" badge froze at the last computed
+                            // rate (frameTimes is only trimmed when a NEW
+                            // frame arrives). On device that reads exactly
+                            // like "desktop shows, input dead": the screen is
+                            // a photograph, the synthetic cursor still moves
+                            // (app-side), taps inject into a real desktop the
+                            // user cannot see, and nothing ever damages the
+                            // frozen frame. Respawn on ANY death; the badge
+                            // now also paints STALE when frames stop.
+                            val pre = frameId == 0
                             if (captureRespawns < 40) {
                                 captureRespawns++
-                                com.emux.EmuXLog.i("desktop: capture died before first frame - respawning (#$captureRespawns)")
-                                noteInfo("capture died pre-frame (rc=${cur.exitCode}) - respawning #$captureRespawns")
+                                com.emux.EmuXLog.i("desktop: capture died ${if (pre) "before first frame" else "AFTER frame $frameId"} - respawning (#$captureRespawns)")
+                                noteInfo("capture died ${if (pre) "pre-frame" else "post-frame #$frameId"} (rc=${cur.exitCode}) - respawning #$captureRespawns")
                                 delay(2_000)
                                 if (state.value == State.IDLE || state.value == State.ERROR) break
                                 captureSession = TerminalSession(
@@ -1913,6 +1935,23 @@ class DesktopService(
         val age = System.currentTimeMillis() / 1000 - ts
         if (age in 0..maxAgeSec) n else null
     }.getOrNull()
+
+    // v0.2.68: the publication's AGE is the on-screen proof that the capture
+    // helper is alive: emux-capture rewrites /tmp/emux_cap_display every loop,
+    // so a dead helper freezes the epoch and this number climbs forever.
+    private fun capturePubRaw(): Pair<Int, Long>? = runCatching {
+        val parts = java.io.File(com.emux.core.FsLayout.linuxRoot(ctx), "tmp/emux_cap_display")
+            .readText().trim().split(Regex("\\s+"))
+        val n = parts.getOrNull(0)?.toIntOrNull() ?: return@runCatching null
+        val ts = parts.getOrNull(1)?.toLongOrNull() ?: return@runCatching null
+        n to ts
+    }.getOrNull()
+
+    @Volatile private var capturePubAtMs = -1L
+
+    /** Seconds since emux-capture last published; -1 if it never did. */
+    val capturePubAgeSec: Long get() =
+        if (capturePubAtMs < 0) -1 else (System.currentTimeMillis() - capturePubAtMs) / 1000
 
     private fun surfaceXtestErrors(c: X11Client) {
         val errs = c.takeErrors()
