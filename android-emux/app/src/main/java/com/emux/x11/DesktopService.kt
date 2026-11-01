@@ -824,6 +824,28 @@ class DesktopService(
                             captureDisplay = n
                             capturePubAtMs = ts * 1000
                         }
+                        // v0.2.69 WEDGE GUARD: a capture helper can be ALIVE
+                        // but stuck (xwd hung inside grab_frame); its session
+                        // never reports DEAD, so the respawn watcher never
+                        // fires and the pane stays a photograph with a frozen
+                        // badge. emux-capture republishes /tmp/emux_cap_display
+                        // at the TOP of every loop, so >20 s without a
+                        // publication means the loop is not looping: stop the
+                        // session (the respawn watcher recreates it) and name
+                        // the likely killer from the capture's own error log.
+                        val pubAge = capturePubAgeSec
+                        if (pubAge in 21..3_600 && frameId > 0 &&
+                            state.value == State.CONNECTED) {
+                            val errTail = runCatching {
+                                java.io.File(rootfs, "tmp/emux_cap.err").readText()
+                                    .lineSequence().filter { it.isNotBlank() }.toList().takeLast(3)
+                                    .joinToString(" | ").take(200)
+                            }.getOrDefault("<no cap.err>")
+                            noteInfo(
+                                "capture WEDGED or DEAD: no publication for ${pubAge}s - " +
+                                    "killing and respawning; cap.err tail: $errTail")
+                            runCatching { captureSession?.stop() }
+                        }
                         val cap = freshCaptureDisplay()
                         if (cap != null) captureDisplay = cap
                         val c = xtest() ?: continue
@@ -996,7 +1018,12 @@ class DesktopService(
                             if (captureRespawns < 40) {
                                 captureRespawns++
                                 com.emux.EmuXLog.i("desktop: capture died ${if (pre) "before first frame" else "AFTER frame $frameId"} - respawning (#$captureRespawns)")
-                                noteInfo("capture died ${if (pre) "pre-frame" else "post-frame #$frameId"} (rc=${cur.exitCode}) - respawning #$captureRespawns")
+                                val capErr = runCatching {
+                                    java.io.File(rootfs, "tmp/emux_cap.err").readText()
+                                        .lineSequence().filter { it.isNotBlank() }.toList().takeLast(3)
+                                        .joinToString(" | ").take(200)
+                                }.getOrDefault("<no cap.err>")
+                                noteInfo("capture died ${if (pre) "pre-frame" else "post-frame #$frameId"} (rc=${cur.exitCode}) - respawning #$captureRespawns; cap.err: $capErr")
                                 delay(2_000)
                                 if (state.value == State.IDLE || state.value == State.ERROR) break
                                 captureSession = TerminalSession(
