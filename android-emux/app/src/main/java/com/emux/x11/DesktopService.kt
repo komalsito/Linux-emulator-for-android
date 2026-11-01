@@ -250,6 +250,10 @@ class DesktopService(
     // cause (BadLength on every GetImage) sat invisible in the protocol.
     @Volatile var nativeGrabMs: Long = -1; private set
     @Volatile var nativeErr: String = ""; private set
+    /** v0.2.74: measured pipe throughput (KB/s) and current band height —
+     *  painted on the STALE pane so the field tells us the real ceiling. */
+    @Volatile var nativeKbPerS: Long = -1; private set
+    @Volatile var nativeBandRows: Int = 0; private set
     @Volatile private var lastAnyFrameAtMs = 0L
 
     /** True while native capture has delivered a frame in the last 15 s —
@@ -299,18 +303,19 @@ class DesktopService(
                     // pane goes live progressively instead of never.
                     val w = c.screenWidth; val h = c.screenHeight
                     var bandRows = 64
-                    var kbPerS = -1L
                     var refreshes = 0
                     run {
                         val p0 = System.currentTimeMillis()
                         val probe = runCatching { c.grabRegionArgb(0, 0, w, 16, 10_000, null) }.getOrNull()
                         val pms = (System.currentTimeMillis() - p0).coerceAtLeast(1)
                         if (probe != null) {
-                            kbPerS = (w * 16 * 4) / pms
-                            bandRows = ((kbPerS * 1024 * 6 / 5) / (w * 4)).toInt().coerceIn(8, h)
-                            noteInfo("native probe on :$displayNum: ${w}x16 in ${pms}ms -> ~${kbPerS}KB/s -> band ${bandRows} rows of $h")
+                            nativeKbPerS = (w * 16 * 2) / pms
+                            bandRows = ((nativeKbPerS * 1024 * 6 / 5) / (w * 2)).toInt().coerceIn(8, h)
+                            nativeBandRows = bandRows
+                            noteInfo("native probe on :$displayNum: ${w}x16 in ${pms}ms -> ~${nativeKbPerS}KB/s -> band ${bandRows} rows of $h")
                         } else {
                             bandRows = 8
+                            nativeBandRows = 8
                             noteInfo("native probe FAILED on :$displayNum (${c.lastGrabError}) - minimal 8-row bands")
                         }
                     }
@@ -355,7 +360,7 @@ class DesktopService(
                         if (state.value == State.AWAITING_FRAMES) state.value = State.CONNECTED
                         refreshes++
                         if (refreshes % 25 == 0) {
-                            noteInfo("native capture: ${nativeGrabMs}ms/refresh, band ${bandRows}r, ~${kbPerS}KB/s, frames=$nativeFrames")
+                            noteInfo("native capture: ${nativeGrabMs}ms/refresh, band ${bandRows}r, ~${nativeKbPerS}KB/s, frames=$nativeFrames")
                         }
                         val minFrameMs = if (foreground && screenOn) 333L else 1_000L
                         if (nativeGrabMs < minFrameMs) kotlinx.coroutines.delay(minFrameMs - nativeGrabMs)
@@ -411,16 +416,21 @@ class DesktopService(
             val shortSide = ((if (a >= 1f) longSide / a else longSide * a)
                 .coerceIn(360f, 1280f).toInt() / 2 * 2)
             val px = longSide * shortSide
-            if (px <= 921_600 * 2) return if (a >= 1f) "${longSide}x${shortSide}x24" else "${shortSide}x${longSide}x24"
+            // v0.2.74: depth 16, not 24. The field pipe (proot-translated
+            // server writes) moves ~bytes, not pixels: every capture payload
+            // is 2 B/px instead of 4 — half the wire, half the timeout risk —
+            // and ZPixmap depth-16 IS RGB565, the format the whole frame path
+            // already speaks. Guest scripts untouched (RES passes through).
+            if (px <= 921_600 * 2) return if (a >= 1f) "${longSide}x${shortSide}x16" else "${shortSide}x${longSide}x16"
         }
         val cfg = ctx.resources.configuration
-        if (cfg.smallestScreenWidthDp in 1 until 600) return "1280x720x24"
+        if (cfg.smallestScreenWidthDp in 1 until 600) return "1280x720x16"
         val dm = ctx.resources.displayMetrics
         val w = dm.widthPixels; val h = dm.heightPixels
-        if (w <= 0 || h <= 0) return "720x1280x24"
+        if (w <= 0 || h <= 0) return "720x1280x16"
         val longSide = 1280
         val shortSide = ((longSide * min(w, h) / max(w, h)).coerceIn(480, 1280) / 2 * 2)
-        return if (w >= h) "${longSide}x${shortSide}x24" else "${shortSide}x${longSide}x24"
+        return if (w >= h) "${longSide}x${shortSide}x16" else "${shortSide}x${longSide}x16"
     }
 
     // ------------------------------------------------------------------ start
@@ -441,6 +451,7 @@ class DesktopService(
         runCatching { nativeClient?.close() }; nativeClient = null
         nativeFrames = 0L; nativeFrameAtMs = 0L; captureMode = "-"
         nativeGrabMs = -1L; nativeErr = ""; lastAnyFrameAtMs = 0L
+        nativeKbPerS = -1L; nativeBandRows = 0
         state.value = State.STARTING_X
         scope.launch {
             try {

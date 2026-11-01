@@ -16,6 +16,7 @@ upgrade/downgrade in place with `adb install -r` against each other.
 | `emux-debug-v0.2.71-vc171.apk` | 0.2.71 | 171 | 51/0/0 | NATIVE in-app capture (XGetImage/ZPixmap on a dedicated X connection, the x11vnc/x0vncserver model); guest xwd/netpbm/nc pipeline demoted to fallback; `src=` badge field |
 | `emux-debug-v0.2.72-vc172.apk` | 0.2.72 | 172 | 51/0/0 | GetImage WIRE FIX (format byte in header, 6-unit request — v0.2.71's 28-byte request was BadLength-rejected on every grab); `nat=` failure reason on STALE pane; 25 s silence watchdog falls back to guest pipeline; wiretest harness in-repo |
 | `emux-debug-v0.2.73-vc173.apk` | 0.2.73 | 173 | 51/0/0 | BANDED GetImage: probe measures pipe KB/s, refresh sweeps ~1.2 s bands painted progressively (field v0.2.72: full 3.5 MB reply timed out); timeout vs eof distinguished in `nat=` |
+| `emux-debug-v0.2.74-vc174.apk` | 0.2.74 | 174 | 51/0/0 | depth-16 Xvfb (half the capture wire, RGB565 direct); X error CODES captured (`xerr=N`) + pipe KB/s and band rows painted on the STALE pane |
 
 Rebuild any of them with the zero-Gradle pipeline:
 `android-emux/tools/build-apk/no-gradle-build.sh` (see

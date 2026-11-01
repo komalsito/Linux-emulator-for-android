@@ -381,7 +381,10 @@ class DesktopView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attrs) 
                         // GetImage, timeout, bad depth...) or "silent", so a
                         // screenshot ends the archaeology instead of starting it.
                         "capage=${desktop?.capturePubAgeSec ?: -1}s " +
-                        "nat=${(desktop?.nativeErr ?: "").ifBlank { "silent" }.take(22)}",
+                        "nat=${(desktop?.nativeErr ?: "").ifBlank { "silent" }.take(22)} " +
+                        // v0.2.74: the measured pipe ceiling and band size,
+                        // on the pane, in the screenshot, no adb required.
+                        "pipe=${desktop?.nativeKbPerS ?: -1}K b=${desktop?.nativeBandRows ?: 0}r",
                     16f, sp(16f), stale)
                 // v0.2.70: name the killer ON the pane - the capture's own
                 // error tail, so the next field screenshot ends the archaeology.
