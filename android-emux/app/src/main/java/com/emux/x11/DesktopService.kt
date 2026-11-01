@@ -317,6 +317,9 @@ class DesktopService(
                             bandRows = 8
                             nativeBandRows = 8
                             noteInfo("native probe FAILED on :$displayNum (${c.lastGrabError}) - minimal 8-row bands")
+                            if (c.lastGrabError.startsWith("xerr") && fbMailSession == null) {
+                                ensureFbMail("native probe rejected on :$displayNum (${c.lastGrabError})")
+                            }
                         }
                     }
                     val bandBuf = IntArray(w * bandRows)
@@ -343,6 +346,9 @@ class DesktopService(
                             nativeErr = c.lastGrabError.ifBlank { "null" }
                             if (misses <= 2 || misses % 10 == 0) {
                                 noteInfo("native band miss #$misses on :$displayNum at y=$y: $nativeErr")
+                            }
+                            if (nativeFrames == 0L && nativeErr.startsWith("xerr") && fbMailSession == null) {
+                                ensureFbMail("native grabs rejected on :$displayNum ($nativeErr)")
                             }
                             if (misses >= 3) {
                                 throw java.io.IOException("native grab failed ${misses}x: $nativeErr")
@@ -532,6 +538,7 @@ class DesktopService(
                 runCatching {
                     java.io.File(emuxBin, "emux-x11").setExecutable(true, false)
                     java.io.File(emuxBin, "emux-capture").setExecutable(true, false)
+                    java.io.File(emuxBin, "emux-fbmail").setExecutable(true, false)
                 }
 
                 // 0) v0.1.17 BUGFIX #2 (the actual reason the screen stayed blank):
@@ -1120,9 +1127,24 @@ class DesktopService(
                     kotlinx.coroutines.delay(30_000)
                     while (isActive && state.value != State.IDLE && state.value != State.ERROR) {
                         kotlinx.coroutines.delay(5_000)
+                        // v0.2.75: the mailbox loop's guest side is a normal
+                        // session on a SIGSEGV-prone ROM — respawn it here.
+                        fbMailSession?.let { fb ->
+                            if (fb.state.value == TerminalSession.State.DEAD) {
+                                noteInfo("fbmail session died (rc=${fb.exitCode}) - respawning")
+                                fbMailSession = null
+                                ensureFbMail("respawn after guest death")
+                            }
+                        }
                         val silentMs = if (lastAnyFrameAtMs == 0L) Long.MAX_VALUE
                             else System.currentTimeMillis() - lastAnyFrameAtMs
-                        if (silentMs <= 25_000 || captureSession != null) continue
+                        if (silentMs <= 25_000) continue
+                        if (fbMailSession == null) {
+                            ensureFbMail("watchdog: ${silentMs / 1000}s without any frame")
+                            kotlinx.coroutines.delay(20_000)
+                            continue
+                        }
+                        if (captureSession != null) continue
                         val tools = listOf("usr/bin/xwd", "usr/bin/pnmtoplainpnm", "bin/nc.openbsd")
                             .all { java.io.File(rootfs, it).isFile }
                         val why = nativeErr.ifBlank { if (nativeFrames > 0) "native silent" else "native no-frames" }
@@ -1242,12 +1264,10 @@ class DesktopService(
                                 "($nativeFrames frames during gate) - guest emux-capture stays parked")
                         return@launch
                     }
-                    noteInfo("capture: X up + toolchain present but NATIVE capture produced no frames - starting emux-capture fallback")
-                    captureSession = TerminalSession(
-                        9002, ctx, root,
-                        "emux-capture 127.0.0.1:$FRAME_PORT $displayNum",
-                    ).also { it.start() }
-                    pumpDiag("capture", captureSession!!)
+                    // v0.2.75: the fallback ladder is native -> fbmail ->
+                    // (watchdog) legacy. The guest socket pipeline is the
+                    // last resort, not the second: it wedged every round.
+                    ensureFbMail("gate: native produced no frames in the gate window")
                 }
 
                 // v0.1.37 BUGFIX ("desktop says waiting for X frames" with zero
@@ -1550,6 +1570,8 @@ class DesktopService(
         scope.launch {
             runCatching { xSession?.stop() }; xSession = null
             runCatching { captureSession?.stop() }; captureSession = null
+            runCatching { fbJob?.cancel() }; fbJob = null
+            runCatching { fbMailSession?.stop() }; fbMailSession = null; fbFrames = 0L
             killDesktopGuests()   // v0.1.54: orphans hold :6000/:7001 guest-side
         }
     }
@@ -1955,6 +1977,120 @@ class DesktopService(
             }
             bmp.setPixels(px, 0, w, x, y, w, h)
         }
+    }
+
+    // ------------------------------------------------------------------ v0.2.75
+    // FILESYSTEM-MAILBOX CAPTURE (emux-fbmail). Four field rounds killed four
+    // socket transports on this device (guest pipeline wedge, full-GetImage
+    // timeout, banded-GetImage X errors) while the shared rootfs filesystem
+    // never failed once — every marker file crosses it cleanly. So pixels now
+    // travel by file: the guest writes xwd -root to a temp file and renames it
+    // atomically; the host polls, parses the XWD header and paints. The host
+    // read path never enters proot; the guest side is ONE xwd per frame over
+    // the guest-local socket (the only X data path this device ever liked).
+    @Volatile private var fbMailSession: TerminalSession? = null
+    private var fbJob: Job? = null
+    @Volatile var fbFrames: Long = 0; private set
+    private var fbPx: IntArray? = null
+
+    private fun ensureFbMail(reason: String) {
+        if (fbMailSession != null) return
+        noteInfo("v0.2.75 fbmail: $reason - starting filesystem-mailbox capture (guest xwd -> file -> host read)")
+        fbMailSession = TerminalSession(9003, ctx, root, "emux-fbmail $displayNum").also { it.start() }
+        startFbMailLoop()
+    }
+
+    private fun startFbMailLoop() {
+        fbJob?.cancel()
+        fbJob = scope.launch {
+            val f = java.io.File(com.emux.core.FsLayout.linuxRoot(ctx), "tmp/emux_fb.xwd")
+            var lastMod = -1L
+            while (isActive && state.value != State.IDLE && state.value != State.ERROR) {
+                val m = f.lastModified()
+                if (m > 0 && m != lastMod && f.length() > 104) {
+                    lastMod = m
+                    val dec = runCatching { f.readBytes() }.getOrNull()?.let { decodeXwdToFrame(it) }
+                    if (dec != null) {
+                        val w = dec.first; val h = dec.second; val px = dec.third
+                        synchronized(frameLock) {
+                            ensureBitmap(w, h)
+                            currentFrame?.setPixels(px, 0, w, 0, 0, w, h)
+                        }
+                        fbFrames++
+                        if (captureMode != "fbmail") {
+                            captureMode = "fbmail"
+                            noteInfo("fbmail capture UP: XWD mailbox painting ${w}x${h}")
+                        }
+                        lastAnyFrameAtMs = System.currentTimeMillis()
+                        capturePubAtMs = lastAnyFrameAtMs
+                        captureDisplay = displayNum
+                        frameId++
+                        if (state.value == State.AWAITING_FRAMES) state.value = State.CONNECTED
+                        frameCallback?.invoke()
+                    }
+                }
+                kotlinx.coroutines.delay(200)
+            }
+        }
+    }
+
+    /** Parse an XWD dump (xwd -root) into packed ARGB. Endian- and depth-
+     *  agnostic (16/24/32 bpp, LSB/MSB); returns null on anything unexpected
+     *  so the loop simply waits for the next mailbox drop. */
+    private fun decodeXwdToFrame(b: ByteArray): Triple<Int, Int, IntArray>? {
+        if (b.size < 104) return null
+        // Validated against a real `xwd -root` dump (Xvfb 21.1.7, depth 16):
+        // the HEADER is big-endian on this xwd even though the image
+        // byte_order field says LSBFirst, header_size is 107 (not 100) and
+        // ncolors lives at offset 76. Pixels start at header_size +
+        // ncolors*12. Detect the header endian by plausibility, never by
+        // assumption — this parser gets exactly one chance per field round.
+        val cand = listOf(java.nio.ByteOrder.BIG_ENDIAN, java.nio.ByteOrder.LITTLE_ENDIAN)
+        val le = cand.firstOrNull { o ->
+            val hs = java.nio.ByteBuffer.wrap(b, 0, 4).order(o).int
+            val w = java.nio.ByteBuffer.wrap(b, 16, 4).order(o).int
+            val h = java.nio.ByteBuffer.wrap(b, 20, 4).order(o).int
+            hs in 96..4096 && w in 1..8192 && h in 1..8192
+        } ?: return null
+        val bb = java.nio.ByteBuffer.wrap(b).order(le)
+        val headerSize = bb.getInt(0)
+        val depth = bb.getInt(12); val w = bb.getInt(16); val h = bb.getInt(20)
+        val byteOrder = bb.getInt(28); val bpp = bb.getInt(44); val bpl = bb.getInt(48)
+        val ncolors = bb.getInt(76)
+        if (w <= 0 || h <= 0 || w > 4096 || h > 4096 || depth == 0) return null
+        if (bpp != 16 && bpp != 24 && bpp != 32) return null
+        val off = headerSize + ncolors * 12
+        if (b.size < off + bpl.toLong() * h) return null
+        var px = fbPx; if (px == null || px.size < w * h) { px = IntArray(w * h); fbPx = px }
+        val lsb = byteOrder == 0
+        val step = bpp / 8
+        var y = 0
+        while (y < h) {
+            val row = off + y * bpl
+            var x = 0
+            while (x < w) {
+                val o = row + x * step
+                px[y * w + x] = if (bpp == 16) {
+                    val v = if (lsb) (b[o].toInt() and 0xFF) or ((b[o + 1].toInt() and 0xFF) shl 8)
+                            else ((b[o].toInt() and 0xFF) shl 8) or (b[o + 1].toInt() and 0xFF)
+                    android.graphics.Color.rgb(
+                        ((v shr 11) and 0x1F) * 255 / 31,
+                        ((v shr 5) and 0x3F) * 255 / 63,
+                        (v and 0x1F) * 255 / 31)
+                } else {
+                    val ri = if (lsb) step - 2 else 0      // BGRx / xRGB family
+                    val gi = if (lsb) step - 3 else 1
+                    val bi = if (lsb) step - 4 else 2
+                    val r = b[o + ri].toInt() and 0xFF
+                    val g = b[o + gi].toInt() and 0xFF
+                    val bl = b[o + bi].toInt() and 0xFF
+                    (0xFF shl 24) or (r shl 16) or (g shl 8) or bl
+                }
+                x++
+            }
+            y++
+        }
+        return Triple(w, h, px)
     }
 
     // --------------------------------------------------------------------- input
@@ -2551,6 +2687,7 @@ class DesktopService(
         inputAgentUp = false; inputTransport = "down"
         scope.launch {
             xSession?.stop(); captureSession?.stop()
+            runCatching { fbJob?.cancel() }; fbMailSession?.stop()
             xSession = null; captureSession = null
             killDesktopGuests()   // v0.1.54: guests outlive session stop otherwise
         }
