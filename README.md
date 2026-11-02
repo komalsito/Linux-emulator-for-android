@@ -92,6 +92,55 @@ app. Paste the doctor output into an issue and the cause is already identified.
 The desktop pane also runs a shorter version of this check ~6 s after launch, so
 a black root is reported without you asking.
 
+## If the desktop is visible but taps do nothing (v0.2.78)
+
+The input badge at the bottom of the desktop pane now reports **buttons**, not
+just the transport:
+
+```
+INPUT: XTEST (control plane)  btn=pervious wm=openbox     <- healthy, green
+INPUT: buttons SWALLOWED (motion ok)  btn=DEAD wm=openbox <- red, and it means it
+```
+
+`btn=` is a measurement, not a guess: the app creates a small window on the
+desktop, aims the pointer at it, injects a real `ButtonPress` through XTEST, and
+reads its **own** connection for the press that should come back — the `xev`
+experiment, in-app. `proof=ok` now requires both legs; a session where motion
+arrives but buttons do not reads `proof=motion-only`, which is what every build
+from v0.2.51 to v0.2.77 called `proof=ok`.
+
+The cause was our own `~/.config/openbox/rc.xml`: a `<context name="Frame">`
+mousebind makes Openbox `XGrabButton()` the **frame window** — the parent of
+every application window — and xorg checks passive grabs on every window from
+the root down to the one under the pointer, so the press was delivered to
+Openbox and never replayed. Motion and keys use different masks and were never
+affected. Desktop icons still worked (a desktop-type client is not framed),
+which is why this looked like "some things are clickable" for so long. Full
+mechanism, source citations and the measured 8-case matrix:
+`android-emux/docs/CLICK_SWALLOW_v0.2.78.md`.
+
+If it ever happens again the app escalates by itself: the guest rewrites the
+stamped `rc.xml` and sends `openbox --reconfigure` (no restart, windows kept),
+and if buttons are *still* swallowed it switches window manager — or runs with
+none, which still shows every window and still delivers every click.
+`emux-x11 doctor` has a **`clicks (button delivery)`** section naming which
+`rc.xml` Openbox is actually reading, its stamp, its grab contexts, the app's
+verdict and what the ladder did about it:
+
+```
+== clicks (button delivery) ==
+  WM mode:      openbox  RUNNING (pid 19617)
+  WM fallback:  not needed
+  rc.xml read:  /data/data/com.emux/files/rootfs/home/komalsito/.config/openbox/rc.xml
+  rc.xml stamp: EmuX rc v0.2.78 (current)
+  grab contexts: none
+  app verdict:  1762147200 ok ButtonPress b=1 arrived at 640,360 on 0x600001
+                (framed=yes, motion=2, release=1)
+  ladder action: -
+```
+
+`grab contexts: Frame`, `Client` or `Desktop` in that output is the bug, named.
+
 ## Distros & package management (v0.1.47)
 
 | Distro | Version | Download | Package manager | Notes |

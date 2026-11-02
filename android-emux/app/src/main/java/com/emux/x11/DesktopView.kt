@@ -402,14 +402,38 @@ class DesktopView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attrs) 
             // invisible once frames flow, and "clicks do nothing" needed an
             // always-visible answer: INPUT: agent = FIFO writer connected.
             val tr = desktop?.inputTransport ?: "down"
-            val up = tr != "down"
-            val ib = Paint().apply { color = if (up) Color.argb(0xC0, 0x66, 0xBB, 0x6A) else Color.argb(0xC0, 0xEF, 0x53, 0x50); textSize = sp(10f) }
+            // v0.2.78: a GREEN badge must mean "you can click", not "a socket
+            // connected". This is the same class of lie as audit v0.2.66 item 6
+            // (the badge painted from a connect-time flag) but one level deeper:
+            // here everything about the transport is fine, MOTION is honoured,
+            // and the desktop still ignores every touch because a window
+            // manager holds a passive button grab. So the button leg of the
+            // proof gets its own field and its own colour.
+            val btn = desktop?.buttonDelivered
+            val btnDead = btn == false
+            val btnTxt = when (btn) {
+                null -> "btn=..."
+                true -> "btn=" + (desktop?.btnMode ?: "ok")
+                false -> "btn=DEAD"
+            }
+            val wmTxt = "wm=" + (desktop?.wmMode?.take(9)?.ifEmpty { "?" } ?: "?")
+            val up = tr != "down" && !btnDead
+            val ib = Paint().apply {
+                color = when {
+                    btnDead -> Color.argb(0xC0, 0xEF, 0x53, 0x50)
+                    up -> Color.argb(0xC0, 0x66, 0xBB, 0x6A)
+                    tr != "down" -> Color.argb(0xC0, 0xFF, 0xCA, 0x63)  // measuring
+                    else -> Color.argb(0xC0, 0xEF, 0x53, 0x50)
+                }
+                textSize = sp(10f)
+            }
             canvas.drawText(
-                when (tr) {
-                    "xtest" -> "INPUT: XTEST (control plane)"
-                    "agent" -> "INPUT: guest xdotool agent (slow fallback)"
-                    else    -> "INPUT: down - no XTEST, no agent"
-                }, 16f, sp(28f), ib)
+                (when {
+                    btnDead && tr == "xtest" -> "INPUT: buttons SWALLOWED (motion ok)"
+                    tr == "xtest" -> "INPUT: XTEST (control plane)"
+                    tr == "agent" -> "INPUT: guest xdotool agent (slow fallback)"
+                    else -> "INPUT: down - no XTEST, no agent"
+                }) + "  $btnTxt $wmTxt", 16f, sp(28f), ib)
             // v0.2.65: the INPUT PROOF line, painted on the framebuffer itself
             // so it survives in any screenshot the user can take:
             //   touch= ACTION_DOWNs that reached this view (finger leg)

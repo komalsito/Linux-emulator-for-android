@@ -51,6 +51,11 @@ fi
 # WM AND the visibility xterm (field v0.2.31: a perfectly streaming,
 # pure-black desktop = X root window with zero clients). Markers are
 # per-session by definition: clear them at every launcher start.
+# v0.2.78: the button-delivery ladder's files are per-session too. A stale
+# /tmp/emux_btn_verdict would fire the ladder before the app had measured
+# anything, and a stale /tmp/emux_wm_fellback would forbid the one thing
+# that is known to restore clicks.
+[ -n "$DOCTOR_MODE" ] || rm -f /tmp/emux_btn_verdict /tmp/emux_btn_action /tmp/emux_btn_stages /tmp/emux_wm_fellback /tmp/emux_wm_mode 2>/dev/null
 [ -n "$DOCTOR_MODE" ] || rm -f /tmp/emux_wm_launched /tmp/emux_xterm_launched /tmp/emux_vis_launched /tmp/emux_obx_reconf /tmp/emux_agent_launched /tmp/emux_apt_updated 2>/dev/null
 export HOME="${HOME:-/root}"
 export DISPLAY=:$DN
@@ -88,6 +93,302 @@ running() {
   done
   return 1
 }
+# ============================================================================
+# v0.2.78 — THE CLICK-SWALLOW FIX. Field report: "the desktop is visible but I
+# cannot interact with it". Motion and keys were never affected; killing
+# Openbox made `xdotool click 1` show up in `xev` as ButtonPress=1.
+#
+# WHY OPENBOX EATS BUTTONS AND NOTHING ELSE — from the two programs' sources,
+# not from guesswork:
+#
+#  openbox/frame.h
+#    #define FRAME_CONTEXT(co, cl)  ((cl && cl->type != OB_CLIENT_TYPE_DESKTOP) ?
+#                                     co == OB_FRAME_CONTEXT_FRAME : FALSE)
+#    #define CLIENT_CONTEXT(co, cl) ((cl && cl->type == OB_CLIENT_TYPE_DESKTOP) ?
+#                                     co == OB_FRAME_CONTEXT_DESKTOP :
+#                                     co == OB_FRAME_CONTEXT_CLIENT)
+#  openbox/mouse.c  mouse_grab_for_client()
+#    if (FRAME_CONTEXT(i, client)) { win = client->frame->window;
+#        mode = GrabModeAsync; mask = ButtonPress|ButtonMotion|ButtonRelease; }
+#    else if (CLIENT_CONTEXT(i, client)) { win = client->window;
+#        mode = GrabModeSync;  mask = ButtonPressMask; }   /* "handled in event" */
+#    else continue;
+#    grab_button_full(b->button, b->state, win, mask, mode, OB_CURSOR_NONE);
+#  openbox/grab.c  grab_button_full()
+#    XGrabButton(dpy, button, state|mods, win, False /* owner_events */, ...)
+#
+# So a mousebind in exactly THREE contexts makes Openbox XGrabButton():
+#   Frame    -> on the FRAME window, which is the PARENT of the client window
+#   Client   -> on the client's own window, GrabModeSync
+#   Desktop  -> on the desktop client's window (pcmanfm --desktop), GrabModeSync
+# Every other context (Titlebar, Top/Bottom/Left/Right, corners, Close,
+# Maximize, Iconify, Icon, Shade, AllDesktops) is dispatched from Openbox's own
+# event SELECTION on the frame window, and Root from its root selection
+# (screen.c ROOT_EVENTMASK) - neither creates a grab, so neither can swallow.
+#
+#  xorg dix/events.c  CheckDeviceGrabs()
+#    for (; i < sprite->spriteTraceGood; i++) {
+#        pWin = sprite->spriteTrace[i];
+#        if (CheckPassiveGrabsOnWindow(pWin, device, ievent, sendCore, TRUE))
+#            return TRUE;                       /* event goes to the grabber */
+#    }
+# The walk covers EVERY window from the root down to the one under the pointer,
+# so a grab on an ANCESTOR intercepts a click on a descendant - and Openbox
+# grabs with owner_events=False, so the application never sees it. A Frame
+# binding therefore eats every plain left click inside every managed window,
+# which is why Openbox's own shipped rc.xml only ever binds Frame with a
+# modifier (A-Left / A-Right / A-Middle) and never a bare button.
+# Mask is ButtonPressMask (+motion for Frame) and NEVER keyboard or plain
+# motion: that is precisely why "motion and keys were never affected".
+#
+# TWO WAYS THE DISTRO DEFAULT (/etc/xdg/openbox/rc.xml) WON ON A REAL DEVICE.
+# It binds all three fatal contexts - Client (Left/Middle/Right Press) and
+# Desktop (Left/Right Press) - plus Frame with modifiers only:
+#   * this launcher wrote ~/.config/openbox/rc.xml ONLY IF ABSENT, so a file
+#     left by an older version (or dropped there by obconf / a distro upgrade)
+#     survived every app update. That is why ~25 releases of input fixes
+#     changed nothing at all on the device that reported this.
+#   * if that write fails for any reason (unwritable HOME, a full disk), Openbox
+#     silently reads the distro default instead and nothing ever notices.
+# So from v0.2.78 the file carries a VERSION STAMP and is rewritten whenever
+# the stamp does not match, a foreign file is backed up rather than trusted,
+# and rc_xml_grab_contexts() audits whichever file Openbox will actually read.
+#
+# FOCUS WITHOUT GRABS: with no Client binding, nothing focuses a window when it
+# is clicked (that binding's whole purpose is `<action name="Focus"/>`). The
+# replacement is <focus><followMouse>yes</followMouse>: Openbox focuses on
+# EnterNotify (openbox/event.c, `config_focus_follow`), and EmuX injects a
+# motion to the tap point before every press (X11Client.fakeButton), so focus
+# arrives first and the click lands in a focused window - with zero grabs.
+# ============================================================================
+EMUX_RCXML_STAMP="EmuX rc v0.2.78"
+
+# Which rc.xml will Openbox actually read? (Openbox falls back to the system
+# default when the user file is missing - that fallback is silent, which is
+# what made "we wrote a good rc.xml" unprovable from the field.)
+rc_xml_effective() {
+  for f in "$HOME/.config/openbox/rc.xml" /etc/xdg/openbox/rc.xml \
+           /usr/etc/xdg/openbox/rc.xml /usr/share/openbox/rc.xml; do
+    [ -e "$f" ] && { echo "$f"; return 0; }
+  done
+  return 1
+}
+
+# Print the contexts in $1 (default: the effective file) whose mousebinds make
+# Openbox XGrabButton(). Empty output = the config cannot swallow a click.
+rc_xml_grab_contexts() {
+  GXF="${1:-$(rc_xml_effective)}"
+  [ -n "$GXF" ] && [ -r "$GXF" ] || return 0
+  command -v awk >/dev/null 2>&1 || return 0
+  # awk, not grep: `name=` may list several contexts on one line (Openbox's own
+  # default does: name="Titlebar Top Right Bottom Left TLCorner ..."), and the
+  # mousebinds are children of the context element.
+  awk '
+    /<context[ \t]/ && /name=/ {
+      ctx=$0; sub(/.*name=[ \t]*"/, "", ctx); sub(/".*/, "", ctx); inctx=1
+    }
+    inctx && /<mousebind/ {
+      n=split(ctx, a, /[ \t]+/)
+      for (i=1; i<=n; i++) if (a[i]=="Frame" || a[i]=="Client" || a[i]=="Desktop") bad[a[i]]=1
+    }
+    /<\/context>/ { inctx=0 }
+    END { sep=""; for (k in bad) { printf "%s%s", sep, k; sep=" " } }
+  ' "$GXF" 2>/dev/null
+}
+
+# Write (or refresh) EmuX's rc.xml. Called at every seed AND by the escalation
+# ladder, so it must be idempotent and must never leave a half-written file.
+write_rc_xml() {
+  RCF="$HOME/.config/openbox/rc.xml"  # not RC: that is the launcher's exit status below
+  mkdir -p "$HOME/.config/openbox" 2>/dev/null
+  if [ -e "$RCF" ] && ! grep -qF "$EMUX_RCXML_STAMP" "$RCF" 2>/dev/null; then
+    # Two ways to recognise a file EmuX wrote itself: the stamp (v0.2.78+) and
+    # the theme name, which every version since v0.2.51 shipped but which the
+    # older files carry WITHOUT any stamp. Getting this wrong is not cosmetic:
+    # it would back up our own broken file, tell the user we replaced something
+    # of theirs, and - because a backup then exists - never say it again.
+    if grep -q "EmuX rc v0.2" "$RCF" 2>/dev/null || grep -q "<name>Emux</name>" "$RCF" 2>/dev/null; then
+      echo "emux-x11: upgrading our own rc.xml to $EMUX_RCXML_STAMP (the previous one bound the Frame context, which is what swallowed every click)" >&2
+    elif [ ! -e "$RCF.emux-bak" ]; then
+      cp "$RCF" "$RCF.emux-bak" 2>/dev/null && \
+        echo "emux-x11: replaced a foreign rc.xml (yours is kept as rc.xml.emux-bak) - a Client/Desktop/Frame mousebind in it is what swallowed every click" >&2
+    fi
+  fi
+  [ -e "$RCF" ] && grep -qF "$EMUX_RCXML_STAMP" "$RCF" 2>/dev/null && return 0
+  cat > "$RCF.emux-tmp" <<'RCXML'
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- EmuX rc v0.2.78 - rewritten on every launch whose stamp differs; a
+     foreign file is preserved as rc.xml.emux-bak. DO NOT ADD a mousebind in
+     the Frame, Client or Desktop context: those three are the only ones that
+     make Openbox XGrabButton() (mouse.c mouse_grab_for_client), and xorg
+     checks passive grabs on EVERY window from the root down to the one under
+     the pointer (dix/events.c CheckDeviceGrabs), so such a grab steals the
+     click from the application. See the long comment above write_rc_xml() in
+     assets/bin/emux-x11 and docs/CLICK_SWALLOW_v0.2.78.md. -->
+<openbox_config xmlns="http://openbox.org/3.4/rc">
+  <theme><name>Emux</name><titleLayout>NLIMC</titleLayout><keepBorder>yes</keepBorder><hideDisabled>no</hideDisabled><cornerRadius>6</cornerRadius></theme>
+  <!-- followMouse replaces the Client-context Focus binding: no grab, and the
+       motion EmuX injects before every tap brings focus with it. -->
+  <focus><followMouse>yes</followMouse><focusNew>yes</focusNew><raiseOnFocus>no</raiseOnFocus></focus>
+  <resize><drawContents>yes</drawContents></resize>
+  <mouse>
+    <!-- Root is Openbox's own root-window SELECTION, not a grab: right-click on
+         the bare desktop still opens the menu, and clicks that land on an
+         application window go to the application. -->
+    <context name="Root">
+      <mousebind button="Right" action="Press"><action name="ShowMenu"><menu>root-menu</menu></action></mousebind>
+    </context>
+    <!-- Titlebar/border/buttons are dispatched by coordinate from Openbox's
+         frame selection, so these are safe. They are deliberately NOT bound in
+         the "Frame" context, which would grab Left on the frame window and
+         steal every click inside the window below it. -->
+    <context name="Titlebar">
+      <mousebind button="Left" action="Press"><action name="Focus"/><action name="Raise"/></mousebind>
+      <mousebind button="Left" action="Drag"><action name="Move"/></mousebind>
+      <mousebind button="Left" action="DoubleClick"><action name="ToggleMaximize"/></mousebind>
+    </context>
+    <context name="Top"><mousebind button="Left" action="Drag"><action name="Resize"/></mousebind></context>
+    <context name="Left"><mousebind button="Left" action="Drag"><action name="Resize"/></mousebind></context>
+    <context name="Right"><mousebind button="Left" action="Drag"><action name="Resize"/></mousebind></context>
+    <context name="Bottom">
+      <mousebind button="Left" action="Press"><action name="Focus"/></mousebind>
+      <mousebind button="Left" action="Drag"><action name="Resize"/></mousebind>
+    </context>
+    <context name="TLCorner"><mousebind button="Left" action="Drag"><action name="Resize"/></mousebind></context>
+    <context name="TRCorner"><mousebind button="Left" action="Drag"><action name="Resize"/></mousebind></context>
+    <context name="BLCorner"><mousebind button="Left" action="Drag"><action name="Resize"/></mousebind></context>
+    <context name="BRCorner"><mousebind button="Left" action="Drag"><action name="Resize"/></mousebind></context>
+    <context name="Close"><mousebind button="Left" action="Click"><action name="Close"/></mousebind></context>
+    <context name="Maximize">
+      <mousebind button="Left" action="Click"><action name="ToggleMaximize"/></mousebind>
+      <mousebind button="Middle" action="Click"><action name="ToggleMaximizeVertical"/></mousebind>
+    </context>
+    <context name="Iconify"><mousebind button="Left" action="Click"><action name="Iconify"/></mousebind></context>
+  </mouse>
+</openbox_config>
+RCXML
+  # tmp + mv, never `cat >` straight onto the live file: a truncated rc.xml is
+  # worse than an old one (Openbox parses it, finds nothing, and then the audit
+  # below reports a config we believe we fixed).
+  if [ -s "$RCF.emux-tmp" ] && mv "$RCF.emux-tmp" "$RCF" 2>/dev/null; then
+    echo "emux-x11: wrote $RCF ($EMUX_RCXML_STAMP)" >&2
+    return 0
+  fi
+  rm -f "$RCF.emux-tmp" 2>/dev/null
+  echo "emux-x11: CANNOT WRITE $RCF - Openbox will read the distro default, which grabs buttons and makes every click die. Fix the HOME permissions." >&2
+  return 1
+}
+
+# v0.2.78: pids of LIVE window-manager processes, matched on argv[0]/argv[1]
+# BASENAME only. The launcher's own cmdline is `... emux-x11 openbox 1280x720 1`,
+# so anything that greps the whole cmdline matches the SESSION ITSELF and then
+# kills it (doctor()'s livepid() exists for exactly that reason). Zombies are
+# skipped: this container's PID 1 does not reap, so kill -0 lies about a WM we
+# already terminated.
+wm_pid() {
+  for f in /proc/[0-9]*/cmdline; do
+    p=${f#/proc/}; p=${p%/cmdline}
+    [ "$p" = "$$" ] && continue
+    pst=$(sed 's/.*) //' "/proc/$p/stat" 2>/dev/null | cut -d' ' -f1)
+    [ -n "$pst" ] && [ "$pst" != Z ] || continue
+    tr '\0' '\n' < "$f" 2>/dev/null | head -2 | while read -r a; do
+      case "$a" in */*) a=${a##*/} ;; esac
+      case "$a" in
+        openbox|openbox-session|twm|icewm|jwm|marco|metacity|fluxbox|xfwm4) echo match ;;
+      esac
+    done | grep -q match || continue
+    echo "$p"
+  done
+  return 0
+}
+
+# v0.2.78: switch window manager - or run with none at all - when the app has
+# measured that clicks do not reach applications. "No WM" is a real fallback,
+# not a defeat: the field measurement that started this fix was that KILLING
+# Openbox makes an injected click arrive (ButtonPress=1 in xev), and an
+# unmanaged desktop still shows every window, still takes focus via the app's
+# SetInputFocus(PointerRoot), and still delivers every click. A pretty desktop
+# that ignores the finger is worth less than a plain one that does not.
+# Runs at most once per session (guarded by /tmp/emux_wm_fellback).
+wm_fallback() {
+  [ -e /tmp/emux_wm_fellback ] && {
+    echo "emux-x11: WM fallback already applied this session - not switching again" >&2
+    return 0
+  }
+  touch /tmp/emux_wm_fellback 2>/dev/null
+  OLDM=$(cat /tmp/emux_wm_mode 2>/dev/null)
+  for p in $(wm_pid); do
+    echo "emux-x11: terminating WM pid $p ($OLDM) - $1" >&2
+    kill "$p" 2>/dev/null
+  done
+  i=0
+  while [ "$i" -lt 20 ] && [ -n "$(wm_pid)" ]; do sleep 0.1; i=$((i + 1)); done
+  for p in $(wm_pid); do kill -9 "$p" 2>/dev/null; done
+  for cand in /usr/bin/twm /usr/bin/icewm /usr/bin/jwm /usr/bin/marco \
+              /usr/bin/metacity /usr/bin/fluxbox /usr/bin/xfwm4; do
+    [ -x "$cand" ] || continue
+    [ "$(basename "$cand")" = "$OLDM" ] && continue
+    echo "emux-x11: starting fallback WM $cand" >&2
+    nohup "$cand" >/tmp/wm.log 2>&1 </dev/null &
+    FPID=$!
+    sleep 1
+    if kill -0 "$FPID" 2>/dev/null; then
+      basename "$cand" > /tmp/emux_wm_mode 2>/dev/null
+      echo "emux-x11: fallback WM alive (pid $FPID, $cand)" >&2
+      return 0
+    fi
+    echo "emux-x11: fallback WM $cand died within 1 s; wm.log tail:" >&2
+    tail -3 /tmp/wm.log >&2 2>/dev/null
+  done
+  echo none > /tmp/emux_wm_mode 2>/dev/null
+  echo "emux-x11: no fallback WM is installed - continuing WITHOUT a window manager (windows are unmanaged; clicks and keys still reach them)" >&2
+  return 0
+}
+
+# v0.2.78: BUTTON-DELIVERY ESCALATION LADDER (guest side).
+# The app measures whether an injected click actually reaches a managed window
+# (X11Client.probeButtonDelivery - a real window, a real ButtonPress round
+# trip, the xev experiment) and publishes the verdict to /tmp/emux_btn_verdict
+# as "<epoch> <state> <detail>". This watcher acts on state=dead:
+#   stage 1  rewrite the stamped rc.xml and `openbox --reconfigure` - fixes the
+#            CAUSE in a live session, no restart, no lost windows
+#   stage 2+ switch window manager (wm_fallback)
+# Every stage records what it did in /tmp/emux_btn_action, republishes
+# /tmp/emux_wm_mode, and DELETES the verdict so the app re-probes and either
+# reports recovered or escalates again. Bounded by /tmp/emux_btn_stages.
+btn_watch() {
+  STG=0
+  i=0
+  while [ "$i" -lt 900 ]; do
+    if [ -s /tmp/emux_btn_verdict ]; then
+      VST=$(sed -n 's/^[0-9][0-9]* *\([A-Za-z-]*\).*/\1/p' /tmp/emux_btn_verdict 2>/dev/null | head -1)
+      if [ "$VST" = dead ]; then
+        STG=$((STG + 1))
+        echo "$STG" > /tmp/emux_btn_stages 2>/dev/null
+        if [ "$STG" -le 1 ]; then
+          echo "emux-x11: button verdict DEAD (stage $STG) - rewriting rc.xml + reconfiguring the WM" >&2
+          write_rc_xml
+          RCX_BAD=$(rc_xml_grab_contexts)
+          echo "${RCX_BAD:-none}" | tr -d ' \n' > /tmp/emux_rcxml_grabs 2>/dev/null
+          if running openbox && command -v openbox >/dev/null 2>&1; then
+            openbox --reconfigure >/dev/null 2>&1 || true
+            echo "emux-x11: openbox --reconfigure sent (grabs now: ${RCX_BAD:-none})" >&2
+          fi
+          { echo "$(date +%s) stage1 rc=$(rc_xml_effective) grabs=${RCX_BAD:-none}"; } > /tmp/emux_btn_action 2>/dev/null
+        else
+          echo "emux-x11: button verdict STILL DEAD (stage $STG) - switching window manager" >&2
+          wm_fallback "stage $STG: clicks still not delivered after the rc.xml rewrite"
+          { echo "$(date +%s) stage$STG wm=$(cat /tmp/emux_wm_mode 2>/dev/null)"; } > /tmp/emux_btn_action 2>/dev/null
+        fi
+      fi
+      # Always consume it: a stale verdict would re-trigger the ladder forever,
+      # and the app rewrites a fresh one if the next probe still fails.
+      rm -f /tmp/emux_btn_verdict 2>/dev/null
+    fi
+    sleep 2; i=$((i + 1))
+  done
+}
+
 # v0.2.59 FIELD FIX — launch Openbox the way its OWN documentation specifies.
 #
 # openbox.org/help/Autostart, verbatim:
@@ -141,6 +442,9 @@ start_wm() {
   sleep 1
   if kill -0 "$WM_PID" 2>/dev/null; then
     touch /tmp/emux_wm_launched
+    # v0.2.78: publish which WM is running. The app paints it on the badge and
+    # the escalation ladder reads it so it never "falls back" to the same WM.
+    basename "$WM_BIN" > /tmp/emux_wm_mode 2>/dev/null
     echo "emux-x11: WM alive (pid $WM_PID, $WM_BIN)" >&2
     return 0
   fi
@@ -583,41 +887,40 @@ osd.bg.color: #1a1d24
 osd.active.label.text.color: #e8eaf0
 osd.inactive.label.text.color: #868c98
 THEME
-  # --- rc.xml: theme + sane mouse bindings (only if absent) ---
-  if [ ! -e "$HOME/.config/openbox/rc.xml" ]; then
-    cat > "$HOME/.config/openbox/rc.xml" 2>/dev/null <<'RCXML'
-<?xml version="1.0" encoding="UTF-8"?>
-<openbox_config xmlns="http://openbox.org/3.4/rc">
-  <theme><name>Emux</name><titleLayout>NLIMC</titleLayout><keepBorder>yes</keepBorder><hideDisabled>no</hideDisabled><cornerRadius>6</cornerRadius></theme>
-  <focus><followMouse>no</followMouse><focusNew>yes</focusNew><raiseOnFocus>no</raiseOnFocus></focus>
-  <resize><drawContents>yes</drawContents></resize>
-  <mouse>
-    <context name="Root">
-      <mousebind button="Right" action="Press"><action name="ShowMenu"><menu>root-menu</menu></action></mousebind>
-    </context>
-    <context name="Titlebar">
-      <mousebind button="Left" action="Press"><action name="Focus"/><action name="Raise"/></mousebind>
-      <mousebind button="Left" action="Drag"><action name="Move"/></mousebind>
-    </context>
-    <context name="Frame">
-      <mousebind button="Left" action="Press"><action name="Focus"/></mousebind>
-    </context>
-    <context name="Bottom">
-      <mousebind button="Left" action="Press"><action name="Focus"/></mousebind>
-      <mousebind button="Left" action="Drag"><action name="Resize"/></mousebind>
-    </context>
-    <context name="Close">
-      <mousebind button="Left" action="Click"><action name="Close"/></mousebind>
-    </context>
-    <context name="Maximize">
-      <mousebind button="Left" action="Click"><action name="ToggleMaximize"/></mousebind>
-    </context>
-    <context name="Iconify">
-      <mousebind button="Left" action="Click"><action name="Iconify"/></mousebind>
-    </context>
-  </mouse>
-</openbox_config>
-RCXML
+  # --- rc.xml: STAMPED AND REFRESHED (v0.2.78 click-swallow fix) ----------
+  # This used to be `if [ ! -e rc.xml ]`, which is exactly why a config left
+  # behind by an older version survived every app update and kept swallowing
+  # every click. write_rc_xml() rewrites whenever its stamp does not match and
+  # backs a foreign file up instead of trusting it; see the long comment above
+  # start_wm() for the Openbox/xorg evidence.
+  write_rc_xml
+  # Audit the file Openbox will ACTUALLY read - which is the distro default
+  # when ours could not be written. Frame/Client/Desktop are the only contexts
+  # that make Openbox XGrabButton(); any of them means clicks will not reach
+  # applications. Publish it so the pane, `doctor` and the app can all say so.
+  RCX_EFF=$(rc_xml_effective)
+  RCX_BAD=$(rc_xml_grab_contexts "$RCX_EFF")
+  echo "${RCX_BAD:-none}" | tr -d ' \n' > /tmp/emux_rcxml_grabs 2>/dev/null
+  echo "$RCX_EFF" > /tmp/emux_rcxml_file 2>/dev/null
+  if [ -n "$RCX_BAD" ]; then
+    echo "emux-x11: WARNING - $RCX_EFF binds grab-context(s): $RCX_BAD" >&2
+    echo "emux-x11: Openbox will XGrabButton() those and every injected click dies there. Rewriting it now." >&2
+    # Last resort: the effective file is NOT ours (HOME unwritable, or a
+    # read-only system default). Neutralise the system default in place when we
+    # can, because Openbox reads it whenever our own file is missing.
+    if [ "$RCX_EFF" != "$HOME/.config/openbox/rc.xml" ] && [ -w "$RCX_EFF" ]; then
+      cp "$RCX_EFF" "$RCX_EFF.emux-bak" 2>/dev/null
+      sed -e '/<context name="Client">/,/<\/context>/d' \
+          -e '/<context name="Desktop">/,/<\/context>/d' \
+          -e '/<context name="Frame">/,/<\/context>/d' "$RCX_EFF" > "$RCX_EFF.emux-tmp" 2>/dev/null && \
+        mv "$RCX_EFF.emux-tmp" "$RCX_EFF" 2>/dev/null && \
+        echo "emux-x11: stripped Frame/Client/Desktop contexts from $RCX_EFF (backup: $RCX_EFF.emux-bak)" >&2
+    fi
+    RCX_BAD=$(rc_xml_grab_contexts "$(rc_xml_effective)")
+    echo "${RCX_BAD:-none}" | tr -d ' \n' > /tmp/emux_rcxml_grabs 2>/dev/null
+    [ -n "$RCX_BAD" ] && echo "emux-x11: STILL bound after the rewrite ($RCX_BAD) - the app-side button probe will escalate (impervious XTEST / WM switch)" >&2
+  else
+    echo "emux-x11: rc.xml audit clean ($RCX_EFF binds no Frame/Client/Desktop context)" >&2
   fi
   # --- tint2 refresh: darker bar, bigger icons (rewrite once per stamp) ---
   if [ -e "$HOME/.config/tint2/tint2rc" ] && ! grep -q "EmuX tint2 panel (v0.2.54)" "$HOME/.config/tint2/tint2rc" 2>/dev/null; then
@@ -925,6 +1228,39 @@ doctor() {
     bad "xdotool is missing, so the FIFO fallback cannot inject. Input needs
     the XTEST control plane (host side) to work."
   fi
+
+  # v0.2.78: "input can be injected" is NOT "a click reaches an application".
+  # Motion-only proof is what let the click-swallow survive ~25 releases, so the
+  # button leg gets its own section: which WM, which rc.xml Openbox really read,
+  # whether that file binds a context Openbox turns into an XGrabButton, and
+  # what the app's own button probe concluded.
+  hdr "clicks (button delivery)"
+  kv "WM mode" "$(cat /tmp/emux_wm_mode 2>/dev/null || echo '?')  $(pst openbox)"
+  kv "WM fallback" "$([ -e /tmp/emux_wm_fellback ] && echo "APPLIED this session" || echo 'not needed')"
+  RCX_EFF_D=$(rc_xml_effective)
+  kv "rc.xml read" "${RCX_EFF_D:-NONE FOUND}"
+  if [ -n "$RCX_EFF_D" ]; then
+    if grep -qF "$EMUX_RCXML_STAMP" "$RCX_EFF_D" 2>/dev/null; then
+      kv "rc.xml stamp" "$EMUX_RCXML_STAMP (current)"
+    else
+      kv "rc.xml stamp" "NOT EmuX's - $(head -c 60 "$RCX_EFF_D" 2>/dev/null | tr '\n' ' ')"
+    fi
+    RCX_BAD_D=$(rc_xml_grab_contexts "$RCX_EFF_D")
+    kv "grab contexts" "${RCX_BAD_D:-none}"
+    if [ -n "$RCX_BAD_D" ]; then
+      bad "$RCX_EFF_D binds $RCX_BAD_D. Openbox turns a mousebind in those
+    contexts into XGrabButton() (mouse.c mouse_grab_for_client: Frame -> the
+    FRAME window, Client/Desktop -> the client window with GrabModeSync), and
+    xorg checks passive grabs on EVERY window from the root down to the one
+    under the pointer (dix/events.c CheckDeviceGrabs). With owner_events=False
+    the application never sees the ButtonPress - while motion and keys are
+    untouched, which is the 'visible but not clickable' report. The next
+    launcher run rewrites this file (stamp $EMUX_RCXML_STAMP)."
+    fi
+  fi
+  kv "app verdict" "$([ -s /tmp/emux_btn_verdict ] && cat /tmp/emux_btn_verdict 2>/dev/null || echo 'none published')"
+  kv "ladder action" "$(cat /tmp/emux_btn_action 2>/dev/null || echo '-')"
+  kv "ladder stages" "$(cat /tmp/emux_btn_stages 2>/dev/null || echo 0)"
 
   hdr "capture / frames"
   kv "emux-capture" "$(pst emux-capture)"
@@ -1350,6 +1686,40 @@ else
     if [ "$detail" != "$LAST_VERIFY" ]; then echo "verify_x: $detail" >&2; LAST_VERIFY="$detail"; fi
     return $res
   }
+  # v0.2.78 STRAY-XVFB FIX. Every ladder attempt used to leave its Xvfb behind.
+  # "adopt, don't fight" (v0.2.13) was right to forbid killing a server that is
+  # SERVING - that round murdered the only live server mid-session - but it was
+  # implemented as "never kill the previous attempt at all". So a ladder that
+  # walked :0 -> :0 -> :1 left unverified Xvfbs parked on :0 for the rest of the
+  # app's life: strays holding the very sockets the next session then has to
+  # rotate around, which is the reported "stray Xvfb on :0 before settling on
+  # :1". Retire OUR OWN previous attempt, and only when it is provably not
+  # serving - no unix socket newer than this session's marker AND nothing
+  # answering on its tcp port. That is the same evidence verify_x trusts, so a
+  # serving server can never be killed by this.
+  XVFB_PID=""; XVFB_PID_DN=""
+  retire_own_xvfb() {
+    [ -n "$XVFB_PID" ] || return 0
+    kill -0 "$XVFB_PID" 2>/dev/null || { XVFB_PID=""; return 0; }
+    local RD RP RI
+    RD="${XVFB_PID_DN:-$DN}"; RP=$((6000 + RD))
+    if [ -e "/tmp/.X11-unix/X$RD" ] && [ "/tmp/.X11-unix/X$RD" -nt /tmp/emux_sess_marker ]; then
+      echo "emux-x11: keeping Xvfb pid $XVFB_PID - it serves :$RD (fresh unix socket)" >&2
+      XVFB_PID=""; return 0
+    fi
+    if command -v nc >/dev/null 2>&1 && nc -z 127.0.0.1 "$RP" >/dev/null 2>&1; then
+      echo "emux-x11: keeping Xvfb pid $XVFB_PID - tcp $RP answers" >&2
+      XVFB_PID=""; return 0
+    fi
+    echo "emux-x11: retiring our own unverified Xvfb pid $XVFB_PID on :$RD (no fresh socket, tcp $RP silent)" >&2
+    kill "$XVFB_PID" 2>/dev/null
+    RI=0
+    while kill -0 "$XVFB_PID" 2>/dev/null && [ "$RI" -lt 20 ]; do sleep 0.1; RI=$((RI + 1)); done
+    kill -9 "$XVFB_PID" 2>/dev/null
+    XVFB_PID=""
+    return 0
+  }
+
   XTRY=0
   start_xvfb() { # rc: 0 up, 1 server died, 2 alive but not up yet
     # v0.1.88: keep THREE generations - attempt 1's log was being lost after
@@ -1359,6 +1729,10 @@ else
     # v0.2.13: the explicit previous-attempt kill is GONE - it murdered the
     # only serving server mid-session (see kill_stale_x note). A live
     # previous attempt is now ADOPTED instead (below), never killed.
+    # v0.2.78: ...but an attempt that is NOT serving is retired here, so the
+    # ladder cannot accumulate strays (see retire_own_xvfb above). Adoption is
+    # untouched: a verified server is never killed and never replaced.
+    retire_own_xvfb
     # v0.1.80/81: sweep + drop stale sockets on EVERY attempt
     kill_stale_x
     XTRY=$((XTRY + 1))
@@ -1372,6 +1746,7 @@ else
     # needs no shm syscalls at all. Our only clients are xwd/openbox.
     "$XVFB" :"$DN" -screen 0 "$RES" -listen tcp -ac -extension MIT-SHM "$@" >/tmp/xvfb.log 2>&1 &
     XPID=$!
+    XVFB_PID=$XPID; XVFB_PID_DN=$DN     # v0.2.78: ours to retire if it never serves
     i=0
     GONE=0
     while [ "$i" -lt 450 ]; do
@@ -1959,6 +2334,11 @@ fi
 # Runs in the background so the launcher can go on waiting on Xvfb;
 # its output lands in the pane log and in /tmp/emux_desktop_check.
 ( verify_desktop ) &
+# v0.2.78: watch for the app's button-delivery verdict and escalate
+# (rc.xml rewrite -> reconfigure -> WM switch). Must outlive the launcher's
+# PTY close, hence the HUP trap; it is a 2 s poll on two small files.
+( trap '' HUP
+  btn_watch ) >/dev/null 2>&1 &
 # v0.1.43: never exit silently — the Android side paints this on the desktop
 # pane, so a dying X server now names its own reason in the field.
 wait $XPID

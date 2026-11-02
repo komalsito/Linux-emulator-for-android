@@ -20,6 +20,7 @@ upgrade/downgrade in place with `adb install -r` against each other.
 | `emux-debug-v0.2.75-vc175.apk` | 0.2.75 | 175 | 52/0/0 | FILESYSTEM-MAILBOX capture (emux-fbmail): guest xwd -> atomic rename -> host reads the file (no proot in the read path); native->fbmail->legacy ladder; full X error forensics (maj/min/res); ENV_VERSION 73 re-seeds the helper |
 | `emux-debug-v0.2.76-vc176.apk` | 0.2.76 | 176 | 52/0/0 | MAILBOX READER: app polls /tmp/emux_frame.rgb (raw RGB565, already written by emux-capture every loop BEFORE the wedging nc push) + /tmp/emux_fb.xwd; emux-capture mail mode skips the push entirely; ENV_VERSION 74 |
 | `emux-debug-v0.2.77-vc177.apk` | 0.2.77 | 177 | 52/0/0 | post-frame launcher exit with a LIVE server no longer floods the pane with the diag wall (judge by server probe, not launcher rc); bounded post-frame X respawn |
+| `emux-debug-v0.2.78-vc178.apk` | 0.2.78 | 178 | 52/0/0 | CLICK SWALLOW: our own rc.xml bound the `Frame` context, so Openbox `XGrabButton`'d the parent of every app window and never replayed the press (motion/keys untouched) — rc.xml is now stamped, rewritten when the stamp differs and audited for grab contexts; in-app ButtonPress probe (`btn=`/`wm=` badge fields, `proof=motion-only` instead of a false `ok`); 2-stage escalation ladder (rewrite+`--reconfigure` → switch WM/none); host display pick by *connect* not bind; our own unverified Xvfb retired (the stray-on-`:0` report); ENV_VERSION 75 |
 
 Rebuild any of them with the zero-Gradle pipeline:
 `android-emux/tools/build-apk/no-gradle-build.sh` (see

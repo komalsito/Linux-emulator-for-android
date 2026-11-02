@@ -102,18 +102,42 @@ class X11Client(
         const val OP_GET_PROPERTY = 20
         const val OP_SEND_EVENT = 25
         const val OP_QUERY_POINTER = 38            // v0.2.65: the input self-test
+        const val OP_SET_INPUT_FOCUS = 42          // v0.2.78: focus follows the probe
         const val OP_GET_INPUT_FOCUS = 43          // the real XSync round-trip
         const val OP_QUERY_EXTENSION = 98
         const val OP_LIST_EXTENSIONS = 99
         const val OP_GET_KEYBOARD_MAPPING = 101
 
+        const val EV_BUTTON_PRESS = 4              // v0.2.78: the button proof
+        const val EV_BUTTON_RELEASE = 5
+        const val EV_MOTION_NOTIFY = 6
         const val EV_EXPOSE = 12
+        const val EV_MAP_NOTIFY = 19
         const val EV_GEOMETRY_NOTIFY = 22
         const val EV_MASK_BIT = 0x80
+
+        // Event masks (X.h) for the probe window's own selection.
+        const val MASK_BUTTON_PRESS = 1 shl 2
+        const val MASK_BUTTON_RELEASE = 1 shl 3
+        const val MASK_POINTER_MOTION = 1 shl 6
+        const val MASK_EXPOSURE = 1 shl 15
+        const val MASK_STRUCTURE_NOTIFY = 1 shl 17
+        // ChangeWindowAttributes value-mask bits (X.h).
+        const val CW_BACK_PIXEL = 1 shl 1
+        const val CW_EVENT_MASK = 1 shl 11
 
         // XTEST minor opcodes (xtestproto.h).
         const val XTEST_GET_VERSION = 0
         const val XTEST_FAKE_INPUT = 2
+        // v0.2.78: X_XTestGrabControl. xorg's ProcXTestGrabControl is
+        // REQUEST_SIZE_MATCH(xXTestGrabControlReq) -> an 8-byte request whose
+        // only field is `impervious` (CARD8), and it calls
+        // MakeClientGrabImpervious(client) / MakeClientGrabPervious(client).
+        // Impervious means this client's fake events are delivered even while
+        // another client holds a grab - the documented escape hatch from a
+        // window manager that XGrabButton()s the pointer (see emux-x11's
+        // write_rc_xml comment for the Openbox/xorg source evidence).
+        const val XTEST_GRAB_CONTROL = 3
 
         // xXTestFakeInputReq body kinds.
         const val FAKE_KEY_PRESS = 2
@@ -139,6 +163,14 @@ class X11Client(
         private const val PKT_GENERIC_EVENT = 35
 
         private const val HANDSHAKE_TIMEOUT_MS = 8_000
+
+        // v0.2.78: the button-delivery probe window. Small, and painted bright
+        // green so that a field screenshot which happens to catch its ~1 s
+        // lifetime is self-explanatory rather than mysterious.
+        private const val PROBE_X = 64
+        private const val PROBE_Y = 64
+        private const val PROBE_SIZE = 72
+        private const val PROBE_PIXEL = 0x00ff00
     }
 
     class XProtocolException(msg: String) : IOException(msg)
@@ -190,6 +222,14 @@ class X11Client(
     }
 
     var rootWindow = 0; private set
+    // v0.2.78: the probe window has to be created with the screen's own visual
+    // and depth - and since v0.2.74 the desktop may be depth 16, so neither can
+    // be assumed. Resource ids come from the connection setup's base+mask.
+    var rootVisual = 0; private set
+    var rootDepth = 0; private set
+    private var resBase = 0
+    private var resMask = 0
+    private var resCount = 0
     var screenWidth = 0; private set
     var screenHeight = 0; private set
     var depth = 0; private set
@@ -334,6 +374,9 @@ class X11Client(
                 ((rest[off + 1].toInt() and 0xFF) shl 8) or (rest[off].toInt() and 0xFF)
         }
 
+        // xConnSetup: release-number@0, resource-id-base@4, resource-id-mask@8.
+        resBase = u32(4)
+        resMask = u32(8)
         val vendorLen = u16(16)
         val nScreens = g(20)
         val nFormats = g(21)
@@ -364,6 +407,8 @@ class X11Client(
             rootWindow = u32(screenStart)
             screenWidth = u16(screenStart + 20)
             screenHeight = u16(screenStart + 22)
+            rootVisual = u32(screenStart + 32)      // root-visual VISUALID
+            rootDepth = g(screenStart + 38)         // root-depth CARD8
         }
 
         queryGeometry()                  // authoritative depth + dimensions
@@ -698,6 +743,241 @@ class X11Client(
     }
 
     fun fakeMotion(x: Int, y: Int) = xtestFake(FAKE_MOTION, 0, x, y)
+
+    // ============================== v0.2.78: windows, focus and the button proof
+    /** Next resource id for this connection (Xlib's base+mask arithmetic). */
+    private fun newResourceId(): Int {
+        resCount++
+        return (resBase + resCount) or (resBase and resMask.inv())
+    }
+
+    private fun send4(opcode: Int, win: Int) =
+        sendNoReply(opcode, 0, ByteBuffer.allocate(4).order(order).putInt(win).array())
+
+    /** Read and discard packets for a bounded time so the socket never fills with
+     *  events nobody asked for (the probe window selects several masks). */
+    private fun drainEvents(ms: Long) {
+        val dl = System.currentTimeMillis() + ms
+        while (System.currentTimeMillis() < dl) { readEvent(60) ?: continue }
+    }
+
+    /** GetGeometry -> [x, y, width, height]; x/y are relative to the PARENT. */
+    private fun geometryOf(win: Int): IntArray? {
+        val r = requestReply(OP_GET_GEOMETRY, 0,
+            ByteBuffer.allocate(4).order(order).putInt(win).array()) ?: return null
+        if (r[0].toInt() != PKT_REPLY) return null
+        val b = ByteBuffer.wrap(r).order(order)
+        // GetGeometryReply: depth@1, drawable@8, x@12 INT16, y@14 INT16,
+        // width@16 CARD16, height@18 CARD16, border-width@20 CARD16.
+        return intArrayOf(b.getShort(12).toInt(), b.getShort(14).toInt(),
+            b.getShort(16).toInt() and 0xFFFF, b.getShort(18).toInt() and 0xFFFF)
+    }
+
+    /** QueryTree -> the parent window id (0 when there is none / on failure). */
+    private fun parentOf(win: Int): Int {
+        val r = requestReply(OP_QUERY_TREE, 0,
+            ByteBuffer.allocate(4).order(order).putInt(win).array()) ?: return 0
+        if (r[0].toInt() != PKT_REPLY) return 0
+        // QueryTreeReply: root@8, parent@12, children-count@16, children@32.
+        return ByteBuffer.wrap(r).order(order).getInt(12)
+    }
+
+    /** QueryPointer(root) -> [rootX, rootY, child] (child = top-level child). */
+    fun queryPointerFull(): IntArray? {
+        if (rootWindow == 0) return null
+        val r = requestReply(OP_QUERY_POINTER, 0,
+            ByteBuffer.allocate(4).order(order).putInt(rootWindow).array()) ?: return null
+        if (r[0].toInt() != PKT_REPLY) return null
+        val b = ByteBuffer.wrap(r).order(order)
+        return intArrayOf(b.getShort(16).toInt(), b.getShort(18).toInt(), b.getInt(12))
+    }
+
+    /**
+     * XTEST GrabControl: make this connection's fake input ignore other
+     * clients' grabs. Returns "" on success, otherwise the reason.
+     *
+     * This is the documented escape hatch when a window manager holds a passive
+     * button grab we cannot configure away: Openbox's Frame/Client/Desktop
+     * mousebinds become XGrabButton() calls (mouse.c mouse_grab_for_client),
+     * xorg checks passive grabs on every window from the root down to the one
+     * under the pointer (dix/events.c CheckDeviceGrabs), and with
+     * owner_events=False the application never sees the press. Trade-off, stated
+     * plainly: while impervious, an ACTIVE grab (a window manager mid-drag) no
+     * longer receives our motion either, so titlebar dragging degrades. That is
+     * why the app only enables it after the honest path has been measured dead,
+     * and why the permanent fix is the stamped rc.xml (emux-x11 write_rc_xml).
+     */
+    fun xtestGrabControl(impervious: Boolean): String {
+        if (xtestOpcode < 0) return "no-xtest"
+        takeErrors()
+        sendNoReply(xtestOpcode, XTEST_GRAB_CONTROL,
+            byteArrayOf((if (impervious) 1 else 0).toByte(), 0, 0, 0))
+        if (!sync(2_000)) return "no-reply"
+        val e = takeErrors()
+        return if (e.isEmpty()) "" else e.first().describe()
+    }
+
+    /** Focus follows the pointer (SetInputFocus, focus=PointerRoot=1). Used with
+     *  the impervious fallback: there is then no WM binding to focus a window
+     *  when it is clicked, so the server does it. */
+    fun setInputFocusPointerRoot(): Boolean {
+        val body = ByteBuffer.allocate(8).order(order)
+        body.putInt(1)          // focus = PointerRoot
+        body.putInt(0)          // time = CurrentTime
+        // revert-to travels in the request's minor byte: RevertToPointerRoot = 1
+        sendNoReply(OP_SET_INPUT_FOCUS, 1, body.array())
+        return sync(2_000)
+    }
+
+    /** What [probeButtonDelivery] measured. */
+    class ButtonProbe(
+        val delivered: Boolean,
+        val presses: Int,
+        val releases: Int,
+        val motions: Int,
+        val detail: String,
+    )
+
+    /**
+     * v0.2.78 — THE OTHER HALF OF THE INPUT PROOF.
+     *
+     * The v0.2.65 proof injects a MOTION and reads the pointer back with
+     * QueryPointer. That is a real round trip and it caught a server that
+     * ignores FakeInput entirely - but it can never see a window manager that
+     * grabs buttons, because a button grab does not touch motion at all. The
+     * field result was `proof=ok touch=11 inj=32 fail=0` on a desktop where
+     * nothing could be opened: motion honoured, every click stolen.
+     *
+     * This is the `xev` experiment the field ran by hand, done in-app: create a
+     * real window (so the WM manages and frames it, exactly like any
+     * application), map it, aim the pointer at its centre, inject a
+     * ButtonPress/ButtonRelease through XTEST, and read our OWN connection for
+     * the ButtonPress. If a passive grab is holding buttons, the event never
+     * arrives - while the MotionNotify events we also selected DO arrive, which
+     * is the signature that separates "buttons swallowed" from "input dead".
+     *
+     * Safety: no button event is injected unless QueryPointer first confirms the
+     * pointer is inside the probe window's own rectangle. A missed aim would
+     * otherwise click whatever the user has open.
+     */
+    fun probeButtonDelivery(button: Int = 1, settleMs: Long = 700, waitMs: Long = 1_200): ButtonProbe {
+        if (!connected || rootWindow == 0) return ButtonProbe(false, 0, 0, 0, "not connected")
+        if (xtestOpcode < 0) return ButtonProbe(false, 0, 0, 0, "no XTEST")
+        if (resMask == 0) return ButtonProbe(false, 0, 0, 0, "no resource-id mask")
+        var wid = 0
+        var press = 0; var rel = 0; var mot = 0
+        return try {
+            wid = newResourceId()
+            val mask = MASK_BUTTON_PRESS or MASK_BUTTON_RELEASE or MASK_POINTER_MOTION or
+                MASK_EXPOSURE or MASK_STRUCTURE_NOTIFY
+            val cfp = rootVisual == 0            // CopyFromParent, as XCreateSimpleWindow
+            val body = ByteBuffer.allocate(36).order(order)
+            body.putInt(wid)
+            body.putInt(rootWindow)              // parent
+            body.putShort(PROBE_X.toShort()); body.putShort(PROBE_Y.toShort())
+            body.putShort(PROBE_SIZE.toShort()); body.putShort(PROBE_SIZE.toShort())
+            body.putShort(0)                     // border-width
+            body.putShort(if (cfp) 0 else 1)     // class: CopyFromParent / InputOutput
+            body.putInt(if (cfp) 0 else rootVisual)
+            body.putInt(CW_BACK_PIXEL or CW_EVENT_MASK)
+            body.putInt(PROBE_PIXEL)             // values ordered by mask bit
+            body.putInt(mask)
+            sendNoReply(OP_CREATE_WINDOW, if (cfp) 0 else rootDepth, body.array())
+            send4(OP_MAP_WINDOW, wid)
+
+            // Let the WM see it: reparenting/framing happens after MapNotify, and
+            // a framed window is the realistic case we must test against.
+            var mapped = false
+            var dl = System.currentTimeMillis() + settleMs
+            while (System.currentTimeMillis() < dl) {
+                val ev = readEvent(120) ?: continue
+                if ((ev.get(0).toInt() and 0x7F) == EV_MAP_NOTIFY) mapped = true
+            }
+
+            // Root coordinates of the client area, by walking up to the root and
+            // accumulating each ancestor's offset (the WM frame is in the path).
+            fun locate(): IntArray? {
+                val g = geometryOf(wid) ?: return null
+                var x = g[0]; var y = g[1]; var cur = wid; var hops = 0
+                while (hops < 8) {
+                    val p = parentOf(cur)
+                    if (p == 0 || p == rootWindow) break
+                    val pg = geometryOf(p) ?: break
+                    x += pg[0]; y += pg[1]; cur = p; hops++
+                }
+                return intArrayOf(x, y, g[2], g[3], hops)
+            }
+            val l0 = locate()
+            if (l0 == null) return ButtonProbe(false, press, rel, mot,
+                "probe window created (mapped=$mapped) but GetGeometry never answered")
+
+            // Aim, then verify by QueryPointer before pressing anything.
+            var aim = intArrayOf(l0[0] + l0[2] / 2, l0[1] + l0[3] / 2)
+            var inside = false
+            var tries = 0
+            while (tries < 2 && !inside) {
+                tries++
+                fakeMotion(aim[0], aim[1])
+                Thread.sleep(150)
+                val l = locate() ?: l0
+                val pq = queryPointerFull()
+                if (pq != null && pq[0] >= l[0] && pq[0] <= l[0] + l[2] &&
+                    pq[1] >= l[1] && pq[1] <= l[1] + l[3]) {
+                    aim = intArrayOf(pq[0], pq[1]); inside = true
+                } else {
+                    aim = intArrayOf(l[0] + l[2] / 2, l[1] + l[3] / 2)
+                }
+            }
+            if (!inside) return ButtonProbe(false, press, rel, mot,
+                "aim-miss: the pointer never landed inside the probe window " +
+                    "(rect ${l0[0]},${l0[1]} ${l0[2]}x${l0[3]}, framed=${l0[4] > 0}) - no click injected")
+
+            val framed = l0[4] > 0
+            takeErrors()
+            xtestFake(FAKE_BUTTON_PRESS, button, aim[0], aim[1])
+            Thread.sleep(90)
+            xtestFake(FAKE_BUTTON_RELEASE, button, aim[0], aim[1])
+            // One more motion AFTER the click, inside the same read window. Without
+            // it a failure cannot be classified: "no ButtonPress" alone is also what
+            // a dead transport looks like. "MotionNotify arrived, ButtonPress did
+            // not" is the passive-grab signature, measured on the same connection at
+            // the same moment (and it is exactly what the field's xev showed).
+            xtestFake(FAKE_MOTION, 0, (aim[0] + 1).coerceAtMost(screenWidth - 2), aim[1])
+            var got = false
+            dl = System.currentTimeMillis() + waitMs
+            while (System.currentTimeMillis() < dl) {
+                val ev = readEvent(160) ?: continue
+                when (ev.get(0).toInt() and 0x7F) {
+                    EV_BUTTON_PRESS -> {
+                        press++
+                        if ((ev.get(1).toInt() and 0xFF) == button) got = true
+                    }
+                    EV_BUTTON_RELEASE -> rel++
+                    EV_MOTION_NOTIFY -> mot++
+                }
+                if (got) break
+            }
+            val errs = takeErrors()
+            val hexw = "0x" + Integer.toHexString(wid)
+            val detail = if (got)
+                "ButtonPress b=$button arrived at ${aim[0]},${aim[1]} on $hexw " +
+                    "(framed=$framed, motion=$mot, release=$rel)"
+            else
+                "NO ButtonPress in ${waitMs}ms on $hexw (framed=$framed) while " +
+                    "motion=$mot events DID arrive" +
+                    if (errs.isNotEmpty()) "; " + errs.first().describe() else ""
+            ButtonProbe(got, press, rel, mot, detail)
+        } catch (e: Exception) {
+            ButtonProbe(false, press, rel, mot, "probe threw ${e.javaClass.simpleName}: ${e.message?.take(80)}")
+        } finally {
+            if (wid != 0) runCatching {
+                send4(OP_UNMAP_WINDOW, wid)
+                send4(OP_DESTROY_WINDOW, wid)
+                sync(800)
+                drainEvents(120)
+            }
+        }
+    }
 
     /**
      * v0.2.65 INPUT SELF-TEST instrument: where does the server think the

@@ -665,11 +665,26 @@ class DesktopService(
                 // every component (emux-x11, emux-capture, X11Client, probes)
                 // is told the number, so a held :0 can no longer black-screen
                 // the tab.
+                // v0.2.78 STRAY-XVFB FIX (half 1 of 2 - the other half is
+                // emux-x11's retire_own_xvfb): pick the display by CONNECT, not
+                // by BIND. The bind test has two failure modes, and each one
+                // sends the session somewhere it should not go:
+                //   * a bind FAILURE is not evidence of occupation. A wildcard
+                //     bind over a loopback-specific listener succeeds (the
+                //     v0.2.17 lesson, finally applied here too), and an
+                //     SELinux denial on xserver_port would make EVERY candidate
+                //     look taken - firstOrNull then returns null and the `?: 0`
+                //     silently puts the session on :0;
+                //   * a stale X$n socket FILE whose server is long dead looks
+                //     occupied forever, so the session walks to :1 while the
+                //     guest ladder starts yet another server on the way. That
+                //     combination is the reported "stray Xvfb on :0 before
+                //     settling on :1".
+                // Honest test: nothing ANSWERS on tcp 6000+n, and nothing
+                // ANSWERS on the unix socket. A file with no listener behind it
+                // is debris (the launcher sweeps it), not an occupant.
                 displayNum = (0..3).firstOrNull { n ->
-                    val tcpFree = runCatching {
-                        java.net.ServerSocket(6000 + n).close(); true
-                    }.getOrDefault(false)
-                    tcpFree && !java.io.File(rootfs, "tmp/.X11-unix/X$n").exists()
+                    !portAnswering(6000 + n) && !unixAnswering(rootfs, n)
                 } ?: 0
                 noteInfo("desktop display: :$displayNum (tcp ${6000 + displayNum})")
                 runCatching {
@@ -1735,6 +1750,18 @@ class DesktopService(
         }.onFailure { com.emux.EmuXLog.e("killDesktopGuests failed (non-fatal)", it) }
     }
 
+    /** v0.2.78: does a listener answer on the guest's X$n unix socket? A socket
+     *  FILE with nothing behind it is debris, not an occupant - and under proot
+     *  the unix transport is the one that reliably works, so it is the honest
+     *  half of the display pick. */
+    private fun unixAnswering(rootfs: java.io.File, n: Int): Boolean = runCatching {
+        val s = android.net.LocalSocket()
+        s.connect(android.net.LocalSocketAddress(
+            java.io.File(rootfs, "tmp/.X11-unix/X$n").absolutePath,
+            android.net.LocalSocketAddress.Namespace.FILESYSTEM))
+        s.close(); true
+    }.getOrDefault(false)
+
     /** v0.2.17: does anything actually ANSWER on this port? (connect, not
      *  bind - bind cannot see loopback-specific listeners, see startDesktop.) */
     private fun portAnswering(port: Int): Boolean = runCatching {
@@ -1806,6 +1833,10 @@ class DesktopService(
                 // the server ignores us, hand input to the guest agent instead.
                 inputProof = "pending"
                 xtestIgnored = false
+                // v0.2.78: both are per-CONNECTION facts (XTEST GrabControl is
+                // per-client too), so a fresh connection must re-measure.
+                buttonDelivered = null
+                btnMode = "-"
                 Thread({ runInputProof(c) }, "emux-input-proof").apply { isDaemon = true }.start()
                 return true
             } catch (e: Exception) {
@@ -2244,6 +2275,34 @@ class DesktopService(
      */
     @Volatile var inputProof: String = "pending"; private set
 
+    // ------------------------------------------------------------------
+    // v0.2.78: the button leg of the input proof. `inputProof` alone could
+    // only ever say whether MOTION was honoured, and a window manager that
+    // grabs buttons leaves motion untouched - so ~25 releases shipped
+    // `proof=ok touch=11 inj=32 fail=0` over a desktop where nothing could be
+    // opened. buttonDelivered is null until measured, then true/false.
+    @Volatile var buttonDelivered: Boolean? = null; private set
+    /** How buttons get through: "-", "pervious" (normal), "impervious"
+     *  (XTEST GrabControl - a fallback, see X11Client.xtestGrabControl). */
+    @Volatile var btnMode: String = "-"
+    /** The guest ladder's own report, painted on the pane. */
+    val wmMode: String get() = guestTmp("emux_wm_mode")
+    val btnAction: String get() = guestTmp("emux_btn_action")
+    /** rc.xml grab contexts as audited by the launcher ("none" when clean). */
+    val rcGrabs: String get() = guestTmp("emux_rcxml_grabs")
+
+    private fun guestTmp(name: String): String = runCatching {
+        java.io.File(com.emux.core.FsLayout.linuxRoot(ctx), "tmp/$name")
+            .readText().trim().lineSequence().firstOrNull()?.take(60) ?: ""
+    }.getOrDefault("")
+
+    /** The launcher's escalation ladder reads this; it deletes it after acting. */
+    private fun publishBtnVerdict(state: String, detail: String) = runCatching {
+        val f = java.io.File(com.emux.core.FsLayout.linuxRoot(ctx), "tmp/emux_btn_verdict")
+        f.parentFile?.mkdirs()
+        f.writeText("${System.currentTimeMillis() / 1000} $state ${detail.take(100)}")
+    }.isSuccess
+
     /** Set when the proof showed the server ignoring/rejecting FakeInput. */
     @Volatile private var xtestIgnored = false
 
@@ -2452,6 +2511,8 @@ class DesktopService(
         runCatching { x11?.close() }
         x11 = null
         inputProof = "pending"
+        buttonDelivered = null      // v0.2.78: re-measure on the new connection
+        btnMode = "-"
         val rt = com.emux.core.FsLayout.linuxRoot(ctx)
         inputTransport =
             if (java.io.File(rt, "tmp/emux_agent_launched").isFile) "agent" else "down"
@@ -2505,6 +2566,12 @@ class DesktopService(
      * v0.2.65: see [inputProof]. Runs once per control-plane connection, on its
      * own daemon thread — never the FIFO writer's single thread (which would
      * stall real input behind it) and never the UI thread.
+     *
+     * v0.2.78: it now has TWO legs. Motion (the original QueryPointer round
+     * trip) proves the server honours FakeInput at all; the button leg
+     * ([X11Client.probeButtonDelivery]) proves a click actually reaches an
+     * application window. Only the second one can see a window manager that
+     * XGrabButton()s the pointer, which is the failure this release fixes.
      */
     private fun runInputProof(c: X11Client) {
         runCatching {
@@ -2525,13 +2592,17 @@ class DesktopService(
             if (p1 != null && kotlin.math.abs(p1.first - txp) <= 4 &&
                 kotlin.math.abs(p1.second - typ) <= 4
             ) {
-                inputProof = "ok"
-                com.emux.EmuXLog.i("input proof OK: server pointer moved to $txp,$typ as injected")
+                inputProof = "motion-ok"
+                com.emux.EmuXLog.i("input proof: MOTION ok (server pointer moved to $txp,$typ as injected)")
+                // v0.2.78: motion is not interaction. Prove a button too, and
+                // escalate if buttons are being swallowed.
+                buttonProofAndEscalate(c)
             } else {
                 xtestIgnored = true
                 inputProof =
                     if (errs.isNotEmpty()) "rejected:" + errs.first().describe().take(24)
                     else "ignored"
+                buttonDelivered = null
                 // v0.2.66 FIX (input-dead audit): the pane badge painted from
                 // inputTransport, which was set to "xtest" at connect time and
                 // never revisited - so a server that ignores FakeInput still
@@ -2549,6 +2620,101 @@ class DesktopService(
             inputProof = "proof-error"
             com.emux.EmuXLog.e("input proof threw", e)
         }
+    }
+
+    /**
+     * v0.2.78 — measure button delivery, then escalate until clicks work.
+     *
+     * The ladder is ordered cheapest-and-most-correct first:
+     *   1. ask the GUEST to rewrite the stamped rc.xml and `openbox
+     *      --reconfigure`. This removes the CAUSE (a Frame/Client/Desktop
+     *      mousebind becomes an XGrabButton, and xorg checks passive grabs on
+     *      every window from the root down, so the application never sees the
+     *      press) without touching the session: no restart, no lost windows.
+     *   2. XTEST GrabControl(impervious) on our own connection, plus
+     *      SetInputFocus(PointerRoot) so focus still follows the finger. Works
+     *      even when we cannot change the WM's configuration at all; costs
+     *      titlebar dragging (an active grab no longer sees our motion).
+     *   3. ask the GUEST to switch window manager, or run with none - measured
+     *      on the device that reported this: killing Openbox alone makes an
+     *      injected click arrive.
+     *
+     * Note what does NOT help: the guest xdotool agent. It injects through the
+     * same XTEST extension, so the same grab swallows it identically - which is
+     * why a failed button proof must never be reported as "input fell back to
+     * the agent" (that fallback is for servers that ignore FakeInput entirely).
+     */
+    private fun buttonProofAndEscalate(c: X11Client) {
+        var r = runCatching { c.probeButtonDelivery() }.getOrNull()
+        if (r == null) {
+            inputProof = "btn-probe-error"
+            noteInfo("button proof could not run (probe threw) - see logcat")
+            return
+        }
+        com.emux.EmuXLog.i("button proof: delivered=${r.delivered} ${r.detail}")
+        if (r.delivered) {
+            buttonDelivered = true
+            btnMode = "pervious"
+            inputProof = "ok"
+            publishBtnVerdict("ok", r.detail)
+            noteInfo("button proof OK: ${r.detail}")
+            return
+        }
+        buttonDelivered = false
+        inputProof = "motion-only"
+        noteInfo(
+            "BUTTONS ARE SWALLOWED (motion works): ${r.detail} - a window manager is " +
+                "holding a passive button grab. rc.xml binds: ${rcGrabs.ifEmpty { "?" }}, wm=${wmMode.ifEmpty { "?" }}")
+
+        // --- stage 1: guest rewrites rc.xml + reconfigures the WM ----------
+        publishBtnVerdict("dead", "stage1 ${r.detail}")
+        com.emux.EmuXLog.i("button ladder: stage 1 requested (guest rc.xml rewrite + reconfigure)")
+        var waited = 0
+        while (waited < 12_000 && c.connected) { Thread.sleep(500); waited += 500
+            if (!java.io.File(com.emux.core.FsLayout.linuxRoot(ctx), "tmp/emux_btn_verdict").exists()) break }
+        Thread.sleep(1_500)
+        if (c.connected) {
+            r = runCatching { c.probeButtonDelivery() }.getOrNull() ?: r
+            if (r.delivered) { btnRecovered(c, r, "stage 1: guest rewrote rc.xml + reconfigured the WM"); return }
+        }
+
+        // --- stage 2: the guest switches window manager, or runs without one -
+        // XTEST GrabControl(impervious) was tried here first and MEASURED not to
+        // help: against the Frame-context grab that caused this bug the server
+        // accepted the request and the click was still swallowed (case G of
+        // tools/x11probe/button_delivery_test.sh). The primitive stays available
+        // in X11Client for an ACTIVE grab, but the ladder does not depend on it -
+        // and it is not free: while impervious, a WM mid-drag stops seeing our
+        // motion. What does work is removing the grabber (case A: no WM at all).
+        // --- stage 3: guest switches WM, or runs without one --------------
+        if (c.connected) {
+            publishBtnVerdict("dead", "stage2 ${r.detail}")
+            noteInfo("button ladder stage 2: asking the guest to switch window manager " +
+                "(or run without one - unmanaged windows still take clicks)")
+            var w2 = 0
+            while (w2 < 14_000 && c.connected) { Thread.sleep(500); w2 += 500
+                if (!java.io.File(com.emux.core.FsLayout.linuxRoot(ctx), "tmp/emux_btn_verdict").exists()) break }
+            Thread.sleep(2_000)
+            if (c.connected) {
+                r = runCatching { c.probeButtonDelivery() }.getOrNull() ?: r
+                if (r.delivered) { btnRecovered(c, r, "stage 2: wm now ${wmMode.ifEmpty { "?" }}"); return }
+            }
+        }
+        inputProof = "motion-only"
+        buttonDelivered = false
+        noteInfo(
+            "buttons STILL swallowed after both ladder stages (${r.detail}). wm=${wmMode.ifEmpty { "?" }}, " +
+                "ladder=${btnAction.ifEmpty { "no action recorded" }}, rc.xml grabs=${rcGrabs.ifEmpty { "?" }}. " +
+                "Run: emux-x11 doctor")
+    }
+
+    private fun btnRecovered(c: X11Client, r: X11Client.ButtonProbe, how: String) {
+        buttonDelivered = true
+        if (btnMode == "-") btnMode = "pervious"
+        inputProof = if (btnMode == "impervious") "ok-imperv" else "ok"
+        publishBtnVerdict("recovered", "$how; ${r.detail}")
+        noteInfo("buttons DELIVERED again - $how (${r.detail})")
+        com.emux.EmuXLog.i("button ladder recovered: $how")
     }
 
     fun injectClick(xInXSpace: Int, yInXSpace: Int, button: Int = 1, press: Boolean) {
