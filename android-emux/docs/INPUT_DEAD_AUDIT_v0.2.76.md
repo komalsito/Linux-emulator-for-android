@@ -44,3 +44,19 @@ and the driver a PREBUILT_MERGED hook + cache-purge (posix_fadvise
 DONTNEED) before compile; the round's APK was produced with the direct
 K2JVMCompiler invocation (-no-stdlib, purged cache, 380m heap).
 Gate 52/0/0, signature 5e3ef254…a1fa, `adb install -r`.
+
+## Addendum — v0.2.77 (vc177): the pane wall over a living desktop
+
+Field v0.2.76: `mailbox capture UP (mail): painting 1280x694` at 09:55:28,
+then at 09:55:29 the full post-mortem diag bundle flooded the pane
+("desktop starts briefly and then gives this output"). The post-mortem
+itself said `tcp6000=true` — the server was ALIVE; what exited non-zero was
+the warm-start LAUNCHER a second after frames began flowing. The xSession
+watcher's fall-through treated any post-frame launcher death as terminal
+(setError + diag dump).
+
+v0.2.77 judges by the server, not the launcher's rc: post-frame death +
+server reachable (tcp probe / unix socket) = "daemons detached, session
+continues"; post-frame death + server gone = bounded whole-X respawn
+(3x) instead of an instant ERROR wall. The diag bundle now only appears
+when respawns are exhausted.

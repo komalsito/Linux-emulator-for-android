@@ -898,6 +898,43 @@ class DesktopService(
                                 noteInfo("x11 launcher exited cleanly - X/WM daemons detached, session continues")
                                 return@collect
                             }
+                            // v0.2.77 FIELD FIX (the pane wall of post-mortem):
+                            // the mailbox round proved frames can be flowing
+                            // (src=mail painting 1280x694) while the LAUNCHER
+                            // exits non-zero a second later (warm-start detach
+                            // path, or a detached daemon's rc leaking out).
+                            // The old fall-through treated ANY post-frame
+                            // launcher death as terminal: setError plus the
+                            // full diag bundle flooded the pane over a LIVING
+                            // desktop ("starts briefly then gives this
+                            // output"). Judge by the SERVER, not the rc:
+                            if (frameId > 0) {
+                                val srvAlive = runCatching {
+                                    java.net.Socket().also { sk ->
+                                        sk.connect(java.net.InetSocketAddress("127.0.0.1", 6000 + displayNum), 1_500)
+                                        sk.close()
+                                    }
+                                    true
+                                }.getOrDefault(false) ||
+                                    java.io.File(rootfs, "tmp/.X11-unix/X$displayNum").exists()
+                                if (srvAlive) {
+                                    noteInfo(
+                                        "v0.2.77: x11 launcher exited rc=${xSession?.exitCode} AFTER frames with the " +
+                                            "server still alive - daemons detached, session continues")
+                                    return@collect
+                                }
+                                if (xRespawns < 3 && state.value != State.IDLE) {
+                                    xRespawns++
+                                    noteInfo(
+                                        "v0.2.77: x11 server died AFTER frame $frameId (rc=${xSession?.exitCode}) - " +
+                                            "respawning the whole X session (#$xRespawns)")
+                                    kotlinx.coroutines.delay(2_000)
+                                    runCatching { killDesktopGuests() }
+                                    xSession = TerminalSession(9001 + xRespawns, ctx, root, cmd).also { it.start() }
+                                    pumpDiag("x11", xSession!!)
+                                    return@collect
+                                }
+                            }
                             // v0.1.79: a PRE-FRAME death is often transient - the
                             // v0.1.78 field round died on a first launch that
                             // landed inside our own background dpkg transaction
