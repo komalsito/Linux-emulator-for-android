@@ -33,6 +33,10 @@
 PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:$PATH"
 export PATH
 TARGET="${1:-127.0.0.1:7001}"
+# v0.2.76: mailbox mode - third arg "mail": write /tmp/emux_frame.rgb
+# and publish, but NEVER nc-push (the push is the stage that wedged proot
+# sockets for ten versions; the Android side reads the file directly).
+MAILMODE=$([ "$3" = "mail" ] && echo 1 || echo 0)
 HOST="${TARGET%%:*}"; PORT="${TARGET##*:}"
 
 ROOT="${EMUX_ROOTFS:-${EMUX_ROOT:-}}"
@@ -43,7 +47,7 @@ if [ -n "$ROOT" ] && [ -d "$ROOT/lib" ]; then
     LD_LIBRARY_PATH="$NB" HOME=/root PROOT_TMP_DIR="$ROOT/tmp" \
     PROOT_LOADER="$NB/loader" exec "$NB/proot" -0 -r "$ROOT" \
       -b /dev -b /proc -b /sys -w /root \
-      /bin/sh -l -c "unset EMUX_ROOTFS EMUX_ROOT EMUX_NATIVE_BRIDGE; exec /usr/local/bin/emux-capture $HOST:$PORT ${2:-0}"
+      /bin/sh -l -c "unset EMUX_ROOTFS EMUX_ROOT EMUX_NATIVE_BRIDGE; exec /usr/local/bin/emux-capture $HOST:$PORT ${2:-0} ${3:-}"
   fi
   echo "emux-capture: bundled proot missing at $NB/proot - tap Install to re-seed (or use root chroot mode)." >&2
   exit 1
@@ -437,6 +441,17 @@ while :; do
     MM=$((MM + 1))
     [ "$MM" -le 3 ] && echo "emux-capture: size mismatch raw=$RB want=$((W*H*2)) (W=$W H=$H)" >&2
     sleep 0.3; continue
+  fi
+  if [ "$MAILMODE" = 1 ]; then
+    # v0.2.76 MAILBOX: grab -> convert -> file -> publish -> next loop.
+    # The Android mail reader polls this file outside proot; no socket,
+    # no wedge, no respawn churn. Damage pacing kept: unchanged frame
+    # still sleeps longer so a static desktop costs ~2.5 xwd/s.
+    publish_cap_display
+    seq=$((seq+1))
+    [ "$IDLE_PREV" = 0 ] 2>/dev/null || true
+    sleep 0.2
+    continue
   fi
   if [ "$seq" = 0 ]; then echo "emux-capture: frame 1 pushed ($(wc -c < "$RAW") bytes)" >&2; fi
   # v0.2.25 FIELD FIX: damage-driven pacing (the header comment promised

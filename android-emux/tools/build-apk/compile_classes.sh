@@ -36,7 +36,7 @@ KOTLINC=${KOTLINC:-/opt/kt/kotlinc/bin/kotlinc}
 HEAP=${HEAP:--J-Xmx700m}
 J=$REPO/app/src/main/java/com/emux
 BINDING=$APKB/genbind/com/emux/databinding/ActivityMainBinding.java
-LIBS="$AJ:$(ls $APKB/libs/*.jar | tr '\n' ':')"
+LIBS="${LOWLIBS:-$AJ:$(ls $APKB/libs/*.jar | tr '\n' ':')}"
 mkdir -p $OUT
 rm -rf $OUT/kclasses $OUT/jclasses $OUT/merged
 mkdir -p $OUT/kclasses $OUT/jclasses $OUT/merged
@@ -44,12 +44,27 @@ mkdir -p $OUT/kclasses $OUT/jclasses $OUT/merged
 find $APKB/genR -name R.java > $OUT/r.list
 [ -f "$BINDING" ] || { echo "   missing generated binding: $BINDING"; exit 1; }
 
+if [ -n "${LOWMEM:-}" ]; then
+  # v0.2.76 LOWMEM two-pass split for 1 GiB cgroup sandboxes: the single
+  # kotlinc pass (kt + 60 R.java + binding) peaks above whatever the platform
+  # leaves us and gets SIGKILLed; javac-first keeps each process small. The
+  # generated binding imports only android/androidx/R, so javac needs no app
+  # classes; kotlinc then resolves R/binding as CLASSES, not sources.
+  echo "== 1a/3 javac FIRST (LOWMEM two-pass): R classes (binding needs app classes, comes later) =="
+  javac -nowarn -source 17 -target 17 -cp "$LIBS" -d $OUT/jclasses \
+    @$OUT/r.list 2>&1 | grep -vE '^Note|warning' | head -5
+  echo "== 1b/3 kotlinc: app sources + binding source, R as classes on the classpath =="
+  timeout 1500 $KOTLINC $HEAP -jvm-target 17 -cp "$LIBS:$OUT/jclasses" \
+    $(find $J -name '*.kt') "$BINDING" -d $OUT/kclasses > $OUT/kc.log 2>&1
+  RC=$?
+else
 echo "== 1/3 kotlinc: app sources + generated R + generated ViewBinding (single pass) =="
 # shellcheck disable=SC2046  # word-splitting of the file lists is intended; no path has spaces
 timeout 1500 $KOTLINC $HEAP -jvm-target 17 -cp "$LIBS" \
   $(find $J -name '*.kt') $(cat $OUT/r.list) "$BINDING" \
   -d $OUT/kclasses > $OUT/kc.log 2>&1
 RC=$?
+fi
 # Count only real diagnostics. A bare 'error:' also matches source text echoed in a
 # warning's context lines - e.g. the literal "detail error:" inside a Kotlin string -
 # which made a clean build print errors=2.
@@ -59,12 +74,18 @@ echo "   exit=$RC errors=$E sources=$(find $J -name '*.kt' | wc -l)kt+$(wc -l < 
 # A non-zero exit with zero "error:" lines is still a failure (OOM, crash, timeout).
 [ $RC != 0 ] && exit 1
 
+if [ -z "${LOWMEM:-}" ]; then
 echo "== 2/3 javac: the R classes + the real ActivityMainBinding =="
 # kotlinc resolved these but emitted nothing for them; javac produces the .class
 # files that actually go into the dex.
 javac -nowarn -source 17 -target 17 -cp "$LIBS:$OUT/kclasses" -d $OUT/jclasses \
   @$OUT/r.list "$BINDING" 2>&1 | grep -vE '^Note|warning' | head -10
-echo "   $(find $OUT/jclasses -name '*.class' | wc -l) classes from $(wc -l < $OUT/r.list) R sources + 1 binding"
+fi
+if [ -n "${LOWMEM:-}" ]; then
+  javac -nowarn -source 17 -target 17 -cp "$LIBS:$OUT/kclasses" -d $OUT/jclasses \
+    "$BINDING" 2>&1 | grep -vE '^Note|warning' | head -5
+fi
+echo "   $(find $OUT/jclasses -name '*.class' | wc -l) classes from R sources + 1 binding"
 
 echo "== 3/3 merge + audit =="
 for d in kclasses jclasses; do

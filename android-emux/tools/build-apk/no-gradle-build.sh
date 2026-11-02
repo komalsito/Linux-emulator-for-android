@@ -99,19 +99,42 @@ python3 "$HERE/gen_binding.py" "$REPO" "$REPO/app/src/main/res/layout/activity_m
   "$APKB/genbind/com/emux/databinding" ActivityMainBinding
 
 echo "== 7/10 compile (single kotlinc pass -> javac R + binding) =="
+# v0.2.76: on 1 GiB cgroup sandboxes the page cache warmed by steps 1-6 (and
+# by the toolchain itself) leaves no headroom for kotlinc and the kernel
+# OOM-kills it (exit 137). posix_fadvise(DONTNEED) drops those clean pages
+# without deleting anything; they re-fault on demand if truly needed.
+python3 - <<'FADV' 2>/dev/null || true
+import os
+for root in ("/opt/kt", "/opt/asdk", "/opt/dl", "/tmp/emux-nogradle", "/tmp/lowlibs", "/usr/lib/jvm"):
+    for dp, _, fs in os.walk(root):
+        for f in fs:
+            try:
+                fd = os.open(os.path.join(dp, f), os.O_RDONLY)
+                os.posix_fadvise(fd, 0, 0, 4)
+                os.close(fd)
+            except OSError:
+                pass
+FADV
 # NOT piped into grep. Under `set -e` a pipeline's status is that of its LAST
 # command, so `compile_classes.sh | grep ...` reported grep's success and hid a
 # failed compile - which is how a build with unresolved references got all the way
 # to being dexed, packaged and signed. verify_apk.sh caught it, but the driver must
 # not produce it in the first place.
+if [ -n "${PREBUILT_MERGED:-}" ]; then
+  echo "== 7/10 compile SKIPPED: using PREBUILT_MERGED=$PREBUILT_MERGED =="
+  rm -rf "$OUT/merged"; mkdir -p "$OUT/merged"
+  cp -r "$PREBUILT_MERGED"/. "$OUT/merged"/
+  CRC=0
+else
 ANDROID_JAR=$ANDROID_JAR KOTLINC=${KOTLINC:-/opt/kt/kotlinc/bin/kotlinc} \
   sh "$HERE/compile_classes.sh" > "$OUT/compile.log" 2>&1
 CRC=$?
 grep -E '^==|classes|error|audit' "$OUT/compile.log" || true
 if [ $CRC != 0 ]; then
   echo "   COMPILE FAILED (exit $CRC) - last 20 lines:"
-  tail -20 "$OUT/compile.log" | sed 's/^/     /'
+  tail -20 "$OUT/compile.log" 2>/dev/null | sed 's/^/     /'
   exit 1
+fi
 fi
 
 echo "== 8/10 d8 =="
