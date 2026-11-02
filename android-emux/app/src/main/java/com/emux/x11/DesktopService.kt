@@ -863,6 +863,8 @@ class DesktopService(
                 // every X window control untappable. Pass the geometry
                 // for THIS device instead (see desktopGeometry()).
                 val desktopGeometry = desktopGeometry()
+                sessionW = desktopGeometry.substringBefore('x').toIntOrNull() ?: 0
+                sessionH = desktopGeometry.substringAfter('x').substringBefore('x').toIntOrNull() ?: 0
                 noteInfo("desktop geometry: $desktopGeometry")
                 val cmd = "emux-x11 $wmCommand $desktopGeometry $displayNum"
                 xRespawns = 0
@@ -977,6 +979,10 @@ class DesktopService(
                 // a frame until that wait finished.
                 openFrameListener()
                 beginFrameLoop { frameCallback?.invoke() }
+                // v0.2.76: the mailbox reader runs from session start so ANY
+                // writer (mail-mode capture, fbmail, even a plain legacy loop
+                // refreshing emux_frame.rgb between wedges) paints immediately.
+                startMailReader()
                 // v0.2.52 FIELD FIX: the control plane must follow display
                 // rotations too - it pinned its display at connect time, so
                 // after a self-heal rotation all input went to the old,
@@ -1139,28 +1145,18 @@ class DesktopService(
                         val silentMs = if (lastAnyFrameAtMs == 0L) Long.MAX_VALUE
                             else System.currentTimeMillis() - lastAnyFrameAtMs
                         if (silentMs <= 25_000) continue
-                        if (fbMailSession == null) {
-                            ensureFbMail("watchdog: ${silentMs / 1000}s without any frame")
+                        val why = nativeErr.ifBlank { if (nativeFrames > 0) "native silent" else "native no-frames" }
+                        if (captureSession == null) {
+                            ensureMailCapture("watchdog: ${silentMs / 1000}s without any frame ($why)")
                             kotlinx.coroutines.delay(20_000)
                             continue
                         }
-                        if (captureSession != null) continue
-                        val tools = listOf("usr/bin/xwd", "usr/bin/pnmtoplainpnm", "bin/nc.openbsd")
-                            .all { java.io.File(rootfs, it).isFile }
-                        val why = nativeErr.ifBlank { if (nativeFrames > 0) "native silent" else "native no-frames" }
-                        if (!tools) {
-                            noteInfo("v0.2.72 watchdog: ${silentMs / 1000}s without ANY frame ($why) but guest toolchain absent - nothing to fall back to")
-                            kotlinx.coroutines.delay(30_000)
+                        if (fbMailSession == null) {
+                            ensureFbMail("watchdog: mailboxes silent while capture session lives ($why)")
+                            kotlinx.coroutines.delay(20_000)
                             continue
                         }
-                        noteInfo(
-                            "v0.2.72 watchdog: ${silentMs / 1000}s without ANY frame ($why) - " +
-                                "starting guest emux-capture as fallback")
-                        captureSession = TerminalSession(
-                            9002 + captureRespawns, ctx, root,
-                            "emux-capture 127.0.0.1:$FRAME_PORT $displayNum",
-                        ).also { it.start() }
-                        kotlinx.coroutines.delay(30_000)   // give it room before judging again
+                        kotlinx.coroutines.delay(15_000)
                     }
                 }
 
@@ -1267,7 +1263,7 @@ class DesktopService(
                     // v0.2.75: the fallback ladder is native -> fbmail ->
                     // (watchdog) legacy. The guest socket pipeline is the
                     // last resort, not the second: it wedged every round.
-                    ensureFbMail("gate: native produced no frames in the gate window")
+                    ensureMailCapture("gate: native produced no frames in the gate window")
                 }
 
                 // v0.1.37 BUGFIX ("desktop says waiting for X frames" with zero
@@ -1327,7 +1323,8 @@ class DesktopService(
                                 if (state.value == State.IDLE || state.value == State.ERROR) break
                                 captureSession = TerminalSession(
                                     9002 + captureRespawns, ctx, root,
-                                    "emux-capture 127.0.0.1:$FRAME_PORT $displayNum",
+                                    "emux-capture 127.0.0.1:$FRAME_PORT $displayNum" +
+                                        if (capMailMode) " mail" else "",
                                 ).also { it.start() }
                                 pumpedCaptureSession = null
                             } else {
@@ -1571,6 +1568,8 @@ class DesktopService(
             runCatching { xSession?.stop() }; xSession = null
             runCatching { captureSession?.stop() }; captureSession = null
             runCatching { fbJob?.cancel() }; fbJob = null
+            runCatching { mailJob?.cancel() }; mailJob = null
+            capMailMode = false
             runCatching { fbMailSession?.stop() }; fbMailSession = null; fbFrames = 0L
             killDesktopGuests()   // v0.1.54: orphans hold :6000/:7001 guest-side
         }
@@ -1990,48 +1989,106 @@ class DesktopService(
     // the guest-local socket (the only X data path this device ever liked).
     @Volatile private var fbMailSession: TerminalSession? = null
     private var fbJob: Job? = null
+    private var mailJob: Job? = null
+    /** v0.2.76: the geometry Xvfb was launched with this session — the raw
+     *  RGB565 mailbox has no header, so its size check IS the geometry. */
+    @Volatile private var sessionW = 0
+    @Volatile private var sessionH = 0
+    @Volatile private var capMailMode = false
     @Volatile var fbFrames: Long = 0; private set
     private var fbPx: IntArray? = null
+
+    /** v0.2.76: legacy helper, mailbox mode — the proven xwd+convert chain
+     *  MINUS the nc push that wedged proot sockets for ten versions. */
+    private fun ensureMailCapture(reason: String) {
+        if (captureSession != null) return
+        capMailMode = true
+        noteInfo("v0.2.76 mail capture: $reason - emux-capture in mailbox mode (file only, no nc push)")
+        captureSession = TerminalSession(
+            9002 + captureRespawns, ctx, root,
+            "emux-capture 127.0.0.1:$FRAME_PORT $displayNum mail",
+        ).also { it.start() }
+    }
 
     private fun ensureFbMail(reason: String) {
         if (fbMailSession != null) return
         noteInfo("v0.2.75 fbmail: $reason - starting filesystem-mailbox capture (guest xwd -> file -> host read)")
         fbMailSession = TerminalSession(9003, ctx, root, "emux-fbmail $displayNum").also { it.start() }
-        startFbMailLoop()
     }
 
-    private fun startFbMailLoop() {
-        fbJob?.cancel()
-        fbJob = scope.launch {
-            val f = java.io.File(com.emux.core.FsLayout.linuxRoot(ctx), "tmp/emux_fb.xwd")
-            var lastMod = -1L
+    /**
+     * v0.2.76 UNIFIED MAILBOX READER. The field device proved (user's own
+     * terminal, v0.2.75 round) that /tmp/emux_frame.rgb — raw RGB565, exactly
+     * W*H*2 bytes — sits on the shared rootfs being refreshed by the guest
+     * capture loop WHILE its nc push wedges: the file was 17 s fresh beside
+     * capage=38s. So the app now reads mailboxes instead of sockets:
+     *   1) emux_frame.rgb  — headerless raw RGB565 (size = geometry check,
+     *      mtime-stable read guards against the in-place write tearing);
+     *   2) emux_fb.xwd     — atomic-rename XWD drops from emux-fbmail.
+     * Both reads happen entirely OUTSIDE proot.
+     */
+    private fun startMailReader() {
+        mailJob?.cancel()
+        mailJob = scope.launch {
+            val root = com.emux.core.FsLayout.linuxRoot(ctx)
+            val rgb = java.io.File(root, "tmp/emux_frame.rgb")
+            val xwd = java.io.File(root, "tmp/emux_fb.xwd")
+            var rgbMod = -1L; var xwdMod = -1L
             while (isActive && state.value != State.IDLE && state.value != State.ERROR) {
-                val m = f.lastModified()
-                if (m > 0 && m != lastMod && f.length() > 104) {
-                    lastMod = m
-                    val dec = runCatching { f.readBytes() }.getOrNull()?.let { decodeXwdToFrame(it) }
-                    if (dec != null) {
-                        val w = dec.first; val h = dec.second; val px = dec.third
-                        synchronized(frameLock) {
-                            ensureBitmap(w, h)
-                            currentFrame?.setPixels(px, 0, w, 0, 0, w, h)
+                val rm = rgb.lastModified()
+                if (rm > 0 && rm != rgbMod) {
+                    rgbMod = rm
+                    val want = sessionW * sessionH * 2
+                    if (want > 0 && rgb.length() == want.toLong()) {
+                        val before = rgb.lastModified()
+                        val bytes = runCatching { rgb.readBytes() }.getOrNull()
+                        if (bytes != null && bytes.size == want && rgb.lastModified() == before) {
+                            var px = fbPx
+                            if (px == null || px.size < sessionW * sessionH) {
+                                px = IntArray(sessionW * sessionH); fbPx = px
+                            }
+                            var i = 0; var j = 0
+                            while (i < bytes.size) {
+                                val v = (bytes[i].toInt() and 0xFF) or
+                                    ((bytes[i + 1].toInt() and 0xFF) shl 8)
+                                px[j++] = android.graphics.Color.rgb(
+                                    ((v shr 11) and 0x1F) * 255 / 31,
+                                    ((v shr 5) and 0x3F) * 255 / 63,
+                                    (v and 0x1F) * 255 / 31)
+                                i += 2
+                            }
+                            paintMail(sessionW, sessionH, px, "mail")
                         }
-                        fbFrames++
-                        if (captureMode != "fbmail") {
-                            captureMode = "fbmail"
-                            noteInfo("fbmail capture UP: XWD mailbox painting ${w}x${h}")
-                        }
-                        lastAnyFrameAtMs = System.currentTimeMillis()
-                        capturePubAtMs = lastAnyFrameAtMs
-                        captureDisplay = displayNum
-                        frameId++
-                        if (state.value == State.AWAITING_FRAMES) state.value = State.CONNECTED
-                        frameCallback?.invoke()
                     }
                 }
-                kotlinx.coroutines.delay(200)
+                val xm = xwd.lastModified()
+                if (xm > 0 && xm != xwdMod && xwd.length() > 104) {
+                    xwdMod = xm
+                    val dec = runCatching { xwd.readBytes() }.getOrNull()
+                        ?.let { decodeXwdToFrame(it) }
+                    if (dec != null) paintMail(dec.first, dec.second, dec.third, "fbmail")
+                }
+                kotlinx.coroutines.delay(150)
             }
         }
+    }
+
+    private fun paintMail(w: Int, h: Int, px: IntArray, mode: String) {
+        synchronized(frameLock) {
+            ensureBitmap(w, h)
+            currentFrame?.setPixels(px, 0, w, 0, 0, w, h)
+        }
+        fbFrames++
+        if (captureMode != mode) {
+            captureMode = mode
+            noteInfo("v0.2.76 mailbox capture UP ($mode): painting ${w}x${h} from the shared filesystem, no socket in the frame path")
+        }
+        lastAnyFrameAtMs = System.currentTimeMillis()
+        capturePubAtMs = lastAnyFrameAtMs
+        captureDisplay = displayNum
+        frameId++
+        if (state.value == State.AWAITING_FRAMES) state.value = State.CONNECTED
+        frameCallback?.invoke()
     }
 
     /** Parse an XWD dump (xwd -root) into packed ARGB. Endian- and depth-
