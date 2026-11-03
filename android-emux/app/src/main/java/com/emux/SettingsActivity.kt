@@ -268,8 +268,19 @@ class SettingsActivity : AppCompatActivity() {
                 // programmatically created root PreferenceScreen has no context
                 // theme attached — leaving it null used to crash the dialog open.
                 dialogTitle = "Mirror / custom rootfs URL"
-                text = preferenceManager.sharedPreferences
-                    ?.getString("mirror", com.emux.core.BootstrapManager.MIRROR) ?: com.emux.core.BootstrapManager.MIRROR
+                // v0.2.82 CRASH FIX (field HUAWEI MRDI-W09, API 31): this read
+                // `preferenceManager.sharedPreferences`, and PreferenceFragment-
+                // Compat's manager is NULL while onCreatePreferences runs on this
+                // androidx version - the NPE report names getSharedPreferences()
+                // on a null PreferenceManager. CodePrefs is the FALLBACK tier:
+                // it only runs when the XML tier already failed on the device,
+                // so a landmine here turns "settings look plain" into "app keeps
+                // stopping", and it did. The static default-prefs call has no
+                // such receiver and returns the same file.
+                text = androidx.preference.PreferenceManager
+                    .getDefaultSharedPreferences(ctx)
+                    .getString("mirror", com.emux.core.BootstrapManager.MIRROR)
+                    ?: com.emux.core.BootstrapManager.MIRROR
             })
             preferenceScreen = screen
         }

@@ -405,7 +405,13 @@ class DesktopService(
                         "native capture on :$displayNum: DAMAGE unavailable - full sweeps as before")
                     val partCap = (h / 2).coerceAtLeast(64)
                     val partBuf = IntArray(w * partCap)
-                    var ticks = 0
+                    // v0.2.82: start one tick below the healer so the FIRST loop
+                    // iteration is a full sweep. Damage events only report
+                    // changes AFTER we subscribe; without this the pane sat on
+                    // nothing (or on the previous session's photograph) until the
+                    // healer tick, ~5 s in - which on a slow device reads as
+                    // "the desktop is dead".
+                    var ticks = 149
                     while (isActive && state.value != State.IDLE && state.value != State.ERROR) {
                         val t0 = System.currentTimeMillis()
                         ensureBitmap(w, h)
@@ -2892,7 +2898,17 @@ class DesktopService(
      */
     private fun scheduleReproof(c: X11Client) {
         scope.launch {
-            for (wait in longArrayOf(10_000, 20_000, 40_000, 60_000, 60_000, 60_000)) {
+            // v0.2.82: indefinite, not six tries. The field device that reported
+            // "clicks do nothing" was stuck on the guest agent for the whole
+            // session; if the ignore was a boot-time race (desktop stack still
+            // settling, WM startup grab) the window to notice can be minutes.
+            // 3 s, 10 s, 20 s, 40 s, then every minute for as long as the
+            // session lives and the agent is still carrying input.
+            var i = 0
+            while (true) {
+                val wait = longArrayOf(3_000, 10_000, 20_000, 40_000)
+                    .getOrElse(i) { 60_000L }
+                i++
                 kotlinx.coroutines.delay(wait)
                 if (!c.connected || c.xtestOpcode <= 127) return@launch
                 if (!xtestIgnored && inputTransport == "xtest") return@launch
@@ -2916,7 +2932,6 @@ class DesktopService(
                     return@launch
                 }
             }
-            noteInfo("input re-proof: server still ignores XTEST after 4 minutes - staying on the guest agent")
         }
     }
 

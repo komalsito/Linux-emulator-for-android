@@ -213,6 +213,21 @@ QueryVersion = BadLength; every XFIXES region request rejected by this Xvfb),
 which is why the design that ships is the one `damage_test.sh` proves, 7/7:
 `android-emux/docs/DAMAGE_CAPTURE_v0.2.81.md`.
 
+## v0.2.82: the fallback that crashed, and two responsiveness holes
+
+A field crash stack named it exactly: Settings' *fallback* tier (the screen that
+appears when the XML tier fails on a device) read `preferenceManager` inside
+`onCreatePreferences`, where this androidx version has not created it yet —
+null receiver, NPE, process death, on the one ROM class that needs the fallback.
+It now uses the static default-preferences call, so the last-resort chain can
+actually rescue the screen. Damage mode also painted nothing for its first ~5 s
+(events only report changes *after* subscribing), which on a slow device reads
+as "the desktop is dead": the first loop iteration is now a full sweep. And the
+input re-proof (v0.2.80) stopped trying after four minutes; a boot-race
+`proof=ignored` can stay recoverable longer than that, so it now retries every
+minute for as long as the guest agent is carrying input.
+`android-emux/docs/SETTINGS_CRASH_AND_FIRST_FRAME_v0.2.82.md`.
+
 If it ever happens again the app escalates by itself: the guest rewrites the
 stamped `rc.xml` and sends `openbox --reconfigure` (no restart, windows kept),
 and if buttons are *still* swallowed it switches window manager — or runs with
