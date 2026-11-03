@@ -2282,8 +2282,13 @@ class DesktopService(
     // `proof=ok touch=11 inj=32 fail=0` over a desktop where nothing could be
     // opened. buttonDelivered is null until measured, then true/false.
     @Volatile var buttonDelivered: Boolean? = null; private set
-    /** How buttons get through: "-", "pervious" (normal), "impervious"
-     *  (XTEST GrabControl - a fallback, see X11Client.xtestGrabControl). */
+    /** How buttons get through: "-" (not measured yet) or "pervious" (the
+     *  server's normal path - our fake input is subject to other clients'
+     *  grabs, which is precisely how a window manager swallowed every click).
+     *  There is no "impervious" mode: XTEST GrabControl(impervious) was
+     *  MEASURED not to rescue a passive Frame-context grab (case G of
+     *  tools/x11probe/button_delivery_test.sh), so the ladder never enters it.
+     *  The primitive itself stays - see X11Client.xtestGrabControl. */
     @Volatile var btnMode: String = "-"
     /** The guest ladder's own report, painted on the pane. */
     val wmMode: String get() = guestTmp("emux_wm_mode")
@@ -2625,19 +2630,24 @@ class DesktopService(
     /**
      * v0.2.78 — measure button delivery, then escalate until clicks work.
      *
-     * The ladder is ordered cheapest-and-most-correct first:
+     * The ladder is ordered cheapest-and-most-correct first, and every rung is
+     * a measured result from tools/x11probe/button_delivery_test.sh:
      *   1. ask the GUEST to rewrite the stamped rc.xml and `openbox
      *      --reconfigure`. This removes the CAUSE (a Frame/Client/Desktop
      *      mousebind becomes an XGrabButton, and xorg checks passive grabs on
      *      every window from the root down, so the application never sees the
      *      press) without touching the session: no restart, no lost windows.
-     *   2. XTEST GrabControl(impervious) on our own connection, plus
-     *      SetInputFocus(PointerRoot) so focus still follows the finger. Works
-     *      even when we cannot change the WM's configuration at all; costs
-     *      titlebar dragging (an active grab no longer sees our motion).
-     *   3. ask the GUEST to switch window manager, or run with none - measured
-     *      on the device that reported this: killing Openbox alone makes an
-     *      injected click arrive.
+     *      (case D/H: DELIVERED)
+     *   2. ask the GUEST to switch window manager, or run with none - the
+     *      report that started this fix measured that killing Openbox alone
+     *      makes an injected click arrive. (case A: DELIVERED)
+     *
+     * There is deliberately no XTEST GrabControl(impervious) rung. It is the
+     * documented one-request fix and it was tried first: the server accepts the
+     * request without error and the click is STILL swallowed by a passive
+     * Frame-context grab (case G). The primitive stays in
+     * [X11Client.xtestGrabControl] for an ACTIVE grab, and the measurement stays
+     * here so it is not re-shipped as a fix.
      *
      * Note what does NOT help: the guest xdotool agent. It injects through the
      * same XTEST extension, so the same grab swallows it identically - which is
@@ -2686,7 +2696,6 @@ class DesktopService(
         // in X11Client for an ACTIVE grab, but the ladder does not depend on it -
         // and it is not free: while impervious, a WM mid-drag stops seeing our
         // motion. What does work is removing the grabber (case A: no WM at all).
-        // --- stage 3: guest switches WM, or runs without one --------------
         if (c.connected) {
             publishBtnVerdict("dead", "stage2 ${r.detail}")
             noteInfo("button ladder stage 2: asking the guest to switch window manager " +
@@ -2711,7 +2720,7 @@ class DesktopService(
     private fun btnRecovered(c: X11Client, r: X11Client.ButtonProbe, how: String) {
         buttonDelivered = true
         if (btnMode == "-") btnMode = "pervious"
-        inputProof = if (btnMode == "impervious") "ok-imperv" else "ok"
+        inputProof = "ok"
         publishBtnVerdict("recovered", "$how; ${r.detail}")
         noteInfo("buttons DELIVERED again - $how (${r.detail})")
         com.emux.EmuXLog.i("button ladder recovered: $how")

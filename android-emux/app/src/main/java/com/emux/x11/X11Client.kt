@@ -796,16 +796,24 @@ class X11Client(
      * XTEST GrabControl: make this connection's fake input ignore other
      * clients' grabs. Returns "" on success, otherwise the reason.
      *
-     * This is the documented escape hatch when a window manager holds a passive
-     * button grab we cannot configure away: Openbox's Frame/Client/Desktop
-     * mousebinds become XGrabButton() calls (mouse.c mouse_grab_for_client),
-     * xorg checks passive grabs on every window from the root down to the one
-     * under the pointer (dix/events.c CheckDeviceGrabs), and with
-     * owner_events=False the application never sees the press. Trade-off, stated
-     * plainly: while impervious, an ACTIVE grab (a window manager mid-drag) no
-     * longer receives our motion either, so titlebar dragging degrades. That is
-     * why the app only enables it after the honest path has been measured dead,
-     * and why the permanent fix is the stamped rc.xml (emux-x11 write_rc_xml).
+     * This is the *documented* escape hatch when a window manager holds a button
+     * grab we cannot configure away, so it was the obvious one-request fix for
+     * the v0.2.78 click swallow - and it was tried first. MEASURED RESULT: it
+     * does not work for that bug. Against Openbox's passive Frame-context grab
+     * the server accepts the request with no error and the click is STILL
+     * swallowed (case G of tools/x11probe/button_delivery_test.sh; the same
+     * negative result is recorded in docs/CLICK_SWALLOW_v0.2.78.md §5).
+     *
+     * So the app does NOT call this: nothing in the ladder depends on it, and
+     * `btnMode` never becomes "impervious". It stays as a primitive because it
+     * is the right tool for an ACTIVE grab (which is what the extension is for),
+     * and because its wire layout - minor opcode 3, body [impervious,0,0,0] - is
+     * exercised by the Python twin, button_probe.py --impervious. Do not re-add
+     * it as a fallback without re-measuring.
+     *
+     * Trade-off, stated plainly: while impervious, an ACTIVE grab (a window
+     * manager mid-drag) no longer receives our motion either, so titlebar
+     * dragging degrades. That cost is a second reason it is not a free win.
      */
     fun xtestGrabControl(impervious: Boolean): String {
         if (xtestOpcode < 0) return "no-xtest"
@@ -817,9 +825,21 @@ class X11Client(
         return if (e.isEmpty()) "" else e.first().describe()
     }
 
-    /** Focus follows the pointer (SetInputFocus, focus=PointerRoot=1). Used with
-     *  the impervious fallback: there is then no WM binding to focus a window
-     *  when it is clicked, so the server does it. */
+    /** SetInputFocus(focus=PointerRoot, revert-to=PointerRoot, CurrentTime).
+     *
+     *  NOT called anywhere in the app — it was written for a fallback that
+     *  measurement removed, and it is kept as a documented primitive (the wire
+     *  layout stays exercised by `button_probe.py --pointer-root`).
+     *
+     *  Two things measurement settled about it:
+     *   - it is redundant with no window manager: Xvfb's input focus ALREADY
+     *     reports PointerRoot in that state (`XGetInputFocus` returns 1, which
+     *     is what xdotool complains about as "the focused window of 1"), so
+     *     setting it changes nothing;
+     *   - PointerRoot is NOT per-window focus-follows-pointer. libX11 defines
+     *     the focus window as "the root window of whatever screen the pointer
+     *     is on at each keyboard event", which on a single-screen display is the
+     *     root. Do not reach for this to make keys follow the finger. */
     fun setInputFocusPointerRoot(): Boolean {
         val body = ByteBuffer.allocate(8).order(order)
         body.putInt(1)          // focus = PointerRoot

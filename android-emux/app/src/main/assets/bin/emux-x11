@@ -304,11 +304,20 @@ wm_pid() {
 
 # v0.2.78: switch window manager - or run with none at all - when the app has
 # measured that clicks do not reach applications. "No WM" is a real fallback,
-# not a defeat: the field measurement that started this fix was that KILLING
-# Openbox makes an injected click arrive (ButtonPress=1 in xev), and an
-# unmanaged desktop still shows every window, still takes focus via the app's
-# SetInputFocus(PointerRoot), and still delivers every click. A pretty desktop
-# that ignores the finger is worth less than a plain one that does not.
+# not a defeat: the field report that started this fix was that KILLING Openbox
+# makes an injected click arrive (ButtonPress=1 in xev), and case A of
+# tools/x11probe/button_delivery_test.sh reproduces that - with no WM at all an
+# injected click reaches the application. Windows are then unmanaged (no
+# titlebars, no stacking order) but every one is still shown and still clickable.
+# A pretty desktop that ignores the finger is worth less than a plain one that
+# does not.
+# NOT claimed here: keyboard focus. With no WM nothing moves focus when a window
+# is clicked, and SetInputFocus(PointerRoot) is not the fix - the server's focus
+# already reports PointerRoot in that state, and libX11 defines PointerRoot as
+# the ROOT window of the screen the pointer is on, not the window under it. If
+# keys do not reach a window in this mode that is the honest state of it, and
+# `emux-x11 doctor` reports "WM mode: none" so the field can see which rung of
+# the ladder it is on instead of guessing.
 # Runs at most once per session (guarded by /tmp/emux_wm_fellback).
 wm_fallback() {
   [ -e /tmp/emux_wm_fellback ] && {
@@ -1242,6 +1251,11 @@ doctor() {
   if [ -n "$RCX_EFF_D" ]; then
     if grep -qF "$EMUX_RCXML_STAMP" "$RCX_EFF_D" 2>/dev/null; then
       kv "rc.xml stamp" "$EMUX_RCXML_STAMP (current)"
+    elif grep -q "<name>Emux</name>" "$RCX_EFF_D" 2>/dev/null; then
+      # The common broken state in the field: our OWN file from v0.2.51..77,
+      # which carries no stamp at all. Printing its first bytes tells nobody
+      # anything; naming it says both what it is and what happens next.
+      kv "rc.xml stamp" "an OLDER EmuX rc.xml (v0.2.51..77, unstamped) - binds Frame, so clicks die; rewritten on the next launch"
     else
       kv "rc.xml stamp" "NOT EmuX's - $(head -c 60 "$RCX_EFF_D" 2>/dev/null | tr '\n' ' ')"
     fi

@@ -220,9 +220,21 @@ launcher start — a stale `dead` verdict would otherwise fire the ladder before
 anything had been measured, and a stale `emux_wm_fellback` would forbid the one
 action known to restore clicks.
 
-"No window manager" is a real fallback, not a defeat: an unmanaged desktop still
-shows every window, still delivers every click and every key, and the app sets
-`SetInputFocus(PointerRoot)` so focus follows the finger.
+"No window manager" is a real fallback, not a defeat: case A measures that with
+no WM at all an injected click reaches the application, and every window is
+still shown — unmanaged, so without titlebars or stacking order.
+
+What is **not** claimed is keyboard focus. With no WM nothing moves focus when a
+window is clicked, and `SetInputFocus(PointerRoot)` is not the fix for that:
+Xvfb's input focus already reports PointerRoot when no WM is running
+(`XGetInputFocus` returns 1 — the value xdotool complains about as "the focused
+window of 1"), and libX11 defines PointerRoot as "the root window of whatever
+screen the pointer is on at each keyboard event", which on a single-screen
+display is the root, not the window under the finger. `X11Client` keeps
+`setInputFocusPointerRoot()` as a documented primitive that nothing calls, and
+`emux-x11 doctor` prints `WM mode: none`, so this rung is visible in the field
+rather than guessed at. A desktop that takes every click still beats one that
+takes none.
 
 ## 7. Also fixed: stray Xvfb on `:0`
 
