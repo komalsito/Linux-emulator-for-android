@@ -282,6 +282,8 @@ class DesktopService(
     @Volatile var nativeBandY: Int = 0; private set
     @Volatile var nativeMisses: Int = 0; private set
     @Volatile var nativeLastErr: String = ""; private set
+    /** v0.2.81: is the live capture connection DAMAGE-driven? Badge says so. */
+    @Volatile var nativeDamageOn: Boolean = false; private set
     @Volatile var nativeErr: String = ""; private set
     /** v0.2.74: measured pipe throughput (KB/s) and current band height —
      *  painted on the STALE pane so the field tells us the real ceiling. */
@@ -385,9 +387,91 @@ class DesktopService(
                         }
                     }
                     val bandTimeout = 8_000
+                    // v0.2.81 DAMAGE-DRIVEN CAPTURE. Polling full sweeps made
+                    // every visual response wait behind a whole screenful of
+                    // pixels that had not changed - on this device's pipe that
+                    // is seconds, and no pacing or quality change can fix the
+                    // architecture. With DAMAGE the server accumulates what
+                    // clients actually drew; we read that region, grab ONLY it,
+                    // paint it, and go back to sleep. An idle desktop now costs
+                    // almost nothing and answers in one round trip; a dragging
+                    // window costs its own rectangle instead of the screen.
+                    val dmgOk = runCatching { c.initDamageTracking() }.getOrDefault(false)
+                    nativeDamageOn = dmgOk
+                    if (dmgOk) noteInfo(
+                        "native capture on :$displayNum: DAMAGE-driven partial updates ON - " +
+                            "only changed rectangles cross the pipe")
+                    else noteInfo(
+                        "native capture on :$displayNum: DAMAGE unavailable - full sweeps as before")
+                    val partCap = (h / 2).coerceAtLeast(64)
+                    val partBuf = IntArray(w * partCap)
+                    var ticks = 0
                     while (isActive && state.value != State.IDLE && state.value != State.ERROR) {
                         val t0 = System.currentTimeMillis()
                         ensureBitmap(w, h)
+                        if (dmgOk) {
+                            ticks++
+                            // ~every 5 s a full sweep anyway: the healer, for
+                            // anything DAMAGE cannot see (server-side sprite
+                            // draws, a missed event, our own bookkeeping).
+                            if (ticks % 150 != 0) {
+                                val rects = c.drainDamageRects(33)
+                                if (rects.isEmpty()) {
+                                    kotlinx.coroutines.delay(16)
+                                    continue
+                                }
+                                var x0 = Int.MAX_VALUE; var y0 = Int.MAX_VALUE
+                                var x1 = 0; var y1 = 0
+                                for (r in rects) {
+                                    if (r[2] <= 0 || r[3] <= 0) continue
+                                    x0 = minOf(x0, r[0]); y0 = minOf(y0, r[1])
+                                    x1 = maxOf(x1, r[0] + r[2]); y1 = maxOf(y1, r[1] + r[3])
+                                }
+                                if (x1 > x0 && y1 > y0) {
+                                    x0 = x0.coerceIn(0, w - 1); y0 = y0.coerceIn(0, h - 1)
+                                    x1 = x1.coerceIn(x0 + 1, w); y1 = y1.coerceIn(y0 + 1, h)
+                                    val bw = x1 - x0; val bh = y1 - y0
+                                    // Big damage (video, full-screen redraw) is
+                                    // exactly what the banded sweep is for;
+                                    // small damage is one quick grab.
+                                    if (bw.toLong() * bh <= w.toLong() * h * 6 / 10 && bh <= partCap) {
+                                        val b = runCatching {
+                                            c.grabRegionArgb(x0, y0, bw, bh, bandTimeout, partBuf)
+                                        }.getOrNull()
+                                        if (b != null) {
+                                            synchronized(frameLock) {
+                                                currentFrame?.setPixels(b, 0, bw, x0, y0, bw, bh)
+                                            }
+                                            frameId++
+                                            lastAnyFrameAtMs = System.currentTimeMillis()
+                                            onUiInvalidated()
+                                            nativeGrabMs = System.currentTimeMillis() - t0
+                                            nativeFrames++
+                                            nativeFrameAtMs = lastAnyFrameAtMs
+                                            capturePubAtMs = nativeFrameAtMs
+                                            nativeMisses = 0; nativeLastErr = ""
+                                            nativeBandY = h
+                                            if (state.value == State.AWAITING_FRAMES)
+                                                state.value = State.CONNECTED
+                                            val bms = nativeGrabMs.coerceAtLeast(1)
+                                            val bkb = (bw.toLong() * bh * 2) / bms
+                                            kbEwma = if (kbEwma <= 0) bkb else (kbEwma * 3 + bkb) / 4
+                                            if (nativeKbPerS <= 0) nativeKbPerS = kbEwma
+                                            // damage mode paces at 10 ms, not the
+                                            // sweep ceiling: the grab of a small
+                                            // rectangle is cheap, and this is what
+                                            // makes a drag follow the finger
+                                            // instead of the sweep.
+                                            if (nativeGrabMs < 10L) kotlinx.coroutines.delay(10L - nativeGrabMs)
+                                            continue
+                                        }
+                                    }
+                                }
+                                // Damage bigger than 60% of the screen, or a
+                                // partial grab that failed: fall through to the
+                                // full banded sweep below.
+                            }
+                        }
                         var y = 0
                         var ok = true
                         while (y < h) {
@@ -619,6 +703,7 @@ class DesktopService(
         nativeFrames = 0L; nativeFrameAtMs = 0L; captureMode = "-"
         nativeGrabMs = -1L; nativeErr = ""; lastAnyFrameAtMs = 0L
         nativeKbPerS = -1L; nativeBandRows = 0
+        nativeDamageOn = false
         state.value = State.STARTING_X
         scope.launch {
             try {

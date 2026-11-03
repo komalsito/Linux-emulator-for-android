@@ -430,6 +430,13 @@ class DesktopView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attrs) 
                         d.nativeSweepProgress, d.nativeMisses,
                         d.nativeLastErr.take(16))
                 }
+                // v0.2.81: which capture architecture is live. "damage" means the
+                // server reports what changed and only that crosses the pipe -
+                // the difference between a desktop that follows your finger and
+                // one that repaints itself on a timer.
+                if (d?.nativeDamageOn == true) line += "  mode=damage"
+                else if (d != null) line += "  mode=sweep"
+                
                 canvas.drawText(line, 16f, sp(16f), badge)
                 if (desktop?.captureQualityPending == true) {
                     val pend = Paint().apply { color = Color.argb(0xC0, 0xFF, 0xB7, 0x4D); textSize = sp(9f) }

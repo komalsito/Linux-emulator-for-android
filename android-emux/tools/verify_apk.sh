@@ -177,7 +177,7 @@ z=zipfile.ZipFile(sys.argv[1])
 dex=sorted(n for n in z.namelist() if n.startswith('classes') and n.endswith('.dex'))
 blobs=[z.read(n) for n in dex]
 def out(ok,desc,detail=""): print(("1|" if ok else "0|")+desc+"|"+detail)
-for sym in ('injectScroll','injectKeysymCombo','maybeShowIntro'):
+for sym in ('injectScroll','injectKeysymCombo','maybeShowIntro','initDamageTracking','drainDamageRects'):
     hit=any(sym.encode() in b for b in blobs)
     out(hit,f"dex contains {sym}",
         "" if hit else "not found in any classes*.dex - the APK predates v0.2.60/v0.2.61")

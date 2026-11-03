@@ -581,6 +581,88 @@ class X11Client(
         return Triple(present, major, firstEv)
     }
 
+    // =====================================================================
+    // v0.2.81 DAMAGE-DRIVEN PARTIAL CAPTURE (the x11vnc model, completed).
+    //
+    // Every release so far POLLED the screen: a full sweep of GetImage bands per
+    // refresh, whether or not anything changed. On a thin proot pipe every
+    // visual response therefore waits behind megabytes of pixels that were
+    // identical to the previous frame - the "everything is laggy" that survives
+    // every pacing and quality fix. DAMAGE inverts it: the server tells us the
+    // rectangle a client just drew to, and we ship only that.
+    //
+    // MEASURED, not assumed (damage_probe.py, and the corpses of the first two
+    // designs): QueryVersion on DAMAGE/XFIXES takes CARD32+CARD32 (the CARD16
+    // form is BadLength); and on this Xvfb EVERY XFIXES region request
+    // (CreateRegion/Subtract-with-parts/FetchRegion) is rejected outright, so
+    // the region-polling design died on the sandbox. What works, everywhere, is
+    // the original one: DamageNotify EVENTS. Create with level RawRectangles and
+    // the server pushes xDamageNotify per drawn rectangle - no second socket,
+    // no event loop, just the packets already arriving on this connection.
+    //
+    // xDamageNotify, measured byte by byte on Xvfb:
+    //   0 type(=first_event)  1 level  2 sequence  4 time  8 drawable
+    //   12 damage  16 geometry x,y INT16 + w,h CARD16  24 area (same shape)
+    // =====================================================================
+    @Volatile var damageOpcode = -1; private set
+    @Volatile var damageEvent = -1; private set
+    @Volatile var damageOn = false; private set
+    private var damageId = 0
+
+    /** Create a DAMAGE object on the root window; events then arrive here. */
+    fun initDamageTracking(): Boolean {
+        if (!connected || rootWindow == 0 || resMask == 0) return false
+        val d = queryExtension("DAMAGE")
+        if (!d.first) return false
+        damageOpcode = d.second
+        damageEvent = d.third
+        // QueryVersion: CARD32 major + CARD32 minor - eight bytes. The 4-byte
+        // CARD16 form is BadLength(16) on this extension (measured).
+        val dv = ByteBuffer.allocate(8).order(order)
+        dv.putInt(1); dv.putInt(0)
+        requestReply(damageOpcode, 0, dv.array()) ?: return false
+        damageId = newResourceId()
+        // DamageCreate (minor 1): damage(4) drawable(4) level(BYTE)+3 pad.
+        // level=RawRectangles(0): per-rectangle geometry in every notify.
+        // Damage on the root includes drawing to inferior windows - that is the
+        // whole point (client windows, WM frame moves, panel clocks).
+        val c = ByteBuffer.allocate(12).order(order)
+        c.putInt(damageId); c.putInt(rootWindow); c.put(0); c.put(0); c.put(0); c.put(0)
+        sendNoReply(damageOpcode, 1, c.array())
+        // Prove it took: a Sync round trip surfaces a rejected Create instead of
+        // leaving us "damage-enabled" on a server that ignored us. (The first
+        // design learned this the hard way: noreply + an unchecked sync made
+        // every failure look like success.)
+        if (!sync(2_000)) return false
+        damageOn = true
+        return true
+    }
+
+    /**
+     * DamageNotify rectangles that arrived within [waitMs], as [x, y, w, h].
+     * An EMPTY list means the desktop genuinely did not change - the capture
+     * loop sleeps instead of shipping a screenful of identical pixels.
+     */
+    fun drainDamageRects(waitMs: Long = 33): List<IntArray> {
+        if (!damageOn) return emptyList()
+        val out = ArrayList<IntArray>(4)
+        val deadline = System.currentTimeMillis() + waitMs
+        while (true) {
+            val left = deadline - System.currentTimeMillis()
+            if (left <= 0) break
+            val pkt = readPacket(left.toInt().coerceAtMost(50)) ?: break
+            if ((pkt[0].toInt() and 0x7F) != (damageEvent and 0x7F)) continue
+            val b = ByteBuffer.wrap(pkt).order(order)
+            val x = b.getShort(16).toInt()
+            val y = b.getShort(18).toInt()
+            val w = b.getShort(20).toInt() and 0xFFFF
+            val h = b.getShort(22).toInt() and 0xFFFF
+            if (w > 0 && h > 0) out.add(intArrayOf(x, y, w, h))
+            if (out.size >= 64) break
+        }
+        return out
+    }
+
     fun internAtom(name: String, onlyIfExists: Boolean = false): Int {
         val nb = name.toByteArray()
         // xInternAtomReq: reqType, only-if-exists BOOL, length CARD16,

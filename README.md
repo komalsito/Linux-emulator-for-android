@@ -197,6 +197,22 @@ code (`android-emux/docs/TERMINAL_STAIRCASE_AND_CAPTURE_FEEL_v0.2.80.md`):
   what each quality option is worth on *your* pipe, from the KB/s your device
   measured: `Your pipe measured 720 KB/s: 1280px≈0.5fps … 540px≈2.8fps`.
 
+## Why the desktop finally follows your finger (v0.2.81)
+
+Every earlier release **polled the whole screen**: each refresh re-read the
+entire X display whether or not anything changed, so on a thin pipe every click
+and drag waited behind megabytes of identical pixels. v0.2.81 asks the X server
+what changed instead — the DAMAGE extension reports the rectangle each client
+drew — and ships only that: one `GetImage` of the damaged union, painted at its
+offset, ~33 ms later. An idle desktop ships nothing at all; a dragged window
+costs its own rectangle, not the screen. Full-screen changes (video) still use
+the banded sweep, and a full sweep runs every ~5 s as a healer. The LIVE badge
+ends with `mode=damage` when this is active, `mode=sweep` when the server lacks
+DAMAGE. Two wrong wire encodings died in the sandbox on the way (CARD16
+QueryVersion = BadLength; every XFIXES region request rejected by this Xvfb),
+which is why the design that ships is the one `damage_test.sh` proves, 7/7:
+`android-emux/docs/DAMAGE_CAPTURE_v0.2.81.md`.
+
 If it ever happens again the app escalates by itself: the guest rewrites the
 stamped `rc.xml` and sends `openbox --reconfigure` (no restart, windows kept),
 and if buttons are *still* swallowed it switches window manager — or runs with
