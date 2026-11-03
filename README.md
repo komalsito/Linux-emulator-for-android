@@ -45,7 +45,8 @@ card, and your choice about the bar is remembered after that.
 | gesture | what the desktop receives |
 |---|---|
 | tap | left click |
-| drag | move / window drag |
+| drag | **left-button drag** — `ButtonPress`, motion, `ButtonRelease` over XTEST: move a window by its titlebar, rubber-band select desktop icons, drag a slider, select text (v0.2.79: this used to send *motion only*, with a release for a button that was never pressed — a hover, not a drag, so nothing on the desktop could be dragged) |
+| **double-tap-and-hold** | the same left-drag, but the button goes down on the **hold** — grab first, then move, without travelling the drag threshold. A *quick* double-tap is still a double click |
 | **long-press** | **right click, held** — keep holding and drag for a right-drag (range select in a terminal); release for the context menu |
 | **two-finger tap** | **middle click** — how you paste into an X terminal |
 | **two-finger drag** | **scroll wheel** (up/down and left/right); pans the viewport instead once you are zoomed in |
@@ -118,6 +119,52 @@ affected. Desktop icons still worked (a desktop-type client is not framed),
 which is why this looked like "some things are clickable" for so long. Full
 mechanism, source citations and the measured 8-case matrix:
 `android-emux/docs/CLICK_SWALLOW_v0.2.78.md`.
+
+## If the desktop feels slow, and how fast it actually is (v0.2.79)
+
+The LIVE badge in the corner of the desktop pane now carries the whole
+equation, measured on your device rather than assumed:
+
+```
+LIVE 0.5 fps  576x1280  720KB/s  2000ms/refresh
+```
+
+A refresh costs one screenful of pixels — `W × H × 2` bytes at depth 16 — pushed
+over a pipe whose throughput the app measures when it connects. `576 × 1280 × 2`
+is 1.47 MB, and at 720 KB/s that is ~2 s per frame: **0.5 fps**. That number was
+never a broken badge; it was the honest cost of a 1280 px screen on that pipe,
+and until now there was nothing to do about it.
+
+**Settings → “Desktop capture quality (frame rate)”** picks the long side of the
+X screen, which is the capture size. On the same 0.45-aspect pane and the same
+720 KB/s pipe:
+
+| long side | screen | frame | fps | vs. default |
+|---|---|---|---|---|
+| **1280 px (default)** | 576×1280 | 1.47 MB | 0.5 | 1× — sharp, and slow on a thin pipe |
+| 960 px | 432×960 | 0.83 MB | 0.9 | ~1.8× |
+| 720 px | 324×720 | 0.47 MB | 1.6 | ~3.2× |
+| 540 px | 242×540 | 0.26 MB | 2.8 | ~5.6× |
+
+Rate scales as 1/(long side)², because pixels — and therefore bytes, and
+therefore seconds — scale as the square. The pane's aspect is preserved at every
+setting (the short-side floor scales with the choice), so a smaller screen stays
+the shape of your phone instead of turning into a letterboxed square.
+
+The X screen size is fixed when the server starts, so the setting is applied by
+**Settings → “Restart desktop now”** (open windows close) or by the next desktop
+start — and until then both the badge and the launcher status line say
+*“capture quality changed — restart the desktop to apply it”*, so an unchanged
+frame rate cannot look like a setting that silently did nothing. The native
+capture loop's own ceiling also rose from a hardcoded 3 fps to 10
+(`MAX_FPS_NATIVE_FOREGROUND`), which only matters once the pipe is no longer the
+limit — at 540 px the same device above reads
+`LIVE 2.8 fps  242x540  720KB/s  354ms/refresh`. The default stays at 1280: no
+one's desktop gets softer without asking.
+
+Mechanism, the arithmetic and what this cannot fix (the pipe is under proot and
+the app can only choose how many bytes to ask for):
+`android-emux/docs/DRAG_AND_CAPTURE_RATE_v0.2.79.md`.
 
 If it ever happens again the app escalates by itself: the guest rewrites the
 stamped `rc.xml` and sends `openbox --reconfigure` (no restart, windows kept),
@@ -223,6 +270,11 @@ android-emux/            Gradle project (Kotlin, single module)
   app/src/main/assets/bin/     emux-init.sh, emux-x11, emux-capture, emux-init-probe.sh, emux-winsize
   app/src/main/assets/proot/   bundled proot + libtalloc + libandroid-shmem per ABI
                                (Termux-built binaries; see proot/LICENSES.txt)
+  tools/                 verify_apk.sh (the release gate, 53 checks) + build-apk/
+                         (the no-Gradle pipeline) + x11probe/ (real Xvfb+Openbox
+                         harnesses with a pass/fail verdict: button_delivery_test.sh,
+                         ladder_test.sh, drag_test.sh)
+  docs/                  one file per investigated bug, with the measurements
   debug-keystore/        committed debug signing key (stable sideload upgrades)
 emux-debug.apk           Latest debug build (also attached to GitHub Releases)
 ```

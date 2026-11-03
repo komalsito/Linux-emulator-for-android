@@ -172,7 +172,7 @@ PYEOF
 echo
 echo "--- dex (host-side Kotlin)"
 python3 - "$APK" > "$TMPD/d" <<'PYEOF'
-import sys,zipfile
+import struct,sys,zipfile
 z=zipfile.ZipFile(sys.argv[1])
 dex=sorted(n for n in z.namelist() if n.startswith('classes') and n.endswith('.dex'))
 blobs=[z.read(n) for n in dex]
@@ -182,6 +182,45 @@ for sym in ('injectScroll','injectKeysymCombo','maybeShowIntro'):
     out(hit,f"dex contains {sym}",
         "" if hit else "not found in any classes*.dex - the APK predates v0.2.60/v0.2.61")
 out(len(dex)>=2,"APK is multidex as expected","" if len(dex)>=2 else f"found {len(dex)} dex file(s)")
+
+# ---- 4b. classes the app cannot start without are DEFINED, not just named ----
+# v0.2.79: a LOWMEM build shipped an APK with ActivityMainBinding absent from the
+# dex (javac could not resolve com.emux.R, wrote nothing, and its status was lost
+# down a pipe). All 52 checks passed, because the byte-greps above cannot tell a
+# class the dex DEFINES from one it merely REFERENCES: MainActivity names the
+# binding either way, so its descriptor sits in the string table regardless. The
+# fix is to read the dex's own class_defs table - header offsets are fixed by the
+# format, and this needs nothing but zipfile and struct.
+def defined_classes(b):
+    str_size,str_off = struct.unpack_from('<II',b,0x38)
+    type_size,type_off = struct.unpack_from('<II',b,0x40)
+    cd_size,cd_off = struct.unpack_from('<II',b,0x60)
+    strs = struct.unpack_from('<%dI'%str_size,b,str_off)
+    types = struct.unpack_from('<%dI'%type_size,b,type_off)
+    def desc(i):
+        p = strs[i]
+        while b[p] & 0x80: p += 1        # skip the uleb128 length
+        p += 1
+        return b[p:b.index(b'\0',p)].decode('utf-8','replace')
+    r = set()
+    for k in range(cd_size):             # class_def_item is 32 bytes, class_idx first
+        (cidx,) = struct.unpack_from('<I',b,cd_off + k*32)
+        r.add(desc(types[cidx]))
+    return r
+try:
+    defs = set()
+    for b in blobs: defs |= defined_classes(b)
+    need = ['Lcom/emux/databinding/ActivityMainBinding;',  # MainActivity.onCreate inflates through it
+            'Lcom/emux/MainActivity;',
+            'Lcom/emux/SettingsActivity;',
+            'Lcom/emux/x11/DesktopService;',
+            'Lcom/emux/x11/DesktopView;']
+    missing = [n for n in need if n not in defs]
+    out(not missing,"dex DEFINES the load-bearing host classes (binding + activities + service + view)",
+        "" if not missing else
+        "absent from class_defs: "+", ".join(missing)+" - the APK would NoClassDefFoundError on launch")
+except Exception as e:
+    out(False,"dex class_defs readable","%s: %s"%(type(e).__name__,e))
 PYEOF
 
 for f in "$TMPD/a" "$TMPD/d"; do

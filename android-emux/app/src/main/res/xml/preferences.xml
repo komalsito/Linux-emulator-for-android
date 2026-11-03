@@ -51,6 +51,25 @@
         app:title="@string/pref_repair_title"
         app:summary="@string/pref_repair_summary" />
 
+    <!-- v0.2.79: the frame rate the user actually gets is bytes-per-frame
+         divided by a pipe we can only measure, not widen. This is the one knob
+         that changes bytes-per-frame. Applied when the desktop next starts (the
+         X screen cannot be resized mid-session); "Restart desktop now" does it
+         immediately. -->
+    <ListPreference
+        app:key="capture_quality"
+        app:title="Desktop capture quality (frame rate)"
+        app:summary="Lower resolution = fewer bytes per frame = a higher frame rate, at the cost of softer text. The desktop pane shows the live rate (LIVE n.n fps, size, KB/s, ms per refresh) so you can tune it against your own device. Applies when the desktop next starts."
+        app:entries="@array/capture_quality_entries"
+        app:entryValues="@array/capture_quality_values"
+        app:defaultValue="1280"
+        app:useSimpleSummaryProvider="true" />
+
+    <Preference
+        app:key="restart_desktop"
+        app:title="Restart desktop now"
+        app:summary="Applies the capture quality immediately. Restarting ends the X session, so open windows are lost - the Linux terminal is not affected." />
+
     <EditTextPreference
         app:key="mirror"
         app:title="@string/pref_distro_title"

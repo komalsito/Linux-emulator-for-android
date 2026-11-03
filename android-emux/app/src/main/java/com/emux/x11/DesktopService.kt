@@ -72,6 +72,32 @@ class DesktopService(
             }
         const val MAX_FPS_FOREGROUND = 30
         const val MAX_FPS_IDLE = 5
+
+        /**
+         * v0.2.79: the NATIVE path's own foreground ceiling. It was hardcoded to
+         * 333 ms (3 fps) while the socket path used MAX_FPS_FOREGROUND = 30 - so
+         * the pipeline every modern device actually runs (`src=native` on the
+         * badge) was capped ten times lower than the one it replaced. That cap is
+         * invisible at 1280 long side, where the pipe alone takes ~2 s per
+         * refresh, and it is the ONLY thing you feel once the capture resolution
+         * drops. Lower than the socket path's 30 on purpose: a native refresh
+         * re-reads and re-decodes the FULL screen every frame (GetImage ->
+         * RGB565 -> IntArray -> Bitmap), so its per-frame CPU cost is much higher
+         * than the socket path's diff decode. 10 fps is where the pipe stops
+         * being the limiter on a healthy device without cooking the phone.
+         */
+        const val MAX_FPS_NATIVE_FOREGROUND = 10
+
+        /** v0.2.79: capture quality default - the long side of the X screen, in
+         *  pixels. Unchanged from every previous release, so nobody's desktop
+         *  gets softer without asking; Settings -> "Desktop capture quality"
+         *  offers 1280/960/720/540 and the pane shows the rate each one gets. */
+        const val DEFAULT_CAPTURE_LONG_SIDE = 1280
+
+        /** v0.2.79: set by Settings -> "Restart desktop now", consumed by
+         *  MainActivity.onResume. The X screen size is fixed when Xvfb starts, so
+         *  a capture-quality change cannot be applied to a live session. */
+        @Volatile var restartDesktopRequested = false
     }
 
     enum class State { IDLE, STARTING_X, AWAITING_FRAMES, CONNECTED, ERROR }
@@ -368,7 +394,14 @@ class DesktopService(
                         if (refreshes % 25 == 0) {
                             noteInfo("native capture: ${nativeGrabMs}ms/refresh, band ${bandRows}r, ~${nativeKbPerS}KB/s, frames=$nativeFrames")
                         }
-                        val minFrameMs = if (foreground && screenOn) 333L else 1_000L
+                        // v0.2.79: was `333L` (3 fps) hardcoded, ten times below
+                        // the socket path's own ceiling. The grab itself is the
+                        // real pacer - when it exceeds the budget we only yield
+                        // 30 ms so the UI can breathe - so this raises the
+                        // ceiling without ever demanding more than the pipe
+                        // measured it can carry.
+                        val minFrameMs = if (foreground && screenOn)
+                            1_000L / MAX_FPS_NATIVE_FOREGROUND else 1_000L / MAX_FPS_IDLE
                         if (nativeGrabMs < minFrameMs) kotlinx.coroutines.delay(minFrameMs - nativeGrabMs)
                         else kotlinx.coroutines.delay(30L)   // let the UI breathe under proot load
                     }
@@ -405,6 +438,38 @@ class DesktopService(
      * resized mid-session); rotating mid-session re-fits the existing
      * frame in DesktopView until the next desktop start.
      */
+    /**
+     * v0.2.79 CAPTURE QUALITY: the LONG side of the X screen the user asked for.
+     *
+     * The X screen size IS the capture size. GetImage returns the server's own
+     * pixels, so there is no way to send fewer bytes per frame without a smaller
+     * screen - and the frame cost is what the field feels: time per refresh is
+     * ~(W*H*2) / measured pipe KB/s. On the v0.2.77 device that reported "LIVE
+     * 0.5 fps", ~1.5 MB per refresh over a ~900 KB/s proot-translated pipe is
+     * ~2 s, and no amount of host-side cleverness shortens a reply the server
+     * has not finished writing. Halving the long side quarters the bytes.
+     *
+     * Default stays 1280 (nothing gets softer unless you ask); the choice exists
+     * because the trade is the user's, not ours: fewer pixels = bigger, softer
+     * text and a proportionally higher frame rate.
+     */
+    private fun captureLongSide(): Int = runCatching {
+        androidx.preference.PreferenceManager.getDefaultSharedPreferences(ctx)
+            .getString("capture_quality", DEFAULT_CAPTURE_LONG_SIDE.toString())
+            ?.toIntOrNull() ?: DEFAULT_CAPTURE_LONG_SIDE
+    }.getOrDefault(DEFAULT_CAPTURE_LONG_SIDE).coerceIn(480, 1280)
+
+    /** The long side the RUNNING session actually started at. */
+    @Volatile private var sessionLongSide = 0
+
+    /** X screen size of the live session - what every frame costs. */
+    val captureGeometry: String get() =
+        if (sessionW > 0 && sessionH > 0) "${sessionW}x${sessionH}" else "?"
+
+    /** True when the user changed capture quality and the session predates it. */
+    val captureQualityPending: Boolean get() =
+        sessionLongSide > 0 && captureLongSide() != sessionLongSide
+
     private fun desktopGeometry(): String {
         // v0.2.38: prefer the VIEW's measured aspect - the X geometry then
         // matches the pane exactly and the contain-fit has no bars at all,
@@ -418,9 +483,14 @@ class DesktopService(
             // letterbox bars the "no bars" comment promised away, ~1.6M px of
             // capture per frame (a large part of the 0.5 fps field readings),
             // and a tap->X mapping whose fit the pane never actually had.
-            val longSide = 1280
+            val longSide = captureLongSide()
+            // The short-side floor scales WITH the choice (360 at 1280, the
+            // v0.2.66 value, so today's behaviour is bit-identical). A fixed 360
+            // floor at a 540 long side would force a 2:3 screen onto a 9:19.5
+            // pane and letterbox the very session the user made smaller to speed
+            // up.
             val shortSide = ((if (a >= 1f) longSide / a else longSide * a)
-                .coerceIn(360f, 1280f).toInt() / 2 * 2)
+                .coerceIn(longSide * 360f / 1280f, longSide.toFloat()).toInt() / 2 * 2)
             val px = longSide * shortSide
             // v0.2.74: depth 16, not 24. The field pipe (proot-translated
             // server writes) moves ~bytes, not pixels: every capture payload
@@ -430,12 +500,18 @@ class DesktopService(
             if (px <= 921_600 * 2) return if (a >= 1f) "${longSide}x${shortSide}x16" else "${shortSide}x${longSide}x16"
         }
         val cfg = ctx.resources.configuration
-        if (cfg.smallestScreenWidthDp in 1 until 600) return "1280x720x16"
+        // At the 1280 default every number below is bit-identical to the
+        // hardcoded values it replaces (720, 480); they scale with the choice so
+        // a smaller screen keeps the PANE's aspect instead of being coerced into
+        // a squarer one - the v0.2.66 letterbox bug, one level down.
+        val longSide = captureLongSide()
+        val phoneShort = (longSide * 720 / 1280) / 2 * 2
+        if (cfg.smallestScreenWidthDp in 1 until 600) return "${longSide}x${phoneShort}x16"
         val dm = ctx.resources.displayMetrics
         val w = dm.widthPixels; val h = dm.heightPixels
-        if (w <= 0 || h <= 0) return "720x1280x16"
-        val longSide = 1280
-        val shortSide = ((longSide * min(w, h) / max(w, h)).coerceIn(480, 1280) / 2 * 2)
+        if (w <= 0 || h <= 0) return "${phoneShort}x${longSide}x16"
+        val shortSide = ((longSide * min(w, h) / max(w, h))
+            .coerceIn(longSide * 480 / 1280, 1280) / 2 * 2)
         return if (w >= h) "${longSide}x${shortSide}x16" else "${shortSide}x${longSide}x16"
     }
 
@@ -878,6 +954,9 @@ class DesktopService(
                 // every X window control untappable. Pass the geometry
                 // for THIS device instead (see desktopGeometry()).
                 val desktopGeometry = desktopGeometry()
+                sessionLongSide = maxOf(
+                    desktopGeometry.substringBefore('x').toIntOrNull() ?: 0,
+                    desktopGeometry.substringAfter('x').substringBefore('x').toIntOrNull() ?: 0)
                 sessionW = desktopGeometry.substringBefore('x').toIntOrNull() ?: 0
                 sessionH = desktopGeometry.substringAfter('x').substringBefore('x').toIntOrNull() ?: 0
                 noteInfo("desktop geometry: $desktopGeometry")

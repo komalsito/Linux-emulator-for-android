@@ -43,6 +43,22 @@ extract '  XVFB_PID=""; XVFB_PID_DN=""' '  XTRY=0' "$T/xvfb.sh" 1
 . "$T/rc.sh"
 . "$T/xvfb.sh"
 running() { pgrep -x "$1" >/dev/null 2>&1; }   # launcher-provided in the real script
+# v0.2.79: the ASSERTIONS below must not use `running`/pgrep. pgrep -x matches
+# ZOMBIES, and PID 1 in this container is a node process that never reaps, so
+# every Xvfb/openbox an earlier harness killed stays visible forever — which made
+# "stage 2 removed the grabber" FAIL against a WM that was in fact dead, and could
+# equally make "openbox came up" PASS against one that never started. Same helper
+# and same reasoning as desktop_paint_test.sh / desktop_visible_ab.sh /
+# doctor_test.sh; `running()` above stays as it is because it mirrors the
+# launcher's own code, which is what this harness is testing.
+alive() {
+  n=0
+  for p in $(pgrep -x "$1" 2>/dev/null); do
+    st=$(sed 's/.*) //' /proc/$p/stat 2>/dev/null | cut -d' ' -f1)
+    [ -n "$st" ] && [ "$st" != Z ] && n=$((n+1))
+  done
+  echo $n
+}
 sorted() { tr ' ' '\n' | grep . | sort | tr '\n' ' ' | sed 's/ $//'; }
 
 have() { command -v "$1" >/dev/null 2>&1; }
@@ -117,7 +133,7 @@ if have Xvfb && have openbox && have python3 && [ -e "$FIXTURE" ] && [ -e "$PROB
   Xvfb :$D -screen 0 1280x720x24 -listen tcp >"$T/xvfb.log" 2>&1 & XV=$!
   i=0; while [ ! -S /tmp/.X11-unix/X$D ] && [ "$i" -lt 40 ]; do sleep 0.1; i=$((i + 1)); done
   DISPLAY=:$D openbox >"$T/ob.log" 2>&1 & sleep 1.2
-  ck "openbox came up" "yes" "$(pgrep -x openbox >/dev/null && echo yes || echo no)"
+  ck "openbox came up" "yes" "$([ "$(alive openbox)" -gt 0 ] && echo yes || echo no)"
 
   verdict() { DISPLAY=:$D python3 "$PROBE" $P 2>&1 | grep -oE 'DELIVERED|SWALLOWED|CANNOT-RUN' | head -1; }
   ck "baseline: broken config swallows the click" "SWALLOWED" "$(verdict)"
@@ -148,7 +164,7 @@ INNER
   echo "$(date +%s) dead btn=0 motion=1" > /tmp/emux_btn_verdict
   i=0; while ! grep -q 'stage2' /tmp/emux_btn_action 2>/dev/null && [ "$i" -lt 60 ]; do sleep 0.5; i=$((i + 1)); done
   ck "stage 2 acted" "stage2" "$(grep -o 'stage2' /tmp/emux_btn_action | head -1)"
-  ck "stage 2 removed the grabber" "no" "$(pgrep -x openbox >/dev/null && echo yes || echo no)"
+  ck "stage 2 removed the grabber" "no" "$([ "$(alive openbox)" -gt 0 ] && echo yes || echo no)"
   sleep 1.0
   ck "STAGE 2 RESTORED THE CLICK" "DELIVERED" "$(verdict)"
   ck "wm_mode published" "$(cat /tmp/emux_wm_mode 2>/dev/null)" "$(cat /tmp/emux_wm_mode 2>/dev/null)"

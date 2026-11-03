@@ -21,8 +21,21 @@ BUILD_TOOLS=$SDK/build-tools/34.0.0 \
 R8_JAR=/path/to/r8-8.5.35.jar \
 KOTLINC=/path/to/kotlinc/bin/kotlinc \
 STUBS=/tmp/stubs \
+LOWMEM=1 \
+HEAP="-J-Xmx600m -J-XX:+UseSerialGC -J-XX:TieredStopAtLevel=1 -J-XX:MaxMetaspaceSize=160m -J-XX:ReservedCodeCacheSize=48m" \
   sh tools/build-apk/no-gradle-build.sh
 ```
+
+`LOWMEM`/`HEAP` are not optional on a 1 GiB box, though the build works without
+them where there is room. The single kotlinc pass defaults to `-Xmx700m`, which is
+the *heap* only; with metaspace, code cache and JIT/GC threads on top, it peaks
+above the cgroup limit and the JVM dies on `os::commit_memory … errno=12` — a
+64 KB commit refused while `free` still shows ~780 MB, because the limit is the
+cgroup's, not the machine's. `LOWMEM=1` selects the two-pass split (javac the R
+classes first, then kotlinc with R on the classpath) and `HEAP` bounds the JVM's
+*total* footprint. Measured: 1,029,697,536 B peak against a 1,073,741,824 B limit
+— it fits, with ~42 MB to spare. Numbers and the failure it produced:
+`docs/DRAG_AND_CAPTURE_RATE_v0.2.79.md` §3.1.
 
 `STUBS` is `tools/x11probe/gen_stubs.py`'s output. Only `ActivityMainBinding.kt` and
 the three placeholder classes are used, and only to break a compile-order cycle: the
@@ -31,6 +44,19 @@ stub and javac replaces it afterwards. `compile_classes.sh` deletes the stub cla
 and `audit_classes.py` **fails the build** if any class in the dex is not traceable
 to a real source or a generated file — a surviving stub would replace real behaviour
 with an `UnsupportedOperationException` shell and still pass every other check.
+
+The audit tests *traceability*, not *completeness*: every class present has a
+source, but a class that was never produced is not missing from its input list. That
+is precisely how v0.2.79's first build shipped — a LOWMEM javac whose classpath
+lacked the R classes failed on the binding's `import com.emux.R`, wrote nothing,
+lost its status down a `| grep | head` pipe, and the build went on to merge 515
+all-traceable classes, sign, and pass `verify_apk.sh` 52/0 — with
+`ActivityMainBinding` absent from the dex and a `NoClassDefFoundError` waiting in
+`MainActivity.onCreate`. Three gates now cover it: javac's status is checked in
+both branches, `compile_classes.sh` asserts the binding `.class` exists before
+merging, and `verify_apk.sh`'s 53rd check parses the dex `class_defs` table (a
+byte-grep cannot: a class that is *referenced* but not *defined* still has its
+descriptor in the string table).
 
 ## The nine stages
 

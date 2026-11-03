@@ -21,6 +21,26 @@
         <item>Arch Linux ARM — rolling release, AUR-style breadth (~138 MB, pacman)</item>
         <item>Fedora 40 — bleeding-edge developer distro (~30 MB, dnf)</item>
     </string-array>
+    <!-- v0.2.79: capture quality = the LONG SIDE of the X screen in pixels.
+         The X screen size IS the capture size (GetImage returns the server's own
+         pixels), and one refresh costs W*H*2 bytes over a pipe the app measures
+         at connect time - so the frame rate scales inversely with the SQUARE of
+         this number. The multipliers below are that ratio, and the pane badge
+         ("LIVE n.n fps  WxH  nKB/s  nms/refresh") shows what the device actually
+         achieves, which is the only number worth trusting. -->
+    <string-array name="capture_quality_entries">
+        <item>Sharp — 1280 px (default, unchanged; ~1.5 MB per frame)</item>
+        <item>Balanced — 960 px (~1.8× the frame rate, ~0.8 MB)</item>
+        <item>Fast — 720 px (~3.2× the frame rate, ~0.5 MB)</item>
+        <item>Smooth — 540 px (~5.6× the frame rate, ~0.26 MB; the desktop gets small)</item>
+    </string-array>
+    <string-array name="capture_quality_values">
+        <item>1280</item>
+        <item>960</item>
+        <item>720</item>
+        <item>540</item>
+    </string-array>
+
     <string-array name="distro_values">
         <item>alpine</item>
         <item>debian</item>

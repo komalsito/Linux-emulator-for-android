@@ -126,13 +126,24 @@ if [ -n "${PREBUILT_MERGED:-}" ]; then
   cp -r "$PREBUILT_MERGED"/. "$OUT/merged"/
   CRC=0
 else
-ANDROID_JAR=$ANDROID_JAR KOTLINC=${KOTLINC:-/opt/kt/kotlinc/bin/kotlinc} \
-  sh "$HERE/compile_classes.sh" > "$OUT/compile.log" 2>&1
-CRC=$?
+# v0.2.79: `cmd > log; CRC=$?` NEVER reaches the assignment under `set -e` - a
+# failing compile aborts the script on the spot, so the driver exited 1 having
+# printed the step header and nothing else. Two builds were lost to that silence:
+# the real cause (a kotlinc JVM that could not commit memory) sat in
+# $OUT/kc.log, which only this branch reports. Same class of bug the comment
+# below the pipeline note describes, one level up.
+if ANDROID_JAR=$ANDROID_JAR KOTLINC=${KOTLINC:-/opt/kt/kotlinc/bin/kotlinc} \
+     sh "$HERE/compile_classes.sh" > "$OUT/compile.log" 2>&1
+then CRC=0; else CRC=$?; fi
 grep -E '^==|classes|error|audit' "$OUT/compile.log" || true
 if [ $CRC != 0 ]; then
   echo "   COMPILE FAILED (exit $CRC) - last 20 lines:"
   tail -20 "$OUT/compile.log" 2>/dev/null | sed 's/^/     /'
+  # compile.log only carries the driver's summary; kotlinc's own stderr - and a
+  # JVM that dies on os::commit_memory - lands in kc.log. Printing one without
+  # the other is how an OOM looks like a mystery.
+  echo "   --- $OUT/kc.log (last 20) ---"
+  tail -20 "$OUT/kc.log" 2>/dev/null | sed 's/^/     /'
   exit 1
 fi
 fi

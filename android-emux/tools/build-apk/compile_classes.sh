@@ -74,18 +74,44 @@ echo "   exit=$RC errors=$E sources=$(find $J -name '*.kt' | wc -l)kt+$(wc -l < 
 # A non-zero exit with zero "error:" lines is still a failure (OOM, crash, timeout).
 [ $RC != 0 ] && exit 1
 
+# v0.2.79: javac's status is now CHECKED in both branches. `javac … | grep | head`
+# reports grep's status under any shell, so a javac that emitted nothing used to
+# fall through to merge, dex, package, sign - and pass verify_apk.sh - while the
+# APK was missing a class the app needs on its first line.
 if [ -z "${LOWMEM:-}" ]; then
 echo "== 2/3 javac: the R classes + the real ActivityMainBinding =="
 # kotlinc resolved these but emitted nothing for them; javac produces the .class
 # files that actually go into the dex.
-javac -nowarn -source 17 -target 17 -cp "$LIBS:$OUT/kclasses" -d $OUT/jclasses \
-  @$OUT/r.list "$BINDING" 2>&1 | grep -vE '^Note|warning' | head -10
+if javac -nowarn -source 17 -target 17 -cp "$LIBS:$OUT/kclasses" -d $OUT/jclasses \
+     @$OUT/r.list "$BINDING" > $OUT/jc.log 2>&1
+then JRC=0; else JRC=$?; fi
+grep -vE '^Note|warning' $OUT/jc.log | head -10
 fi
 if [ -n "${LOWMEM:-}" ]; then
-  javac -nowarn -source 17 -target 17 -cp "$LIBS:$OUT/kclasses" -d $OUT/jclasses \
-    "$BINDING" 2>&1 | grep -vE '^Note|warning' | head -5
+  # The binding source imports com.emux.R. In LOWMEM mode R is compiled by step 1a
+  # into $OUT/jclasses, and kotlinc - which was handed the binding as a SOURCE -
+  # resolves Java but writes no .class for it, so jclasses is the only place R
+  # exists. It was missing from this classpath: javac died on
+  # "cannot find symbol: R", produced no ActivityMainBinding.class, and the build
+  # shipped an APK that throws NoClassDefFoundError in MainActivity.onCreate.
+  if javac -nowarn -source 17 -target 17 -cp "$LIBS:$OUT/kclasses:$OUT/jclasses" \
+       -d $OUT/jclasses "$BINDING" > $OUT/jc.log 2>&1
+  then JRC=0; else JRC=$?; fi
+  grep -vE '^Note|warning' $OUT/jc.log | head -5
 fi
-echo "   $(find $OUT/jclasses -name '*.class' | wc -l) classes from R sources + 1 binding"
+if [ "${JRC:-0}" != 0 ]; then
+  echo "   JAVAC FAILED (exit $JRC) - no .class output can be trusted"
+  exit 1
+fi
+echo "   $(find $OUT/jclasses -name '*.class' | wc -l) classes from R sources + the binding"
+# The binding is load-bearing: MainActivity.onCreate's first statement inflates
+# through it. Assert the artifact, not the exit code - "javac succeeded" and "javac
+# wrote the class we asked for" are not the same claim, and only the second one
+# reaches the dex.
+if [ ! -f "$OUT/jclasses/com/emux/databinding/ActivityMainBinding.class" ]; then
+  echo "   MISSING ActivityMainBinding.class - the app cannot start without it"
+  exit 1
+fi
 
 echo "== 3/3 merge + audit =="
 for d in kclasses jclasses; do

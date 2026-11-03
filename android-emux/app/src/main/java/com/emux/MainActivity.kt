@@ -518,7 +518,14 @@ class MainActivity : AppCompatActivity() {
                     colored(getString(R.string.x_connected, 0, 0) + "\n" + d.errorHistoryTextNewestFirst())
                 else
                     getString(R.string.x_connected, d.x11?.screenWidth ?: 0, d.x11?.screenHeight ?: 0) +
-                        (d.errorText.value?.let { "\n" + it } ?: "")
+                        (d.errorText.value?.let { "\n" + it } ?: "") +
+                        // v0.2.79: the capture-quality knob is read when Xvfb
+                        // starts, so a change made mid-session does nothing until
+                        // the session restarts. Saying so beats letting the user
+                        // watch an unchanged frame rate and conclude the setting
+                        // is broken.
+                        (if (d.captureQualityPending)
+                            "\ncapture quality changed \u2014 restart the desktop to apply it" else "")
             com.emux.x11.DesktopService.State.ERROR ->
                 colored(getString(R.string.x_error, d.errorHistoryTextNewestFirst()))
         }
@@ -1093,6 +1100,37 @@ class MainActivity : AppCompatActivity() {
         super.onResume()
         desktop.foreground = true
         b.termContainer.findViewWithTag<VtTerminalView>("term")?.requestFocus()
+        // v0.2.79: Settings -> "Restart desktop now" sets this flag instead of
+        // tearing down a session it does not own. Consumed here, on the way back
+        // from Settings, so the pane is in front of the user when it restarts.
+        if (com.emux.x11.DesktopService.restartDesktopRequested) {
+            com.emux.x11.DesktopService.restartDesktopRequested = false
+            restartDesktopNow()
+        } else if (desktop.captureQualityPending) {
+            updateDesktopStatus()
+        }
+    }
+
+    /**
+     * v0.2.79: stop the desktop and start it again so a new capture quality
+     * takes effect. The X screen size is fixed when Xvfb starts - it cannot be
+     * resized mid-session - and `desktopGeometry()` reads the preference, so
+     * stop-then-start is the whole mechanism.
+     *
+     * The delay is not cosmetic. `stop()` kills the guest processes from a
+     * coroutine (`killDesktopGuests()` sweeps Xvfb by pattern from the host
+     * /proc), so starting immediately can race a server that is still up - and
+     * the launcher's "adopt, don't fight" rule (v0.2.13) would then ADOPT the old
+     * Xvfb at the OLD geometry and the setting would silently do nothing.
+     */
+    private fun restartDesktopNow() {
+        desktop.stop()
+        b.desktopStatus.text = getString(R.string.x_starting)
+        lifecycleScope.launch {
+            kotlinx.coroutines.delay(2_000)
+            desktop.frameCallback = { runOnUiThread { b.desktopView.onNewFrame(desktop.frameId) } }
+            desktop.startDesktop(wmCommand = prefsWm())
+        }
     }
 
     override fun onPause() {

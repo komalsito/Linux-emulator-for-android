@@ -21,9 +21,14 @@ upgrade/downgrade in place with `adb install -r` against each other.
 | `emux-debug-v0.2.76-vc176.apk` | 0.2.76 | 176 | 52/0/0 | MAILBOX READER: app polls /tmp/emux_frame.rgb (raw RGB565, already written by emux-capture every loop BEFORE the wedging nc push) + /tmp/emux_fb.xwd; emux-capture mail mode skips the push entirely; ENV_VERSION 74 |
 | `emux-debug-v0.2.77-vc177.apk` | 0.2.77 | 177 | 52/0/0 | post-frame launcher exit with a LIVE server no longer floods the pane with the diag wall (judge by server probe, not launcher rc); bounded post-frame X respawn |
 | `emux-debug-v0.2.78-vc178.apk` | 0.2.78 | 178 | 52/0/0 | CLICK SWALLOW: our own rc.xml bound the `Frame` context, so Openbox `XGrabButton`'d the parent of every app window and never replayed the press (motion/keys untouched) — rc.xml is now stamped, rewritten when the stamp differs and audited for grab contexts; in-app ButtonPress probe (`btn=`/`wm=` badge fields, `proof=motion-only` instead of a false `ok`); 2-stage escalation ladder (rewrite+`--reconfigure` → switch WM/none); host display pick by *connect* not bind; our own unverified Xvfb retired (the stray-on-`:0` report); ENV_VERSION 75 |
+| `emux-debug-v0.2.79-vc179.apk` | 0.2.79 | 179 | 53/0/0 | LEFT-DRAG: a drag sent *motion only* and then released a button it had never pressed — a hover, not a drag, so nothing on the desktop could be dragged (right-drag worked only because long-press really presses button 3) — now `ButtonPress(1)` at the touch-down point, motions ≤30/s, `ButtonRelease(1)` on lift/cancel/second finger, with double-tap-and-**hold** as an alias (a quick double-tap is still a double click); capture-quality setting (1280 default / 960 / 720 / 540 long side) + Settings → *Restart desktop now*, native capture cap 3 → 10 fps, and a LIVE badge carrying geometry, measured KB/s and ms/refresh so the 0.5 fps field report is legible and fixable; `drag_test.sh` 7/7 (client wire sequence *and* a titlebar drag that moves the window exactly +150,+100); **two build gates fixed**: the LOWMEM binding javac lacked `jclasses` on its classpath, so `ActivityMainBinding` never reached the dex — a signed, `passed=52 failed=0` APK that would `NoClassDefFoundError` in `MainActivity.onCreate` — and `verify_apk.sh` could not see it because byte-greps cannot tell a *defined* class from a *referenced* one (new 53rd check parses dex `class_defs`) |
 
 Rebuild any of them with the zero-Gradle pipeline:
 `android-emux/tools/build-apk/no-gradle-build.sh` (see
 `android-emux/docs/BUILDING_THE_APK.md`), then check with
-`android-emux/tools/verify_apk.sh` — a build that does not pass 51/0/0 must not
-be added here.
+`android-emux/tools/verify_apk.sh` — a build that does not pass it must not be
+added here. The gate has grown as it caught things: 51 checks to v0.2.74, 52
+from v0.2.75, **53 from v0.2.79** (the count in the table above is what that
+APK was verified against). On this 1 GiB box the pipeline needs
+`LOWMEM=1` and a bounded JVM heap — see
+`android-emux/docs/DRAG_AND_CAPTURE_RATE_v0.2.79.md` §3 for the measurements.

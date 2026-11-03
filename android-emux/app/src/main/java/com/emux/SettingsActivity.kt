@@ -101,6 +101,8 @@ class SettingsActivity : AppCompatActivity() {
                     row("Linux distribution", sp.getString("distro", "alpine") ?: "alpine")
                     row("Window manager", sp.getString("wm", "openbox") ?: "openbox")
                     row("Root acceleration", if (sp.getBoolean("root_accel", true)) "ON" else "OFF")
+                    row("Desktop capture quality",
+                        (sp.getString("capture_quality", "1280") ?: "1280") + " px long side")
                     row("Keep-awake burst", if (sp.getBoolean("keepawake_burst", true)) "ON" else "OFF")
                     row("Mirror", sp.getString("mirror", com.emux.core.BootstrapManager.MIRROR) ?: "")
                     addView(android.widget.TextView(this@SettingsActivity).apply {
@@ -123,6 +125,19 @@ class SettingsActivity : AppCompatActivity() {
                     val app = requireContext().applicationContext
                     android.widget.Toast.makeText(app, R.string.repair_started, android.widget.Toast.LENGTH_LONG).show()
                     com.emux.core.BootstrapManager(app).startupRepairAsync(force = true)
+                    true
+                }
+            // v0.2.79: capture quality only takes effect when Xvfb starts, so
+            // give the user the restart instead of making them hunt for one.
+            // The flag is consumed by MainActivity.onResume - Settings must not
+            // tear down a session it does not own.
+            findPreference<androidx.preference.Preference>("restart_desktop")
+                ?.setOnPreferenceClickListener {
+                    com.emux.x11.DesktopService.restartDesktopRequested = true
+                    android.widget.Toast.makeText(requireContext().applicationContext,
+                        "Restarting the desktop\u2026 (open windows will close)",
+                        android.widget.Toast.LENGTH_LONG).show()
+                    activity?.onBackPressedDispatcher?.onBackPressed()
                     true
                 }
         }
@@ -173,6 +188,34 @@ class SettingsActivity : AppCompatActivity() {
                 entryValues = arrayOf("auto", "es", "en")
                 setDefaultValue("auto")
                 summaryProvider = androidx.preference.ListPreference.SimpleSummaryProvider.getInstance()
+            })
+            // v0.2.79: capture quality + the restart that applies it. Mirrors
+            // res/xml/preferences.xml, which is the tier that normally runs.
+            screen.addPreference(androidx.preference.ListPreference(ctx).apply {
+                key = "capture_quality"; title = "Desktop capture quality (frame rate)"
+                summary = "Lower resolution = fewer bytes per frame = a higher frame rate, at " +
+                    "the cost of softer text. The desktop pane shows the live rate so you can " +
+                    "tune it against your own device. Applies when the desktop next starts."
+                entries = arrayOf(
+                    "Sharp \u2014 1280 px (default, unchanged; ~1.5 MB per frame)",
+                    "Balanced \u2014 960 px (~1.8\u00d7 the frame rate, ~0.8 MB)",
+                    "Fast \u2014 720 px (~3.2\u00d7 the frame rate, ~0.5 MB)",
+                    "Smooth \u2014 540 px (~5.6\u00d7 the frame rate, ~0.26 MB; the desktop gets small)")
+                entryValues = arrayOf("1280", "960", "720", "540")
+                setDefaultValue(com.emux.x11.DesktopService.DEFAULT_CAPTURE_LONG_SIDE.toString())
+            })
+            screen.addPreference(androidx.preference.Preference(ctx).apply {
+                key = "restart_desktop"; title = "Restart desktop now"
+                summary = "Applies the capture quality immediately. Restarting ends the X " +
+                    "session, so open windows are lost - the Linux terminal is not affected."
+                setOnPreferenceClickListener {
+                    com.emux.x11.DesktopService.restartDesktopRequested = true
+                    android.widget.Toast.makeText(ctx.applicationContext,
+                        "Restarting the desktop\u2026 (open windows will close)",
+                        android.widget.Toast.LENGTH_LONG).show()
+                    activity?.onBackPressedDispatcher?.onBackPressed()
+                    true
+                }
             })
             screen.addPreference(androidx.preference.SwitchPreferenceCompat(ctx).apply {
                 key = "keepawake_burst"; title = "Keep-awake during activity"

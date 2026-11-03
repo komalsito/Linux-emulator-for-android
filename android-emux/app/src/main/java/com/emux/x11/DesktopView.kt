@@ -396,7 +396,26 @@ class DesktopView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attrs) 
                 postInvalidateOnAnimation()   // keep ticking while stale
             } else {
                 val badge = Paint().apply { color = Color.argb(0xC0, 0x66, 0xBB, 0x6A); textSize = sp(10f) }
-                canvas.drawText("LIVE %.1f fps".format(fps), 16f, sp(16f), badge)
+                // v0.2.79: "LIVE 0.5 fps" said the desktop was slow but not why,
+                // or what to do about it. Frame time is bytes/pipe, so paint all
+                // three numbers next to the rate: what one frame costs (the X
+                // screen size - capture cannot be smaller than the screen), how
+                // fast the pipe actually measured, and the resulting refresh cost.
+                // Settings -> "Desktop capture quality" trades the first for the
+                // last, and now the pane shows whether it worked.
+                val kb = desktop?.nativeKbPerS ?: -1L
+                val ms = desktop?.nativeGrabMs ?: -1L
+                canvas.drawText(
+                    "LIVE %.1f fps  %s  %dKB/s  %dms/refresh".format(
+                        fps, desktop?.captureGeometry ?: "?", kb, ms),
+                    16f, sp(16f), badge)
+                if (desktop?.captureQualityPending == true) {
+                    val pend = Paint().apply { color = Color.argb(0xC0, 0xFF, 0xB7, 0x4D); textSize = sp(9f) }
+                    // sp(28f) is the INPUT line, so this rides at the bottom of
+                    // the badge stack where nothing else paints.
+                    canvas.drawText("capture quality changed - restart the desktop to apply it",
+                        16f, sp(96f), pend)
+                }
             }
             // v0.2.53: input health ON the bitmap - the history TextView is
             // invisible once frames flow, and "clicks do nothing" needed an
@@ -554,7 +573,14 @@ class DesktopView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attrs) 
     // v0.2.60 gesture set. Everything here is reachable with one or two
     // fingers on a phone, and nothing requires a hardware keyboard:
     //   tap                     -> button 1 click
-    //   drag                    -> X motion with button 1 semantics (window drag)
+    //   double-tap              -> two button-1 clicks (a real double-click)
+    //   drag                    -> button 1 DOWN, motion, button 1 UP: a real
+    //                              left-drag (v0.2.79 - it used to send motion
+    //                              only and then release a button it had never
+    //                              pressed, so nothing on the desktop could be
+    //                              dragged at all)
+    //   double-tap-and-hold     -> the same left-drag, but the button goes down
+    //                              on the hold so you can grab before moving
     //   long-press              -> button 3 DOWN, held; drag it for a right-drag,
     //                              released where the finger lifts
     //   two-finger tap          -> button 2 (middle) - the only practical way to
@@ -574,6 +600,17 @@ class DesktopView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attrs) 
     private var lastMotionSendTs = 0L
     private var longPressFired = false
     private var rightHeld = false          // long-press armed button 3 and has not released it
+    // v0.2.79 LEFT-DRAG. `leftHeld` means button 1 is DOWN IN THE SERVER for
+    // this gesture, so something MUST release it: on finger lift, on cancel, and
+    // when a second finger turns the gesture into a pan/zoom. A button left down
+    // wedges every click that follows, which is why every exit path releases it.
+    private var leftHeld = false
+    // The finger currently down is the SECOND tap of a double-tap, so holding it
+    // (without moving) grabs with button 1 down - the double-tap-and-hold alias
+    // for a left-drag. A quick double-tap lifts before DT_HOLD_MS and stays a
+    // double-CLICK, which is how desktop icons open (v0.2.66); that behaviour is
+    // deliberately untouched.
+    private var dtHoldArmed = false
 
     /** True while the in-progress gesture started on an overlay control. */
     private var overlayDown = false
@@ -693,11 +730,19 @@ class DesktopView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attrs) 
                 downX = event.x; downY = event.y
                 lastHistY = event.y
                 dragging = false; panning = false; longPressFired = false
+                leftHeld = false; dtHoldArmed = false
                 twoFingerMoved = false
                 removeCallbacks(longPressRunnable)
+                removeCallbacks(dtHoldRunnable)
                 // v0.2.3: no X server behind a frameless pane - a long-press
                 // right-click there injects into nothing, so don't arm it.
-                if (!frameless) postDelayed(longPressRunnable, LONG_PRESS_MS)
+                if (!frameless) {
+                    postDelayed(longPressRunnable, LONG_PRESS_MS)
+                    dtHoldArmed = downTime - lastTapUpMs < DOUBLE_TAP_MS &&
+                        abs(event.x - lastTapUpX) < TAP_SLOP &&
+                        abs(event.y - lastTapUpY) < TAP_SLOP
+                    if (dtHoldArmed) postDelayed(dtHoldRunnable, DT_HOLD_MS)
+                }
                 return true
             }
             MotionEvent.ACTION_POINTER_DOWN -> {
@@ -706,6 +751,10 @@ class DesktopView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attrs) 
                 // A second finger ends any right-button hold, otherwise the
                 // button stays down with nothing left to release it.
                 releaseRightButton(event)
+                // v0.2.79: same for a left-drag in progress - the gesture is now
+                // a pan/zoom, and button 1 must not stay down through it.
+                removeCallbacks(dtHoldRunnable)
+                releaseLeftDrag(event)
                 twoFingerDownTs = System.currentTimeMillis()
                 twoFingerMoved = false
                 scrollAccumY = 0f; scrollAccumX = 0f
@@ -763,6 +812,23 @@ class DesktopView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attrs) 
                 if (!dragging && (dx * dx + dy * dy) > 18 * 18) {
                     dragging = true
                     removeCallbacks(longPressRunnable)
+                    removeCallbacks(dtHoldRunnable)
+                    // v0.2.79 THE DRAG FIX. A drag is ButtonPress, MotionNotify…,
+                    // ButtonRelease. This branch used to set `dragging` and send
+                    // ONLY motion - injectMotion() carries no button - then
+                    // release button 1 on lift without ever having pressed it.
+                    // The server therefore saw a hover plus a stray release, and
+                    // nothing could be dragged: no rubber-band select on the
+                    // desktop, no window move by the titlebar, no slider. (A
+                    // right-drag worked only because long-press really does press
+                    // button 3 first.) The press goes where the finger LANDED, not
+                    // where it is now, so the 18 px of travel is part of the drag.
+                    // Skipped while button 3 is held - that is a right-drag.
+                    if (!leftHeld && !rightHeld && !longPressFired && !frameless) {
+                        val (px, py) = mapToX(downX, downY)
+                        desktop?.injectClick(px, py, button = 1, press = true)
+                        leftHeld = true
+                    }
                 }
                 if (dragging) {
                     val now = System.currentTimeMillis()
@@ -792,12 +858,17 @@ class DesktopView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attrs) 
             }
             MotionEvent.ACTION_UP -> {
                 removeCallbacks(longPressRunnable)
+                removeCallbacks(dtHoldRunnable)
                 if (rightHeld) {
                     releaseRightButton(event)
+                    releaseLeftDrag(event)
                     dragging = false; panning = false
                     return true
                 }
-                if (overlayDown) { overlayDown = false; dragging = false; panning = false; return true }
+                if (overlayDown) {
+                    releaseLeftDrag(event)
+                    overlayDown = false; dragging = false; panning = false; return true
+                }
                 // v0.2.66 FIX (input-dead audit): a double-tap MUST reach X as a
                 // real double-click. pcmanfm desktop icons, GTK "Execute File"
                 // dialogs and file managers all activate on the SECOND
@@ -818,9 +889,17 @@ class DesktopView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attrs) 
                     desktop?.noteInfo("input map: view(${event.x.toInt()},${event.y.toInt()}) -> X($x,$y) cover=$coverMode zoom=$scale")
                 }
                 if (!longPressFired && !panning && !frameless) {
-                    if (dragging) {
-                        // releasing after drag: send button release at final pos
-                        desktop?.fakeButtonReleaseOnly(x, y)
+                    if (leftHeld) {
+                        // v0.2.79: end the drag where the finger lifted - motion to
+                        // the final point, then ButtonRelease(1) there. `leftHeld`,
+                        // not `dragging`, is the test: a double-tap-and-hold that
+                        // never moved still has a real button down to release.
+                        releaseLeftDrag(event)
+                    } else if (dragging) {
+                        // travelled past the threshold but never pressed (a
+                        // right-drag that already released above, or a frameless
+                        // scroll): nothing to release, and it must not become a
+                        // click at the end of a drag either.
                     } else {
                         desktop?.injectClick(x, y, button = 1, press = true)
                         postDelayed({ desktop?.injectClick(x, y, button = 1, press = false) }, 40)
@@ -837,7 +916,11 @@ class DesktopView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attrs) 
             }
             MotionEvent.ACTION_CANCEL -> {
                 removeCallbacks(longPressRunnable)
+                removeCallbacks(dtHoldRunnable)
                 releaseRightButton(event)
+                // v0.2.79: a cancelled gesture (parent stole the touch, screen
+                // off, palm rejection) still has to let go of button 1.
+                releaseLeftDrag(event)
                 overlayDown = false
                 dragging = false; panning = false
                 return true
@@ -862,6 +945,29 @@ class DesktopView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attrs) 
             rightHeld = true
             performHapticFeedback(android.view.HapticFeedbackConstants.LONG_PRESS)
         }
+    }
+
+    /** v0.2.79: double-tap-and-HOLD grabs with button 1 down, so a slow drag
+     *  after it is a left-drag even if the finger never travelled the 18 px
+     *  that arms the plain drag. */
+    private val dtHoldRunnable = Runnable {
+        if (!dragging && !panning && !rightHeld && !leftHeld && !frameless) {
+            val (x, y) = mapToX(downX, downY)
+            desktop?.injectClick(x, y, button = 1, press = true)
+            leftHeld = true
+            dragging = true            // motions from here on are drag motions
+            removeCallbacks(longPressRunnable)
+            performHapticFeedback(android.view.HapticFeedbackConstants.LONG_PRESS)
+        }
+    }
+
+    /** Release button 1 if this gesture pressed it. Idempotent, and cheap enough
+     *  to call from every exit path - the alternative is a stuck button. */
+    private fun releaseLeftDrag(e: MotionEvent) {
+        if (!leftHeld) return
+        leftHeld = false
+        val (x, y) = mapToX(e.x, e.y)
+        desktop?.fakeButtonReleaseOnly(x, y)
     }
 
     private fun releaseRightButton(e: MotionEvent) {
@@ -995,8 +1101,11 @@ class DesktopView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attrs) 
         // v0.2.66 gesture contract (double-tap is a real double-click; the
         // fit<->fill toggle lives on the FIT chip).
         val hp = Paint().apply { color = Color.argb(0x78, 0xFF, 0xFF, 0xFF); textSize = sp(9f) }
-        canvas.drawText("tap=click  long-press=right(hold+drag)  2-finger tap=middle", 16f, sp(52f), hp)
-        canvas.drawText("2-finger drag=scroll (pan when zoomed)  pinch=zoom  double-tap=2xclick  FIT=fill",
+        // Two lines, not three: sp(72f) belongs to the sticky-modifier
+        // "next key:" hint and a third legend line overprints it.
+        canvas.drawText("tap=click  drag=left-drag(held)  2tap+HOLD=grab  double-tap=2xclick",
+            16f, sp(52f), hp)
+        canvas.drawText("long-press=right-drag  2-finger=middle/scroll  pinch=zoom  FIT=fill",
             16f, sp(62f), hp)
     }
 
@@ -1015,11 +1124,18 @@ class DesktopView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attrs) 
         val fadeMs = HINT_MS / 3
         val a = if (remain < fadeMs) (255f * remain / fadeMs).toInt().coerceIn(0, 255) else 255
         val lines = arrayOf(
-            "tap  =  left click",
+            "tap  =  left click   \u00b7   double-tap  =  double click",
+            "drag  =  left-drag: button held, so you can select, move",
+            "            windows, and drag sliders  (v0.2.79)",
+            "double-tap-and-HOLD  =  grab first, then drag",
             "long-press  =  right click (hold + drag to right-drag)",
             "two-finger tap  =  middle click (paste in a terminal)",
             "two-finger drag  =  scroll wheel  \u00b7  pans when zoomed",
-            "pinch  =  zoom  \u00b7  double-tap  =  fit / fill",
+            // v0.2.79: this said "double-tap = fit / fill", which has been wrong
+            // since v0.2.66 made double-tap a real double-click and moved the
+            // view toggle to the FIT chip. A card that misdescribes the gestures
+            // is worse than no card.
+            "pinch  =  zoom  \u00b7  FIT chip  =  fit / fill",
             "keys  =  Esc Tab Ctrl Alt Super arrows \u232b",
             "Ctrl/Alt/Super are sticky: tap Ctrl, then type c \u2192 Ctrl+C",
         )
@@ -1050,6 +1166,13 @@ class DesktopView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attrs) 
 
     private companion object {
         const val LONG_PRESS_MS = 450L
+        // v0.2.79 double-tap-and-hold: the window in which a second tap counts,
+        // how far it may wander, and how long the hold must last before it means
+        // "grab" rather than "double-click". DT_HOLD_MS sits well under
+        // LONG_PRESS_MS so the two holds never race for the same finger.
+        const val DOUBLE_TAP_MS = 300L
+        const val TAP_SLOP = 40f
+        const val DT_HOLD_MS = 170L
         const val TWO_FINGER_TAP_MS = 260L
         const val TWO_FINGER_TAP_SLOP = 26f
         const val SCROLL_STEP_PX = 44f
