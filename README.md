@@ -166,6 +166,37 @@ Mechanism, the arithmetic and what this cannot fix (the pipe is under proot and
 the app can only choose how many bytes to ask for):
 `android-emux/docs/DRAG_AND_CAPTURE_RATE_v0.2.79.md`.
 
+## If the terminal staircases, or the desktop repaints in fragments (v0.2.80)
+
+Two field bugs whose screenshots told the whole story once read against the
+code (`android-emux/docs/TERMINAL_STAIRCASE_AND_CAPTURE_FEEL_v0.2.80.md`):
+
+- **Terminal output sliding right, line by line.** That is bare `\n` on the
+  wire: no tty driver adding the carriage return. The renderer used to trust a
+  flag (`ptyWrapped`) that is set *before* the guest PTY wrapper is known alive;
+  on a ROM where the wrapper segfaults, the shell falls back to raw pipes with
+  the flag still true and every line staircases. The view now **measures the
+  wire** — a real PTY with ONLCR can never emit a bare LF — and switches on
+  CR-on-LF emulation (and local echo) the moment three bare LFs prove there is
+  no line discipline. Nothing to do on your side; it heals mid-screen.
+- **"1.0 fps" that was not fps.** The badge counted partial repaints (bands),
+  while no *full* refresh ever completed — which is precisely the sloppy feel.
+  Missed bands now halve the band size so the sweep keeps moving instead of
+  restarting, KB/s is measured from the bands that actually land (no more
+  `-1KB/s`), and the badge counts **completed refreshes** — appending
+  `sweep y/H miss=N <reason>` whenever a sweep is in flight or stuck, so a
+  screenshot says where the repaint got to and why.
+- **Input stuck on the slow path.** The XTEST proof ran once per connection, at
+  the worst moment; one raced probe condemned the session to the guest xdotool
+  agent (a process exec per event). It now re-probes on a backoff and promotes
+  itself back to XTEST the moment the server honours it.
+- **A quality change that silently did nothing** (old X server still dying when
+  the new one starts → the launcher adopts the old geometry) is now detected:
+  the live server's size is verified against the setting, and mismatched
+  sessions restart once, logged as `GEOMETRY MISMATCH`. Settings also shows
+  what each quality option is worth on *your* pipe, from the KB/s your device
+  measured: `Your pipe measured 720 KB/s: 1280px≈0.5fps … 540px≈2.8fps`.
+
 If it ever happens again the app escalates by itself: the guest rewrites the
 stamped `rc.xml` and sends `openbox --reconfigure` (no restart, windows kept),
 and if buttons are *still* swallowed it switches window manager — or runs with

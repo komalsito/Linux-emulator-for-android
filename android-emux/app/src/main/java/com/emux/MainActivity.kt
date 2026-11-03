@@ -46,6 +46,10 @@ class MainActivity : AppCompatActivity() {
      */
     private val ptyUpgradedSessions = mutableSetOf<Int>()
     private val ptyGuestUpgraded = mutableSetOf<Int>()   // v0.1.55 guest-PTY upgrade gate
+    // v0.2.80: this collect re-runs on every state churn, and on one field ROM
+    // that printed the same "no PTY wrapper" WARNING four times in a row above
+    // the prompt. Once per session is once enough.
+    private val ptyWarned = mutableSetOf<Int>()
 
     private val notifPermission =
         registerForActivityResult(ActivityResultContracts.RequestPermission()) { /* fine if denied */ }
@@ -626,7 +630,7 @@ class MainActivity : AppCompatActivity() {
                     // v0.1.37: guest-side PTY (script(1) inside proot) counts
                     // as a real PTY even though no host wrapper probes OK.
                     if (!tty.available() && !s.ptyWrapped) {
-                        view.feed("\n[emux] WARNING: no PTY wrapper found on this ROM - typing will NOT echo and commands may hang. Install busybox or root the device.\n".toByteArray())
+                        if (ptyWarned.add(s.id)) view.feed("\n[emux] WARNING: no PTY wrapper found on this ROM - typing will NOT echo and commands may hang. Install busybox or root the device.\n".toByteArray())
                     } else if (!tty.hasCtty && !s.ptyWrapped) {
                         view.feed("\n[emux] NOTE: PTY relay active but WITHOUT controlling terminal (toybox script). Ctrl-Z / background jobs may misbehave; normal typing works.\n".toByteArray())
                     }

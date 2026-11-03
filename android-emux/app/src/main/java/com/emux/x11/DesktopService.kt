@@ -275,6 +275,13 @@ class DesktopService(
     // v0.2.71's field round said only "no frames arriving" while the actual
     // cause (BadLength on every GetImage) sat invisible in the protocol.
     @Volatile var nativeGrabMs: Long = -1; private set
+    // v0.2.80: sweep-level truth for the LIVE badge. nativeGrabMs is only set when
+    // a FULL sweep completes; on the field device it stayed -1 while bands kept
+    // landing, so the badge claimed "1.0 fps" for what was really partial
+    // repaints - the "sloppy" feel. These say where the sweep got to and why.
+    @Volatile var nativeBandY: Int = 0; private set
+    @Volatile var nativeMisses: Int = 0; private set
+    @Volatile var nativeLastErr: String = ""; private set
     @Volatile var nativeErr: String = ""; private set
     /** v0.2.74: measured pipe throughput (KB/s) and current band height —
      *  painted on the STALE pane so the field tells us the real ceiling. */
@@ -328,27 +335,55 @@ class DesktopService(
                     // pipe, and paint each band the moment it lands. The
                     // pane goes live progressively instead of never.
                     val w = c.screenWidth; val h = c.screenHeight
+                    // v0.2.80 FIELD FIX ("capture only goes up to 1 fps" while
+                    // the badge still read 1280x...): the X screen size is fixed
+                    // when Xvfb starts, so a quality change lands ONLY via a
+                    // restart - and if the old server is still dying when the new
+                    // one starts, the launcher's adopt-don't-fight rule (v0.2.13)
+                    // adopts the OLD server at the OLD geometry and the setting
+                    // silently does nothing. Verify against the live server and
+                    // fix it once, loudly, instead of never.
+                    if (sessionLongSide > 0 && maxOf(w, h) != sessionLongSide &&
+                        sessionLongSide == captureLongSide() && geometryFixes < 2
+                    ) {
+                        geometryFixes++
+                        noteInfo(
+                            "GEOMETRY MISMATCH: live server ${w}x${h} but the requested " +
+                                "long side is $sessionLongSide - the quality change did not " +
+                                "land; restarting the desktop once (fix #$geometryFixes)")
+                        scope.launch {
+                            kotlinx.coroutines.delay(1_500)
+                            stop()
+                            kotlinx.coroutines.delay(2_500)
+                            startDesktop(wmCommand = lastWm)
+                        }
+                    }
                     var bandRows = 64
                     var refreshes = 0
+                    var kbEwma = -1L          // v0.2.80: measured from real bands
+                    var bandBuf = IntArray(w * bandRows)
+                    fun setBands(r: Int) {
+                        bandRows = r.coerceIn(4, h)
+                        nativeBandRows = bandRows
+                        if (bandBuf.size < w * bandRows) bandBuf = IntArray(w * bandRows)
+                    }
                     run {
                         val p0 = System.currentTimeMillis()
                         val probe = runCatching { c.grabRegionArgb(0, 0, w, 16, 10_000, null) }.getOrNull()
                         val pms = (System.currentTimeMillis() - p0).coerceAtLeast(1)
                         if (probe != null) {
                             nativeKbPerS = (w * 16 * 2) / pms
-                            bandRows = ((nativeKbPerS * 1024 * 6 / 5) / (w * 2)).toInt().coerceIn(8, h)
-                            nativeBandRows = bandRows
+                            kbEwma = nativeKbPerS
+                            setBands(((nativeKbPerS * 1024 * 6 / 5) / (w * 2)).toInt().coerceIn(8, h))
                             noteInfo("native probe on :$displayNum: ${w}x16 in ${pms}ms -> ~${nativeKbPerS}KB/s -> band ${bandRows} rows of $h")
                         } else {
-                            bandRows = 8
-                            nativeBandRows = 8
-                            noteInfo("native probe FAILED on :$displayNum (${c.lastGrabError}) - minimal 8-row bands")
+                            setBands(8)
+                            noteInfo("native probe FAILED on :$displayNum (${c.lastGrabError}) - minimal 8-row bands; KB/s will be measured from live bands instead")
                             if (c.lastGrabError.startsWith("xerr") && fbMailSession == null) {
                                 ensureFbMail("native probe rejected on :$displayNum (${c.lastGrabError})")
                             }
                         }
                     }
-                    val bandBuf = IntArray(w * bandRows)
                     val bandTimeout = 8_000
                     while (isActive && state.value != State.IDLE && state.value != State.ERROR) {
                         val t0 = System.currentTimeMillis()
@@ -357,8 +392,17 @@ class DesktopService(
                         var ok = true
                         while (y < h) {
                             val rows = minOf(bandRows, h - y)
+                            val tb = System.currentTimeMillis()
                             val b = runCatching { c.grabRegionArgb(0, y, w, rows, bandTimeout, bandBuf) }.getOrNull()
                             if (b == null) { ok = false; break }
+                            // v0.2.80: KB/s from the bands that ACTUALLY land, so
+                            // the badge can never show -1 on a live session (the
+                            // field screenshot did: probe failed, no sweep ever
+                            // completed, both readings -1).
+                            val bms = (System.currentTimeMillis() - tb).coerceAtLeast(1)
+                            val bkb = (w * rows * 2) / bms
+                            kbEwma = if (kbEwma <= 0) bkb else (kbEwma * 3 + bkb) / 4
+                            if (nativeKbPerS <= 0) nativeKbPerS = kbEwma
                             synchronized(frameLock) {
                                 currentFrame?.setPixels(b, 0, w, 0, y, w, rows)
                             }
@@ -369,7 +413,16 @@ class DesktopService(
                         }
                         if (!ok) {
                             misses++
-                            nativeErr = c.lastGrabError.ifBlank { "null" }
+                            nativeMisses = misses
+                            nativeLastErr = c.lastGrabError.ifBlank { "null" }
+                            nativeBandY = y
+                            nativeErr = nativeLastErr
+                            // v0.2.80 ADAPTIVE BANDS: a band that cannot cross the
+                            // pipe in 8 s stalls the whole sweep (and the pane
+                            // keeps showing the previous sweep's pixels below
+                            // y). Halve the band so the scan keeps moving; it
+                            // regrows after a clean sweep below.
+                            if (bandRows > 4) setBands(bandRows / 2)
                             if (misses <= 2 || misses % 10 == 0) {
                                 noteInfo("native band miss #$misses on :$displayNum at y=$y: $nativeErr")
                             }
@@ -384,7 +437,18 @@ class DesktopService(
                         }
                         misses = 0
                         nativeErr = ""
+                        nativeMisses = 0
+                        nativeLastErr = ""
+                        nativeBandY = h
                         nativeGrabMs = System.currentTimeMillis() - t0
+                        // v0.2.80: regrow towards ~1.2 s of measured pipe after a
+                        // clean sweep, so adaptive halving is not a one-way ratchet.
+                        if (bandRows < h) {
+                            val target = if (nativeKbPerS > 0)
+                                ((nativeKbPerS * 1024 * 6 / 5) / (w * 2)).toInt().coerceIn(8, h)
+                            else bandRows * 2
+                            if (target > bandRows) setBands(minOf(target, bandRows * 2))
+                        }
                         nativeFrames++
                         nativeFrameAtMs = System.currentTimeMillis()
                         captureDisplay = displayNum
@@ -393,6 +457,16 @@ class DesktopService(
                         refreshes++
                         if (refreshes % 25 == 0) {
                             noteInfo("native capture: ${nativeGrabMs}ms/refresh, band ${bandRows}r, ~${nativeKbPerS}KB/s, frames=$nativeFrames")
+                            // v0.2.80: remember the pipe so Settings can predict
+                            // fps per quality option, and the next start can be
+                            // sized from evidence instead of a default.
+                            runCatching {
+                                androidx.preference.PreferenceManager
+                                    .getDefaultSharedPreferences(ctx).edit()
+                                    .putString("capture_kbps", nativeKbPerS.toString())
+                                    .putString("capture_geom", "${w}x${h}")
+                                    .apply()
+                            }
                         }
                         // v0.2.79: was `333L` (3 fps) hardcoded, ten times below
                         // the socket path's own ceiling. The grab itself is the
@@ -466,6 +540,10 @@ class DesktopService(
     val captureGeometry: String get() =
         if (sessionW > 0 && sessionH > 0) "${sessionW}x${sessionH}" else "?"
 
+    /** v0.2.80: where the in-flight sweep is, for the LIVE badge. */
+    val nativeSweepProgress: String get() =
+        if (sessionH > 0) "$nativeBandY/$sessionH" else "?"
+
     /** True when the user changed capture quality and the session predates it. */
     val captureQualityPending: Boolean get() =
         sessionLongSide > 0 && captureLongSide() != sessionLongSide
@@ -516,7 +594,14 @@ class DesktopService(
     }
 
     // ------------------------------------------------------------------ start
+    // v0.2.80: verified-restart bookkeeping (see the GEOMETRY MISMATCH check in
+    // the native loop). Capped for the whole process lifetime on purpose: a
+    // server that keeps coming up at the wrong size must not restart-loop.
+    @Volatile private var geometryFixes = 0
+    @Volatile private var lastWm = "openbox"
+
     fun startDesktop(wmCommand: String = "openbox") {
+        lastWm = wmCommand
         // v0.1.100: AWAITING_FRAMES is also an in-progress state —
         // a second startDesktop() here would launch a duplicate X/capture
         // pipeline on top of the one already waiting for frames.
@@ -2699,10 +2784,54 @@ class DesktopService(
                 noteInfo(
                     "input proof FAILED (server $inputProof): ptr=$p1 wanted=$txp,$typ - " +
                         "XTEST disabled, input falls back to the guest agent (${agentEvidence()})")
+                // v0.2.80 FIELD FIX ("desktop still very sloppy"): this proof ran
+                // ONCE per connection, at the worst possible moment - while the
+                // desktop stack is still settling under proot. One raced
+                // QueryPointer then condemned the whole session to the guest
+                // xdotool agent, which execs a process per event: every tap and
+                // every drag motion pays a guest round trip. Re-probe on a
+                // backoff and promote the moment the server honours FakeInput.
+                scheduleReproof(c)
             }
         }.onFailure { e ->
             inputProof = "proof-error"
             com.emux.EmuXLog.e("input proof threw", e)
+        }
+    }
+
+    /**
+     * v0.2.80: see [runInputProof]. Backoff re-probe of the MOTION leg only (it is
+     * cheap and it is the leg a settling server fails); on success the transport
+     * is promoted back to XTEST and the button leg runs its normal escalation.
+     * Stops as soon as anything else has already fixed the transport.
+     */
+    private fun scheduleReproof(c: X11Client) {
+        scope.launch {
+            for (wait in longArrayOf(10_000, 20_000, 40_000, 60_000, 60_000, 60_000)) {
+                kotlinx.coroutines.delay(wait)
+                if (!c.connected || c.xtestOpcode <= 127) return@launch
+                if (!xtestIgnored && inputTransport == "xtest") return@launch
+                val p0 = runCatching { c.queryPointerRoot() }.getOrNull() ?: continue
+                val dx = if (p0.first + 48 <= c.screenWidth - 4) 48 else -48
+                val dy = if (p0.second + 48 <= c.screenHeight - 4) 48 else -48
+                val tx = (p0.first + dx).coerceIn(4, (c.screenWidth - 4).coerceAtLeast(8))
+                val ty = (p0.second + dy).coerceIn(4, (c.screenHeight - 4).coerceAtLeast(8))
+                runCatching { c.fakeMotion(tx, ty) }
+                kotlinx.coroutines.delay(250)
+                val p1 = runCatching { c.queryPointerRoot() }.getOrNull() ?: continue
+                if (kotlin.math.abs(p1.first - tx) <= 4 && kotlin.math.abs(p1.second - ty) <= 4) {
+                    xtestIgnored = false
+                    inputProof = "motion-ok"
+                    inputTransport = "xtest"
+                    inputAgentUp = false
+                    noteInfo(
+                        "input re-proof PASSED after ${wait / 1000}s of backoff - " +
+                            "XTEST restored, guest agent retired")
+                    buttonProofAndEscalate(c)
+                    return@launch
+                }
+            }
+            noteInfo("input re-proof: server still ignores XTEST after 4 minutes - staying on the guest agent")
         }
     }
 

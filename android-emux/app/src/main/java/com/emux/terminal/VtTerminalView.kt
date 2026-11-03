@@ -295,6 +295,17 @@ class VtTerminalView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attr
      * sends CRLF).
      */
     @Volatile var onlcr = false
+    // v0.2.80 FIELD FIX (staircased terminal): measure the wire, do not trust the
+    // flag. A real PTY with ONLCR can NEVER put a bare 0x0A on the wire - the tty
+    // driver rewrites every LF to CR LF - so three bare LFs prove there is no line
+    // discipline, whichever flag claims otherwise. ptyWrapped is an INTENT (set
+    // from `guestPty` before the guest script(1) is known alive); on one field ROM
+    // the wrapper segfaulted (musl loader FAILED), the shell re-exec'd on raw
+    // pipes, the flag stayed true, ONLCR emulation stayed off, and every line
+    // staircased one indent further right. The renderer now catches that itself.
+    private var prevByte = -1
+    private var bareLf = 0
+    @Volatile var noLineDiscipline = false; private set
 
     // v0.1.55 UTF-8 decoder state (the old byte-wise feed rendered every
     // multibyte char as mojibake instead of the real glyph).
@@ -362,6 +373,17 @@ class VtTerminalView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attr
     private var oscBuf = StringBuilder()
 
     private fun parseByte(b: Int) {
+        // v0.2.80: bare-LF detector (see noLineDiscipline). Runs in EVERY parser
+        // state on purpose: with a line discipline on the wire even LF bytes
+        // inside OSC/DCS strings arrive as CR LF.
+        if (b == 10 && prevByte != 13) {
+            if (++bareLf >= 3 && !noLineDiscipline) {
+                noLineDiscipline = true
+                onlcr = true
+                session?.noteNoLineDiscipline()
+            }
+        }
+        prevByte = b
         when (pstate) {
             PState.GROUND -> when {
                 b == 0x1B -> { pstate = PState.ESC; paramCur = -1; clearParams() }
@@ -1081,7 +1103,9 @@ class VtTerminalView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attr
     private var localLineLen = 0
 
     private fun localEcho(bytes: ByteArray) {
-        if (session?.ptyWrapped != false) return
+        // v0.2.80: local echo belongs to raw-pipe sessions; a session whose PTY
+        // flag lied (dead guest wrapper) is a raw-pipe session in fact.
+        if (session?.ptyWrapped != false && !noLineDiscipline) return
         val out = ByteArray(bytes.size * 3)
         var n = 0
         for (b in bytes) {

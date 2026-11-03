@@ -210,6 +210,12 @@ class DesktopView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attrs) 
     // frame arrivals over a 2 s window and paint the rate on the bitmap so
     // "frames are flowing" is visible proof independent of guest windows.
     private val frameTimes = ArrayDeque<Long>()
+    // v0.2.80: fps the user can act on = COMPLETED full sweeps per second, not
+    // the band paint rate. The field badge's "1.0 fps" was bands landing while no
+    // sweep ever finished (nativeGrabMs -1) - partial repaints, the "sloppy" feel.
+    private var fpsWinStart = 0L
+    private var fpsWinBase = -1L
+    private var sweepFps = 0f
     // v0.2.68: wall-clock of the last frame that actually arrived. The fps
     // badge used to freeze at its last value when capture died (frameTimes is
     // only trimmed on NEW frames), so a dead stream kept advertising itself
@@ -403,12 +409,28 @@ class DesktopView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attrs) 
                 // fast the pipe actually measured, and the resulting refresh cost.
                 // Settings -> "Desktop capture quality" trades the first for the
                 // last, and now the pane shows whether it worked.
-                val kb = desktop?.nativeKbPerS ?: -1L
-                val ms = desktop?.nativeGrabMs ?: -1L
-                canvas.drawText(
-                    "LIVE %.1f fps  %s  %dKB/s  %dms/refresh".format(
-                        fps, desktop?.captureGeometry ?: "?", kb, ms),
-                    16f, sp(16f), badge)
+                val d = desktop
+                val nf = d?.nativeFrames ?: -1L
+                val nowMs = System.currentTimeMillis()
+                if (fpsWinStart == 0L || nowMs - fpsWinStart >= 2_000) {
+                    if (fpsWinBase >= 0 && nf >= fpsWinBase && fpsWinStart > 0L)
+                        sweepFps = (nf - fpsWinBase) * 1000f /
+                            (nowMs - fpsWinStart).coerceAtLeast(1)
+                    fpsWinStart = nowMs
+                    fpsWinBase = nf
+                }
+                val kb = d?.nativeKbPerS ?: -1L
+                val ms = d?.nativeGrabMs ?: -1L
+                var line = "LIVE %.1f fps  %s  %dKB/s  %dms/refresh".format(
+                    sweepFps, d?.captureGeometry ?: "?", kb, ms)
+                // v0.2.80: when no sweep has completed, or one is stuck, say where
+                // it got to and why - the -1/-1 badge answered none of that.
+                if (d != null && (d.nativeMisses > 0 || ms <= 0)) {
+                    line += "  sweep %s miss=%d %s".format(
+                        d.nativeSweepProgress, d.nativeMisses,
+                        d.nativeLastErr.take(16))
+                }
+                canvas.drawText(line, 16f, sp(16f), badge)
                 if (desktop?.captureQualityPending == true) {
                     val pend = Paint().apply { color = Color.argb(0xC0, 0xFF, 0xB7, 0x4D); textSize = sp(9f) }
                     // sp(28f) is the INPUT line, so this rides at the bottom of

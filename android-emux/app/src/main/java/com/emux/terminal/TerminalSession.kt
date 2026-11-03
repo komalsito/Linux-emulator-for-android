@@ -168,6 +168,21 @@ class TerminalSession(
     @Volatile var ptyReason: String = "pending"
         private set
 
+    /**
+     * v0.2.80: the renderer observed bare LF bytes, i.e. no tty driver between us
+     * and the shell. Clear the intent flag so ONLCR emulation AND local echo come
+     * back on, whatever earlier code optimistically set.
+     */
+    fun noteNoLineDiscipline() {
+        if (!ptyWrapped) return
+        ptyWrapped = false
+        guestPty = false
+        ptyReason = "bare-lf: no line discipline on the wire"
+        com.emux.EmuXLog.e(
+            "session $id: bare LF on a session flagged pty - clearing ptyWrapped " +
+            "(ONLCR emulation + local echo on)")
+    }
+
     /** v0.1.55: guest-PTY engine (proot + util-linux script) available now? */
     fun canGuestPty(): Boolean =
         com.emux.core.FsLayout.prootBin(ctx).isFile &&
@@ -298,6 +313,15 @@ class TerminalSession(
                             segvCount++
                             if (!segvDetected) {
                                 segvDetected = true
+                                // v0.2.80: if the guest PTY wrapper is what died,
+                                // the shell that follows runs on raw pipes - say
+                                // so NOW instead of keeping ptyWrapped=true and
+                                // staircasting the next screenful of output.
+                                if (guestPty) {
+                                    guestPty = false
+                                    ptyWrapped = false
+                                    ptyReason = "guest script died (SIGSEGV)"
+                                }
                                 com.emux.EmuXLog.e(
                                     "session $id: guest exec died with SIGSEGV (proot signal 11) - " +
                                     "rootfs damaged; health gate will repair before the next shell")

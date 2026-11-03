@@ -19,6 +19,27 @@ import androidx.preference.PreferenceFragmentCompat
  * tolerates themeResId==0; phones do not. Fix: apply the AppCompat-based prefs
  * theme at attachBaseContext time, when AppCompat's delegate records it.
  */
+// v0.2.80: turn the pipe the device ACTUALLY measured (persisted by the capture
+// loop every 25 refreshes) into a per-option fps prediction, so "which quality
+// should I pick?" stops being a guess. rate = KB/s / bytes-per-frame, and bytes
+// per frame = long * short * 2 at depth 16 with the pane's own aspect.
+private fun qualityPrediction(ctx: android.content.Context): String {
+    val sp = androidx.preference.PreferenceManager.getDefaultSharedPreferences(ctx)
+    val kb = sp.getString("capture_kbps", null)?.toLongOrNull() ?: return ""
+    val geom = sp.getString("capture_geom", null) ?: return ""
+    val parts = geom.split("x")
+    val w = parts.getOrNull(0)?.toIntOrNull() ?: return ""
+    val h = parts.getOrNull(1)?.toIntOrNull() ?: return ""
+    if (kb <= 0 || w <= 0 || h <= 0) return ""
+    val a = w.toFloat() / h.toFloat()
+    val sb = StringBuilder("\nYour pipe measured ${kb} KB/s: ")
+    for (L in listOf(1280, 960, 720, 540)) {
+        val short = ((if (a >= 1f) L / a else L * a).toInt() / 2 * 2).coerceAtLeast(2)
+        sb.append("${L}px\u2248%.1ffps ".format(kb * 1024f / (L * short * 2f)))
+    }
+    return sb.toString()
+}
+
 class SettingsActivity : AppCompatActivity() {
 
     override fun attachBaseContext(newBase: Context) {
@@ -102,7 +123,8 @@ class SettingsActivity : AppCompatActivity() {
                     row("Window manager", sp.getString("wm", "openbox") ?: "openbox")
                     row("Root acceleration", if (sp.getBoolean("root_accel", true)) "ON" else "OFF")
                     row("Desktop capture quality",
-                        (sp.getString("capture_quality", "1280") ?: "1280") + " px long side")
+                        (sp.getString("capture_quality", "1280") ?: "1280") + " px long side" +
+                            qualityPrediction(this@SettingsActivity))
                     row("Keep-awake burst", if (sp.getBoolean("keepawake_burst", true)) "ON" else "OFF")
                     row("Mirror", sp.getString("mirror", com.emux.core.BootstrapManager.MIRROR) ?: "")
                     addView(android.widget.TextView(this@SettingsActivity).apply {
@@ -131,6 +153,10 @@ class SettingsActivity : AppCompatActivity() {
             // give the user the restart instead of making them hunt for one.
             // The flag is consumed by MainActivity.onResume - Settings must not
             // tear down a session it does not own.
+            // v0.2.80: the XML tier's SimpleSummaryProvider only echoes the chosen
+            // entry; append what each option would do on THIS device's pipe.
+            findPreference<androidx.preference.ListPreference>("capture_quality")
+                ?.let { it.summary = (it.summary?.toString() ?: "") + qualityPrediction(requireContext()) }
             findPreference<androidx.preference.Preference>("restart_desktop")
                 ?.setOnPreferenceClickListener {
                     com.emux.x11.DesktopService.restartDesktopRequested = true
@@ -195,7 +221,8 @@ class SettingsActivity : AppCompatActivity() {
                 key = "capture_quality"; title = "Desktop capture quality (frame rate)"
                 summary = "Lower resolution = fewer bytes per frame = a higher frame rate, at " +
                     "the cost of softer text. The desktop pane shows the live rate so you can " +
-                    "tune it against your own device. Applies when the desktop next starts."
+                    "tune it against your own device. Applies when the desktop next starts." +
+                    qualityPrediction(ctx)
                 entries = arrayOf(
                     "Sharp \u2014 1280 px (default, unchanged; ~1.5 MB per frame)",
                     "Balanced \u2014 960 px (~1.8\u00d7 the frame rate, ~0.8 MB)",
