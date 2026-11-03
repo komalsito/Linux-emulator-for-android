@@ -436,6 +436,14 @@ class DesktopView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attrs) 
                 // one that repaints itself on a timer.
                 if (d?.nativeDamageOn == true) line += "  mode=damage"
                 else if (d != null) line += "  mode=sweep"
+                // v0.2.83: and WHICH PIPELINE is painting. mode= describes how
+                // native capture works; src= names the frame source itself
+                // (native / fbmail / mail / native-retry). Before this, a
+                // mailbox fallback co-running with native was invisible on the
+                // badge even though it was overwriting fresh damage frames with
+                // 2-second-old full-screen photographs - the "sloppy" verdict
+                // with no visible cause.
+                line += "  src=${d?.captureMode ?: "-"}"
                 
                 canvas.drawText(line, 16f, sp(16f), badge)
                 if (desktop?.captureQualityPending == true) {

@@ -164,6 +164,14 @@ class X11Client(
 
         private const val HANDSHAKE_TIMEOUT_MS = 8_000
 
+        /** v0.2.83: bound on the parked-event queue (see [pendingEvents]). */
+        private const val MAX_QUEUED_EVENTS = 8_192
+
+        /** v0.2.83: rectangles taken per drain. A burst bigger than this is
+         *  simply continued on the next tick — the pending set in
+         *  DesktopService carries it, so nothing is lost by stopping here. */
+        const val MAX_RECTS_PER_DRAIN = 256
+
         // v0.2.78: the button-delivery probe window. Small, and painted bright
         // green so that a field screenshot which happens to catch its ~1 s
         // lifetime is self-explanatory rather than mysterious.
@@ -447,13 +455,38 @@ class X11Client(
         if (p != null) { synchronized(writeLock) { p.write(bytes) } } else rawWrite(bytes)
     }
 
-    private fun readPacket(timeoutMs: Int): ByteArray? {
-        sock?.soTimeout = timeoutMs
-        runCatching { lsock?.soTimeout = timeoutMs }
+    /**
+     * v0.2.83: the read timeout is a setsockopt per packet otherwise — one
+     * extra syscall on every one of the thousands of packets a full-screen
+     * sweep produces. Only touch it when it actually changes.
+     */
+    private var appliedTimeout = -1
+    private fun applyTimeout(ms: Int) {
+        if (ms == appliedTimeout) return
+        appliedTimeout = ms
+        runCatching { sock?.soTimeout = ms }
+        runCatching { lsock?.soTimeout = ms }
+    }
+
+    /**
+     * Read one packet.
+     *
+     * v0.2.83 [tailBuf]: a GetImage reply for one 576x1280 depth-16 screen is
+     * 1.47 MB. The old path allocated that as a fresh ByteArray and then built
+     * a SECOND array with `head + e` — 3 MB of allocation and a 1.47 MB copy
+     * per full-screen grab, every refresh, on a phone. With a caller-supplied
+     * buffer the payload lands where the decoder will read it and only the
+     * 32-byte header is allocated. [lastTailLen] says how much of it is valid.
+     */
+    @Volatile var lastTailLen: Int = 0; private set
+
+    private fun readPacket(timeoutMs: Int, tailBuf: ByteArray? = null): ByteArray? {
+        applyTimeout(timeoutMs)
         return try {
             synchronized(readLock) {
                 val head = ByteArray(32)
                 inp!!.readFully(head)
+                lastTailLen = 0
                 when (head[0].toInt()) {
                     // Only REPLY packets carry a variable-length tail: in an
                     // error packet bytes 4-7 are the offending resource id, and
@@ -461,8 +494,12 @@ class X11Client(
                     // length blocks forever and loses the stream.
                     PKT_REPLY -> {
                         val units = ByteBuffer.wrap(head, 4, 4).order(order).int
-                        if (units > 0) { val e = ByteArray(units * 4); inp!!.readFully(e); head + e }
-                        else head
+                        if (units <= 0) head
+                        else if (tailBuf != null && tailBuf.size >= units * 4) {
+                            inp!!.readFully(tailBuf, 0, units * 4)
+                            lastTailLen = units * 4
+                            head
+                        } else { val e = ByteArray(units * 4); inp!!.readFully(e); head + e }
                     }
                     PKT_GENERIC_EVENT -> {
                         val units = ByteBuffer.wrap(head, 4, 4).order(order).int
@@ -494,26 +531,84 @@ class X11Client(
     }
 
     /**
+     * v0.2.83 — EVENTS ARRIVING DURING A REQUEST ARE QUEUED, NOT DROPPED.
+     *
+     * This was the second half of why the desktop felt dead. The capture
+     * connection subscribes to DAMAGE (v0.2.81), so while a GetImage reply is
+     * in flight the server is also pushing xDamageNotify packets for whatever
+     * the desktop drew meanwhile. The old loop's last branch was literally
+     * "events and errors for other requests: keep looping" — every one of them
+     * was read off the wire and thrown away.
+     *
+     * Consequence, exactly as fielded: a grab that takes 500 ms blindfolds the
+     * damage stream for 500 ms. A dragged window damages continuously, so most
+     * of its notifies landed inside a grab, were discarded, and the pixels they
+     * described were never fetched. The pane then sat on stale content until
+     * the ~5 s healer sweep redrew everything at once — "it waits for the input
+     * to stop and after a while appears on the other side".
+     *
+     * Events are now parked in [pendingEvents] and served to drainDamageRects /
+     * readEvent in arrival order, which is what Xlib's own queue does.
+     */
+    private val pendingEvents = ArrayDeque<ByteArray>()
+    private fun queueEvent(pkt: ByteArray) {
+        synchronized(pendingEvents) {
+            pendingEvents.addLast(pkt)
+            eventsQueued++
+            // Bounded: a video playing inside a slow grab could otherwise grow
+            // this without limit. Dropping the OLDEST is the right loss — the
+            // healer sweep re-reads the screen, and the newest damage is the
+            // damage that describes what is on screen now.
+            while (pendingEvents.size > MAX_QUEUED_EVENTS) {
+                pendingEvents.removeFirst()
+                eventsDropped++
+            }
+        }
+    }
+
+    /** Telemetry: how many events were parked / lost to the bound above. */
+    @Volatile var eventsQueued: Long = 0; private set
+    @Volatile var eventsDropped: Long = 0; private set
+
+    /** A reply plus, when [readPacket] was given a buffer, where its tail went. */
+    private class Reply(val pkt: ByteArray, val tail: ByteArray?, val tailLen: Int)
+
+    /**
      * Send a request and read until ITS reply arrives, queueing events and
      * recording errors. Returns null on timeout/EOF.
      */
-    private fun requestReply(opcode: Int, minor: Int, body: ByteArray, timeoutMs: Int = 3_000): ByteArray? {
+    private fun requestReply(
+        opcode: Int, minor: Int, body: ByteArray, timeoutMs: Int = 3_000,
+        tailBuf: ByteArray? = null,
+    ): ByteArray? = requestReplyFull(opcode, minor, body, timeoutMs, tailBuf)?.pkt
+
+    private fun requestReplyFull(
+        opcode: Int, minor: Int, body: ByteArray, timeoutMs: Int = 3_000,
+        tailBuf: ByteArray? = null,
+    ): Reply? {
         val mySeq = synchronized(writeLock) { sequence = (sequence + 1) and 0xFFFF; sequence }
         send(buildRequest(opcode, minor, body))
         val deadline = System.currentTimeMillis() + timeoutMs
         while (System.currentTimeMillis() < deadline) {
-            val pkt = readPacket((deadline - System.currentTimeMillis()).toInt().coerceAtLeast(50))
+            val pkt = readPacket(
+                (deadline - System.currentTimeMillis()).toInt().coerceAtLeast(50), tailBuf)
                 ?: return null
             val b = ByteBuffer.wrap(pkt).order(order)
             val kind = pkt[0].toInt()
-            if (kind == PKT_REPLY && (b.getShort(2).toInt() and 0xFFFF) == mySeq) return pkt
+            if (kind == PKT_REPLY && (b.getShort(2).toInt() and 0xFFFF) == mySeq) {
+                return if (tailBuf != null && lastTailLen > 0) Reply(pkt, tailBuf, lastTailLen)
+                else Reply(pkt, null, 0)
+            }
             if (kind == PKT_ERROR && (b.getShort(2).toInt() and 0xFFFF) == mySeq) {
                 lastXErrCode = pkt[1].toInt() and 0xFF
                 lastXErr = "xerr=$lastXErrCode:maj=${pkt[10].toInt() and 0xFF}" +
                     ":min=${b.getShort(8).toInt() and 0xFFFF}:res=0x${Integer.toHexString(b.getInt(4))}"
                 return null
             }
-            // events and errors for other requests: keep looping
+            // An event, or an error belonging to some other request: keep it —
+            // a dropped DamageNotify is a rectangle of the desktop that never
+            // gets repainted (see pendingEvents).
+            if (kind != PKT_ERROR) queueEvent(pkt)
         }
         return null
     }
@@ -642,25 +737,70 @@ class X11Client(
      * DamageNotify rectangles that arrived within [waitMs], as [x, y, w, h].
      * An EMPTY list means the desktop genuinely did not change - the capture
      * loop sleeps instead of shipping a screenful of identical pixels.
+     *
+     * v0.2.83 — TWO LATENCY FIXES.
+     *
+     * 1. Events parked by [requestReply] while a grab was in flight come FIRST
+     *    and cost nothing: they are already in memory. Before this, a damage
+     *    notify that arrived during a 400 ms grab was discarded outright, so
+     *    the change it described was never fetched.
+     * 2. [waitMs] is a ceiling on WAITING FOR THE FIRST RECT, not a fixed
+     *    settle time. The old loop always burned the whole window — 33 ms of
+     *    pure latency added to every single update, ~2 fps of it on its own.
+     *    Now: block until something changes (an idle desktop pays no CPU),
+     *    then keep reading for [coalesceMs] so a burst that belongs to one
+     *    logical change (a window mapping draws its frame, its client area and
+     *    the panel's task button) is fetched as one grab instead of three.
      */
-    fun drainDamageRects(waitMs: Long = 33): List<IntArray> {
+    fun drainDamageRects(waitMs: Long = 33, coalesceMs: Long = 10): List<IntArray> {
         if (!damageOn) return emptyList()
         val out = ArrayList<IntArray>(4)
-        val deadline = System.currentTimeMillis() + waitMs
-        while (true) {
-            val left = deadline - System.currentTimeMillis()
-            if (left <= 0) break
-            val pkt = readPacket(left.toInt().coerceAtMost(50)) ?: break
-            if ((pkt[0].toInt() and 0x7F) != (damageEvent and 0x7F)) continue
-            val b = ByteBuffer.wrap(pkt).order(order)
-            val x = b.getShort(16).toInt()
-            val y = b.getShort(18).toInt()
-            val w = b.getShort(20).toInt() and 0xFFFF
-            val h = b.getShort(22).toInt() and 0xFFFF
-            if (w > 0 && h > 0) out.add(intArrayOf(x, y, w, h))
-            if (out.size >= 64) break
+        synchronized(pendingEvents) {
+            while (pendingEvents.isNotEmpty() && out.size < MAX_RECTS_PER_DRAIN) {
+                val pkt = pendingEvents.removeFirst()
+                damageRectOf(pkt)?.let { out.add(it) }
+            }
         }
+        if (out.isNotEmpty()) {
+            // Already have work: only a short coalesce, never the full wait.
+            collectDamage(out, coalesceMs)
+            return out
+        }
+        // Nothing parked. Block for the first notify (this is the idle path —
+        // parked on a socket read, no polling), then coalesce briefly.
+        val first = readPacket(waitMs.toInt().coerceIn(1, 60_000))
+        if (first == null) return out
+        damageRectOf(first)?.let { out.add(it) }
+        collectDamage(out, coalesceMs)
         return out
+    }
+
+    private fun collectDamage(out: ArrayList<IntArray>, coalesceMs: Long) {
+        val deadline = System.currentTimeMillis() + coalesceMs
+        while (out.size < MAX_RECTS_PER_DRAIN) {
+            synchronized(pendingEvents) {
+                while (pendingEvents.isNotEmpty() && out.size < MAX_RECTS_PER_DRAIN) {
+                    damageRectOf(pendingEvents.removeFirst())?.let { out.add(it) }
+                }
+            }
+            if (out.size >= MAX_RECTS_PER_DRAIN) return
+            val left = deadline - System.currentTimeMillis()
+            if (left <= 0) return
+            val pkt = readPacket(left.toInt().coerceIn(1, 50)) ?: return
+            damageRectOf(pkt)?.let { out.add(it) }
+        }
+    }
+
+    /** xDamageNotify -> [x, y, w, h], or null for anything that is not one. */
+    private fun damageRectOf(pkt: ByteArray): IntArray? {
+        if ((pkt[0].toInt() and 0x7F) != (damageEvent and 0x7F)) return null
+        if (pkt.size < 24) return null
+        val b = ByteBuffer.wrap(pkt).order(order)
+        val x = b.getShort(16).toInt()
+        val y = b.getShort(18).toInt()
+        val w = b.getShort(20).toInt() and 0xFFFF
+        val h = b.getShort(22).toInt() and 0xFFFF
+        return if (w > 0 && h > 0) intArrayOf(x, y, w, h) else null
     }
 
     fun internAtom(name: String, onlyIfExists: Boolean = false): Int {
@@ -1110,11 +1250,25 @@ class X11Client(
     }
 
     // ============================================================ event pump
-    /** Read one packet (event, reply or error); null on timeout/EOF. */
+    /** Read one packet (event, reply or error); null on timeout/EOF.
+     *
+     *  v0.2.83: parked events go first. probeButtonDelivery(), drainEvents()
+     *  and the button proof all read through here, and every one of them used
+     *  to miss any event that arrived while an earlier request's reply was
+     *  being read — the probe counted "no ButtonPress came back" for a press
+     *  that had in fact arrived and been discarded. */
     fun readEvent(timeoutMs: Int = 100): ByteBuffer? {
+        synchronized(pendingEvents) {
+            if (pendingEvents.isNotEmpty()) {
+                return ByteBuffer.wrap(pendingEvents.removeFirst()).order(order)
+            }
+        }
         val pkt = readPacket(timeoutMs) ?: return null
         return ByteBuffer.wrap(pkt).order(order)
     }
+
+    /** True when events are parked and would be served without blocking. */
+    fun hasQueuedEvent(): Boolean = synchronized(pendingEvents) { pendingEvents.isNotEmpty() }
 
     /**
      * v0.2.71 — THE CAPTURE FIX. XGetImage(root, ZPixmap): the exact mechanism
@@ -1141,6 +1295,19 @@ class X11Client(
     fun grabRootArgb(): IntArray? =
         grabRegionArgb(0, 0, screenWidth, screenHeight, 6_000, null)
 
+    // v0.2.83: RGB565 -> ARGB8888 component tables. The old decode called
+    // android.graphics.Color.rgb() per pixel (three multiplies/divides and a
+    // virtual call inside it) — 737,280 times for one full-screen grab, on the
+    // phone's UI-critical path. Three 32/64/32-entry tables stay in L1 and the
+    // per-pixel work becomes shifts and ORs. Identical output: Color.rgb() is
+    // (0xFF<<24)|(r<<16)|(g<<8)|b, and (v*255)/31 == (v*255)/31 for v in 0..31.
+    private val lutR5 = IntArray(32) { it * 255 / 31 }
+    private val lutG6 = IntArray(64) { it * 255 / 63 }
+    private val lutB5 = IntArray(32) { it * 255 / 31 }
+
+    /** Reusable payload buffer for [grabRegionArgb]; grows to the biggest grab. */
+    private var tailBuf: ByteArray? = null
+
     /**
      * v0.2.73 — BANDED CAPTURE. Field v0.2.72 proved the wire fix worked and
      * then named the NEXT wall: `nat=no-reply(timeout/eof)` — one 3.5 MB
@@ -1150,27 +1317,68 @@ class X11Client(
      * REGIONS sized to the measured pipe. Each band is decoded into [reuse]
      * (or a fresh array) as w*rows packed ARGB ints, ready for
      * Bitmap.setPixels at (0, y).
+     *
+     * ---------------------------------------------------------------------
+     * v0.2.83 — THE REQUEST WAS THE WRONG LENGTH, AND NOTHING EVER CAME BACK.
+     *
+     * xGetImageReq is exactly 20 bytes / 5 length-units:
+     *
+     *     CARD8  reqType(73)  CARD8 format(2=ZPixmap)  CARD16 length(5)
+     *     DRAWABLE drawable     4
+     *     INT16 x  INT16 y  CARD16 width  CARD16 height     8
+     *     CARD32 plane-mask     4
+     *
+     * The body was built with `ByteBuffer.allocate(20)`, of which only 16
+     * bytes were ever written — so `req.array()` handed buildRequest() a
+     * 20-byte body, a 24-byte request and length=6. xorg's ProcGetImage is
+     * REQUEST_SIZE_MATCH(xGetImageReq), i.e. exact, and answered
+     * **BadLength(16) to every single grab, on every build since v0.2.71
+     * introduced this method.** Measured here against a real Xvfb 1.21:
+     *
+     *     20B/5u exact    -> REPLY depth 16, payload 1474560 B
+     *     24B/6u app-form -> ERROR code 16 (BadLength) major 73 (GetImage)
+     *
+     * That is why "native capture" never produced a frame on any device: the
+     * probe failed (`native probe FAILED ... minimal 8-row bands`), every band
+     * failed, three misses threw, the connection recycled with backoff forever,
+     * and the app fell through to the guest xwd pipelines — which is what the
+     * field was actually running, and what made the desktop slow enough to feel
+     * broken. Everything downstream of that (0.5 fps, "the pipe is 720 KB/s",
+     * capture-quality settings, adaptive bands) was measured against a
+     * transport that had never once succeeded.
+     *
+     * The wire-test comment claimed "24 bytes / 6 units" and the wire test
+     * itself (`tools/wiretest/xgetimage_wiretest.py`) packs a 16-byte body —
+     * the test was right and the Kotlin it was supposed to mirror was not.
+     * `tools/x11probe/jvmwire/run_jvm_wire_proof.sh` now runs THIS class
+     * against a real Xvfb so the two cannot drift again.
      */
     fun grabRegionArgb(
         x: Int, y: Int, w: Int, h: Int, timeoutMs: Int, reuse: IntArray?,
     ): IntArray? {
         if (rootWindow == 0) return null
         if (w <= 0 || h <= 0) return null
-        val req = ByteBuffer.allocate(20).order(order)
+        // 16 bytes: drawable + x + y + width + height + plane-mask. Exactly
+        // xGetImageReq minus its 4-byte header. NOT 20 — see the note above.
+        val req = ByteBuffer.allocate(16).order(order)
         req.putInt(rootWindow)
         req.putShort(x.toShort())
         req.putShort(y.toShort())
         req.putShort(w.toShort())
         req.putShort(h.toShort())
         req.putInt(-1)                  // plane-mask: all planes
-        // Wire format verified by tools/wiretest/xgetimage_wiretest.py:
-        // 24 bytes / 6 units, ZPixmap format in header byte 1 (minor slot).
         lastXErr = ""; lastXErrCode = -1
-        val r = requestReply(OP_GET_IMAGE, 2, req.array(), timeoutMs)
-        if (r == null) {
+        // Payload lands in a reused buffer: no 1.5 MB allocation + copy per
+        // full-screen grab.
+        val need = w * h * 4            // worst case is depth 24/32
+        var tb = tailBuf
+        if (tb == null || tb.size < need) { tb = ByteArray(need); tailBuf = tb }
+        val rep = requestReplyFull(OP_GET_IMAGE, 2, req.array(), timeoutMs, tb)
+        if (rep == null) {
             lastGrabError = lastReadErr.ifBlank { lastXErr.ifBlank { "no-reply" } }
             return null
         }
+        val r = rep.pkt
         if (r[0].toInt() != PKT_REPLY) {
             lastGrabError = "pkt=${r[0]} err=${r[1].toInt() and 0xFF}"
             return null
@@ -1184,35 +1392,42 @@ class X11Client(
             return null
         }
         val bpp = if (replyDepth == 16) 2 else 4
-        if (r.size < 32 + w * h * bpp) { lastGrabError = "short=${r.size}"; return null }
-        val data = r
-        val stride = (data.size - 32) / h          // actual bytes per scanline
+        val data = rep.tail
+        val have = rep.tailLen
+        if (data == null || have <= 0) { lastGrabError = "no-payload"; return null }
+        if (have < w * h * bpp) { lastGrabError = "short=$have"; return null }
+        val stride = have / h           // actual bytes per scanline
         if (stride < w * bpp) { lastGrabError = "stride=$stride"; return null }
         val out = if (reuse != null && reuse.size >= w * h) reuse else IntArray(w * h)
-        var src = 32
+        var src = 0
         var dst = 0
-        for (row in 0 until h) {
-            var cx = 0
-            while (cx < w) {
-                if (bpp == 4) {
-                    val o = src + cx * 4
-                    val b = data[o].toInt() and 0xFF
-                    val g = data[o + 1].toInt() and 0xFF
-                    val red = data[o + 2].toInt() and 0xFF
-                    out[dst + cx] = (0xFF shl 24) or (red shl 16) or (g shl 8) or b
-                } else {
-                    val o = src + cx * 2
+        if (bpp == 2) {
+            for (row in 0 until h) {
+                var o = src
+                for (cx in 0 until w) {
                     val v = (data[o].toInt() and 0xFF) or ((data[o + 1].toInt() and 0xFF) shl 8)
-                    out[dst + cx] = android.graphics.Color.rgb(
-                        ((v shr 11) and 0x1F) * 255 / 31,
-                        ((v shr 5) and 0x3F) * 255 / 63,
-                        (v and 0x1F) * 255 / 31,
-                    )
+                    o += 2
+                    out[dst + cx] = -0x1000000 or
+                        (lutR5[(v ushr 11) and 0x1F] shl 16) or
+                        (lutG6[(v ushr 5) and 0x3F] shl 8) or
+                        lutB5[v and 0x1F]
                 }
-                cx++
+                src += stride
+                dst += w
             }
-            src += stride
-            dst += w
+        } else {
+            for (row in 0 until h) {
+                var o = src
+                for (cx in 0 until w) {
+                    out[dst + cx] = -0x1000000 or
+                        ((data[o + 2].toInt() and 0xFF) shl 16) or
+                        ((data[o + 1].toInt() and 0xFF) shl 8) or
+                        (data[o].toInt() and 0xFF)
+                    o += 4
+                }
+                src += stride
+                dst += w
+            }
         }
         lastGrabError = ""
         return out

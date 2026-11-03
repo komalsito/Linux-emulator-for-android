@@ -405,6 +405,50 @@ class DesktopService(
                         "native capture on :$displayNum: DAMAGE unavailable - full sweeps as before")
                     val partCap = (h / 2).coerceAtLeast(64)
                     val partBuf = IntArray(w * partCap)
+                    // v0.2.83: a band taller than this is grabbed in chunks, so
+                    // even a full-screen damage burst paints progressively
+                    // instead of vanishing behind one giant reply.
+                    val chunkRows = minOf(partCap, 256)
+                    // v0.2.83 PERSISTENT DIRTY BANDS - the replacement for the
+                    // v0.2.82 union rectangle. That design merged ALL damage
+                    // since the last tick into ONE rect, and whenever the rect
+                    // covered >60% of the screen (or was taller than partCap)
+                    // it gave up and ran a FULL BANDED SWEEP. A drag is exactly
+                    // that case: the moving window damages its new position,
+                    // the exposure damages the old one, and the union of the
+                    // two is half the screen - so every drag frame paid a full
+                    // refresh, and on a slow pipe the sweep was still running
+                    // long after the finger stopped: "it waits for the input to
+                    // stop and then the window appears at the destination".
+                    // Bands keep damage as damage: horizontal strips, merged
+                    // only with strips they (nearly) touch, PERSISTENT across
+                    // ticks (a band this tick's budget could not paint is still
+                    // pending next tick), each painted from its own small grab.
+                    // Nothing in the damage path can trigger a full sweep now;
+                    // the sweep stays what it should be - the healer.
+                    val dirtyBands = ArrayList<IntArray>()   // [x0, y0, x1, y1]
+                    val BAND_MARGIN = 24
+                    fun addDirty(nx0: Int, ny0: Int, nx1: Int, ny1: Int) {
+                        if (nx1 <= nx0 || ny1 <= ny0) return
+                        var x0 = nx0; var y0 = ny0; var x1 = nx1; var y1 = ny1
+                        var i = 0
+                        while (i < dirtyBands.size) {
+                            val b = dirtyBands[i]
+                            // merge when the row spans overlap or nearly touch:
+                            // two strips 20 rows apart are one cheaper grab.
+                            if (y0 - BAND_MARGIN <= b[3] && b[1] - BAND_MARGIN <= y1) {
+                                x0 = minOf(x0, b[0]); y0 = minOf(y0, b[1])
+                                x1 = maxOf(x1, b[2]); y1 = maxOf(y1, b[3])
+                                dirtyBands.removeAt(i)
+                                i = 0   // the grown strip may touch another; rescan
+                            } else i++
+                        }
+                        dirtyBands.add(intArrayOf(x0, y0, x1, y1))
+                    }
+                    // Two band-grab failures in a row hand over to the banded
+                    // sweep, whose adaptive band sizing is the real healer for
+                    // a degrading pipe.
+                    var dmgMisses = 0
                     // v0.2.82: start one tick below the healer so the FIRST loop
                     // iteration is a full sweep. Damage events only report
                     // changes AFTER we subscribe; without this the pane sat on
@@ -415,72 +459,129 @@ class DesktopService(
                     while (isActive && state.value != State.IDLE && state.value != State.ERROR) {
                         val t0 = System.currentTimeMillis()
                         ensureBitmap(w, h)
+                        // v0.2.83: once native has proven itself, retire the
+                        // guest mailbox pipelines - co-running them is CPU
+                        // contention against the very grabs that make the
+                        // desktop feel fast (see retireMailPipelines).
+                        if (nativeFrames >= 8L && (fbMailSession != null || captureSession != null))
+                            retireMailPipelines()
                         if (dmgOk) {
                             ticks++
                             // ~every 5 s a full sweep anyway: the healer, for
                             // anything DAMAGE cannot see (server-side sprite
                             // draws, a missed event, our own bookkeeping).
                             if (ticks % 150 != 0) {
-                                val rects = c.drainDamageRects(33)
-                                if (rects.isEmpty()) {
-                                    kotlinx.coroutines.delay(16)
+                                // Block for the first rect ONLY when nothing is
+                                // pending (the idle path costs one parked read,
+                                // never a poll); when bands are waiting from the
+                                // last tick's budget, just skim whatever accrued
+                                // while we painted.
+                                val rects = if (dirtyBands.isEmpty()) c.drainDamageRects(50)
+                                            else c.drainDamageRects(2, 0)
+                                for (r in rects) {
+                                    addDirty(
+                                        r[0].coerceIn(0, w), r[1].coerceIn(0, h),
+                                        (r[0] + r[2]).coerceIn(0, w),
+                                        (r[1] + r[3]).coerceIn(0, h))
+                                }
+                                if (dirtyBands.isEmpty()) continue   // the drain already waited
+                                dirtyBands.sortBy { it[1] }
+                                var painted = false
+                                var failed = false
+                                var bands = 0
+                                // A damage tick may not own the connection for
+                                // longer than its budget; unpainted bands stay
+                                // pending and resume next tick (immediately -
+                                // the drain above does not block when bands are
+                                // waiting). This is what keeps continuous damage
+                                // (video) from starving a drag, and a drag from
+                                // starving the healer.
+                                while (dirtyBands.isNotEmpty() && !failed && bands < 6 &&
+                                    System.currentTimeMillis() - t0 < 120L) {
+                                    val b = dirtyBands.removeAt(0)
+                                    val bw = (b[2] - b[0]).coerceIn(1, w)
+                                    var by = b[1]
+                                    while (by < b[3]) {
+                                        val rows = minOf(chunkRows, b[3] - by)
+                                        val gt = System.currentTimeMillis()
+                                        val px = runCatching {
+                                            c.grabRegionArgb(b[0], by, bw, rows, bandTimeout, partBuf)
+                                        }.getOrNull()
+                                        if (px == null) {
+                                            addDirty(b[0], by, b[0] + bw, b[3])  // keep the rest pending
+                                            failed = true
+                                            break
+                                        }
+                                        synchronized(frameLock) {
+                                            currentFrame?.setPixels(px, 0, bw, b[0], by, bw, rows)
+                                        }
+                                        frameId++
+                                        onUiInvalidated()      // progressive paint per chunk
+                                        painted = true
+                                        val bms = (System.currentTimeMillis() - gt).coerceAtLeast(1)
+                                        val bkb = (bw.toLong() * rows * 2) / bms
+                                        kbEwma = if (kbEwma <= 0) bkb else (kbEwma * 3 + bkb) / 4
+                                        if (nativeKbPerS <= 0) nativeKbPerS = kbEwma
+                                        by += rows
+                                    }
+                                    bands++
+                                }
+                                if (failed) {
+                                    dmgMisses++
+                                    nativeLastErr = c.lastGrabError.ifBlank { "null" }
+                                    if (dmgMisses < 2) {
+                                        kotlinx.coroutines.delay(30)
+                                        continue    // retry the pending bands next tick
+                                    }
+                                    dmgMisses = 0
+                                    // fall through to the banded sweep: two
+                                    // failures in a row say the pipe, not the
+                                    // rectangle, is the problem.
+                                } else {
+                                    dmgMisses = 0
+                                    if (painted) {
+                                        lastAnyFrameAtMs = System.currentTimeMillis()
+                                        nativeGrabMs = System.currentTimeMillis() - t0
+                                        nativeFrames++
+                                        nativeFrameAtMs = lastAnyFrameAtMs
+                                        capturePubAtMs = nativeFrameAtMs
+                                        nativeMisses = 0; nativeLastErr = ""
+                                        nativeBandY = h
+                                        if (state.value == State.AWAITING_FRAMES)
+                                            state.value = State.CONNECTED
+                                        // damage mode paces at 8 ms, not the
+                                        // sweep ceiling: the grab of a small
+                                        // strip is cheap, and this is what
+                                        // makes a drag follow the finger
+                                        // instead of the sweep.
+                                        if (nativeGrabMs < 8L) kotlinx.coroutines.delay(8L - nativeGrabMs)
+                                    }
                                     continue
                                 }
-                                var x0 = Int.MAX_VALUE; var y0 = Int.MAX_VALUE
-                                var x1 = 0; var y1 = 0
-                                for (r in rects) {
-                                    if (r[2] <= 0 || r[3] <= 0) continue
-                                    x0 = minOf(x0, r[0]); y0 = minOf(y0, r[1])
-                                    x1 = maxOf(x1, r[0] + r[2]); y1 = maxOf(y1, r[1] + r[3])
-                                }
-                                if (x1 > x0 && y1 > y0) {
-                                    x0 = x0.coerceIn(0, w - 1); y0 = y0.coerceIn(0, h - 1)
-                                    x1 = x1.coerceIn(x0 + 1, w); y1 = y1.coerceIn(y0 + 1, h)
-                                    val bw = x1 - x0; val bh = y1 - y0
-                                    // Big damage (video, full-screen redraw) is
-                                    // exactly what the banded sweep is for;
-                                    // small damage is one quick grab.
-                                    if (bw.toLong() * bh <= w.toLong() * h * 6 / 10 && bh <= partCap) {
-                                        val b = runCatching {
-                                            c.grabRegionArgb(x0, y0, bw, bh, bandTimeout, partBuf)
-                                        }.getOrNull()
-                                        if (b != null) {
-                                            synchronized(frameLock) {
-                                                currentFrame?.setPixels(b, 0, bw, x0, y0, bw, bh)
-                                            }
-                                            frameId++
-                                            lastAnyFrameAtMs = System.currentTimeMillis()
-                                            onUiInvalidated()
-                                            nativeGrabMs = System.currentTimeMillis() - t0
-                                            nativeFrames++
-                                            nativeFrameAtMs = lastAnyFrameAtMs
-                                            capturePubAtMs = nativeFrameAtMs
-                                            nativeMisses = 0; nativeLastErr = ""
-                                            nativeBandY = h
-                                            if (state.value == State.AWAITING_FRAMES)
-                                                state.value = State.CONNECTED
-                                            val bms = nativeGrabMs.coerceAtLeast(1)
-                                            val bkb = (bw.toLong() * bh * 2) / bms
-                                            kbEwma = if (kbEwma <= 0) bkb else (kbEwma * 3 + bkb) / 4
-                                            if (nativeKbPerS <= 0) nativeKbPerS = kbEwma
-                                            // damage mode paces at 10 ms, not the
-                                            // sweep ceiling: the grab of a small
-                                            // rectangle is cheap, and this is what
-                                            // makes a drag follow the finger
-                                            // instead of the sweep.
-                                            if (nativeGrabMs < 10L) kotlinx.coroutines.delay(10L - nativeGrabMs)
-                                            continue
-                                        }
-                                    }
-                                }
-                                // Damage bigger than 60% of the screen, or a
-                                // partial grab that failed: fall through to the
-                                // full banded sweep below.
                             }
+                            // healer tick: fall through to the sweep WITHOUT
+                            // clearing dirtyBands - they are cleared only after
+                            // a sweep that actually completed (see below), so a
+                            // capped sweep cannot lose pre-healer damage.
                         }
                         var y = 0
                         var ok = true
+                        // v0.2.83 FIRST-SWEEP CAP: a sweep that cannot finish in
+                        // 8 s stops and yields to the damage path, which is what
+                        // keeps the desktop interactive while the healer tick
+                        // finishes the rest. Before this, a ~200 KB/s pipe made
+                        // the OPENING sweep run for tens of seconds with every
+                        // touch queued behind it - the field's "slow to open".
+                        // Only when DAMAGE is live: without it the sweep is the
+                        // ONLY frame source and must run to completion.
+                        val sweepDeadline = if (dmgOk) t0 + 8_000L else Long.MAX_VALUE
+                        var capped = false
                         while (y < h) {
+                            if (System.currentTimeMillis() > sweepDeadline) {
+                                capped = true
+                                noteInfo("native sweep capped at y=$y/$h after 8s - damage path takes over; the healer finishes the rest")
+                                break
+                            }
                             val rows = minOf(bandRows, h - y)
                             val tb = System.currentTimeMillis()
                             val b = runCatching { c.grabRegionArgb(0, y, w, rows, bandTimeout, bandBuf) }.getOrNull()
@@ -529,11 +630,17 @@ class DesktopService(
                         nativeErr = ""
                         nativeMisses = 0
                         nativeLastErr = ""
-                        nativeBandY = h
+                        nativeBandY = if (capped) y else h
                         nativeGrabMs = System.currentTimeMillis() - t0
+                        // v0.2.83: a sweep that ran to completion repainted the
+                        // whole screen, so every pending damage band is now
+                        // redundant. A CAPPED sweep did not - keep the set.
+                        if (!capped) dirtyBands.clear()
                         // v0.2.80: regrow towards ~1.2 s of measured pipe after a
                         // clean sweep, so adaptive halving is not a one-way ratchet.
-                        if (bandRows < h) {
+                        // v0.2.83: a capped sweep is evidence the pipe is SLOWER
+                        // than the current bands assume - never regrow on one.
+                        if (!capped && bandRows < h) {
                             val target = if (nativeKbPerS > 0)
                                 ((nativeKbPerS * 1024 * 6 / 5) / (w * 2)).toInt().coerceIn(8, h)
                             else bandRows * 2
@@ -1307,6 +1414,7 @@ class DesktopService(
                             displayNum = dn
                             runCatching { x11?.close() }
                             x11 = null
+                            clearXtestQueue()   // v0.2.83: queued writes belong to the old display
                             scope.launch { connectControlPlane(30_000) }
                         }
                     }
@@ -1444,9 +1552,16 @@ class DesktopService(
                         // session on a SIGSEGV-prone ROM — respawn it here.
                         fbMailSession?.let { fb ->
                             if (fb.state.value == TerminalSession.State.DEAD) {
-                                noteInfo("fbmail session died (rc=${fb.exitCode}) - respawning")
                                 fbMailSession = null
-                                ensureFbMail("respawn after guest death")
+                                // v0.2.83: a mailbox that dies WHILE NATIVE IS
+                                // FRESH was retired (or was redundant) - do not
+                                // respawn guest load against a healthy stream.
+                                if (nativeFresh) {
+                                    noteInfo("fbmail died but native capture is fresh ($nativeFrames frames) - mailbox stays retired")
+                                } else {
+                                    noteInfo("fbmail session died (rc=${fb.exitCode}) - respawning")
+                                    ensureFbMail("respawn after guest death")
+                                }
                             }
                         }
                         val silentMs = if (lastAnyFrameAtMs == 0L) Long.MAX_VALUE
@@ -1601,6 +1716,19 @@ class DesktopService(
                             pumpDiag("capture", cur)
                         }
                         if (cur != null && cur.state.value == TerminalSession.State.DEAD) {
+                            // v0.2.83: while NATIVE capture is fresh, a dead
+                            // guest capture helper is either retired BY DESIGN
+                            // (retireMailPipelines) or redundant - respawning it
+                            // would put per-frame proot load back beside the
+                            // healthy stream. Drop the handle; the silence
+                            // watchdog restarts the ladder if native goes quiet.
+                            if (nativeFresh) {
+                                if (captureSession === cur) captureSession = null
+                                pumpedCaptureSession = null
+                                com.emux.EmuXLog.i("desktop: capture session died but native is fresh ($nativeFrames frames) - not respawning")
+                                delay(1_000)
+                                continue
+                            }
                             // v0.2.68 FIX (input-dead audit, round 3): the
                             // `frameId == 0` gate meant a capture helper that
                             // died AFTER delivering its first frame was never
@@ -1871,6 +1999,7 @@ class DesktopService(
         runCatching { activeSock?.close() }; activeSock = null   // v0.1.54
         runCatching { listener?.close() }; listener = null
         runCatching { x11?.close() }; x11 = null
+        clearXtestQueue()   // v0.2.83
         scope.launch {
             runCatching { xSession?.stop() }; xSession = null
             runCatching { captureSession?.stop() }; captureSession = null
@@ -2325,6 +2454,16 @@ class DesktopService(
      *  MINUS the nc push that wedged proot sockets for ten versions. */
     private fun ensureMailCapture(reason: String) {
         if (captureSession != null) return
+        // v0.2.83: never start a guest pipeline BESIDE a healthy native one.
+        // Both paint the same bitmap, and the guest side (xwd full-screen dump
+        // per frame under proot) steals the CPU/proot budget from the very
+        // grabs that make the desktop feel fast - co-running pipelines is the
+        // "everything is slow" state the field reported. The silence watchdog
+        // re-arms this the moment native actually goes quiet (nativeFresh false).
+        if (nativeFresh) {
+            noteInfo("mail capture NOT started (native XGetImage is fresh, $nativeFrames frames): $reason")
+            return
+        }
         capMailMode = true
         noteInfo("v0.2.76 mail capture: $reason - emux-capture in mailbox mode (file only, no nc push)")
         captureSession = TerminalSession(
@@ -2335,8 +2474,37 @@ class DesktopService(
 
     private fun ensureFbMail(reason: String) {
         if (fbMailSession != null) return
+        // v0.2.83: same gate as ensureMailCapture - see the comment there.
+        if (nativeFresh) {
+            noteInfo("fbmail NOT started (native XGetImage is fresh, $nativeFrames frames): $reason")
+            return
+        }
         noteInfo("v0.2.75 fbmail: $reason - starting filesystem-mailbox capture (guest xwd -> file -> host read)")
         fbMailSession = TerminalSession(9003, ctx, root, "emux-fbmail $displayNum").also { it.start() }
+    }
+
+    /**
+     * v0.2.83: STOP the guest mailbox/legacy pipelines while native capture is
+     * delivering. The guest chains dump the FULL screen per frame (xwd under
+     * proot) and repaint the same bitmap native does - so besides the CPU
+     * contention, whichever writer lands last wins, which is how a healthy
+     * 30 fps damage stream still looked "sloppy" on the field device: every
+     * few frames a 2-second-old mailbox photograph overwrote it.
+     *
+     * This is level-triggered from the native loop (nativeFrames >= 8), and it
+     * is safe in both directions: if native later dies, nativeFresh goes false
+     * and the silence watchdog restarts the mailboxes within ~25 s.
+     */
+    private suspend fun retireMailPipelines() {
+        var did = false
+        runCatching { fbMailSession?.let { did = true; it.stop() } }
+        fbMailSession = null
+        runCatching { captureSession?.let { did = true; it.stop() } }
+        captureSession = null
+        pumpedCaptureSession = null
+        if (did) noteInfo(
+            "native capture is the frame source ($nativeFrames frames) - guest mailbox " +
+                "pipelines RETIRED (the watchdog restarts them if native ever goes silent)")
     }
 
     /**
@@ -2725,6 +2893,86 @@ class DesktopService(
         x11?.takeIf { it.connected && it.xtestOpcode > 127 && !xtestIgnored }
 
     // ------------------------------------------------------------------
+    // v0.2.83 XTEST PUMP: input writes happen on a dedicated thread, never on
+    // the UI thread.
+    //
+    // The field report ("during drag there is no animation - it waits for the
+    // input to stop and then the window appears at the destination") is two
+    // bugs stacked. The capture half was the full-sweep fallback (fixed by the
+    // damage-band loop); THIS is the input half: onTouchEvent called
+    // fakeMotion() directly. That is a ~36-byte socket write - normally
+    // microseconds - but the control-plane socket ends at an Xvfb running as a
+    // proot tracee, and when the server falls behind (exactly during a drag:
+    // WM move + expose + client redraws) the send buffer fills and write(2)
+    // BLOCKS. On the UI thread that stalls the whole touch pipeline: Android
+    // stops delivering MotionEvents, the finger keeps moving unseen, and when
+    // the block clears, a burst of stale motions floods the server at once.
+    // The window "teleports" at the end of the gesture.
+    //
+    // The pump never blocks the caller: inject* appends to a bounded deque
+    // under a small lock (O(1), no I/O). Consecutive pending MOTIONS collapse
+    // into the newest one - only the finger's LATEST position is worth
+    // injecting; the intermediate ones are frames nobody will ever see - while
+    // buttons, keys and text keep strict FIFO order, so a press can never
+    // overtake the motion that aims it. Every task re-resolves xtest() at RUN
+    // time, so a transport recycled mid-queue degrades to a drop instead of a
+    // write into a closed socket.
+    private class XtestTask(val motion: Boolean, var body: (X11Client) -> Unit)
+    private val xtestQueue = java.util.ArrayDeque<XtestTask>()
+    // java.lang.Object, not Any(): Kotlin's Any does not expose wait/notifyAll
+    // (the same trap the FIFO writer's inputLock documents).
+    private val xtestLock = java.lang.Object()
+    @Volatile private var xtestPumpStarted = false
+    private val xtestExecutor = java.util.concurrent.Executors.newSingleThreadExecutor { r ->
+        Thread(r, "emux-xtest").apply { isDaemon = true; priority = Thread.MAX_PRIORITY }
+    }
+
+    private fun ensureXtestPump() {
+        if (xtestPumpStarted) return
+        xtestPumpStarted = true
+        xtestExecutor.execute { xtestPumpLoop() }
+    }
+
+    /** Queue one XTEST write. [motion] tasks coalesce with a pending tail motion. */
+    private fun postXtest(motion: Boolean, body: (X11Client) -> Unit) {
+        ensureXtestPump()
+        synchronized(xtestLock) {
+            if (motion) {
+                val last = xtestQueue.peekLast()
+                if (last != null && last.motion) {
+                    // replace in place: order preserved (the motion still
+                    // precedes anything queued before it), zero allocation,
+                    // and the server only ever sees the newest finger position.
+                    last.body = body
+                    xtestLock.notifyAll()
+                    return
+                }
+            }
+            while (xtestQueue.size >= 512) { xtestQueue.pollFirst(); inputDropped++ }
+            xtestQueue.addLast(XtestTask(motion, body))
+            xtestLock.notifyAll()
+        }
+    }
+
+    private fun xtestPumpLoop() {
+        while (true) {
+            val t = synchronized(xtestLock) {
+                while (xtestQueue.isEmpty()) runCatching { xtestLock.wait(500) }
+                xtestQueue.pollFirst()
+            } ?: continue
+            // Resolve the transport at run time: between queueing and running,
+            // the proof may have disabled XTEST or a recycle may have replaced
+            // the client. A stale task must never write into a closed socket.
+            val c = xtest() ?: continue
+            runCatching { t.body(c); surfaceXtestErrors(c) }
+                .onFailure { controlPlaneFailure("XTEST pump write failed: $it") }
+        }
+    }
+
+    /** Drop queued writes for a connection that is being torn down. */
+    private fun clearXtestQueue() = synchronized(xtestLock) { xtestQueue.clear() }
+
+    // ------------------------------------------------------------------
     // v0.2.67 FIX (input-dead audit, round 2): a control plane that FAILS A
     // WRITE IS A DEAD CONTROL PLANE - and until now nothing in the app could
     // ever notice. `X11Client.connected` only flips in connect()/close(); the
@@ -2770,6 +3018,10 @@ class DesktopService(
                 "guest agent now; reconnecting + re-proofing in the background")
         runCatching { x11?.close() }
         x11 = null
+        // v0.2.83: queued writes belong to the DEAD connection - a press/release
+        // pair replayed against the replacement socket minutes later is worse
+        // than a dropped click.
+        clearXtestQueue()
         inputProof = "pending"
         buttonDelivered = null      // v0.2.78: re-measure on the new connection
         btnMode = "-"
@@ -3036,10 +3288,11 @@ class DesktopService(
 
     fun injectClick(xInXSpace: Int, yInXSpace: Int, button: Int = 1, press: Boolean) {
         injectCount++
-        val c = xtest()
-        if (c != null) {
-            runCatching { c.fakeButton(button, xInXSpace, yInXSpace, press); surfaceXtestErrors(c) }
-                .onFailure { controlPlaneFailure("XTEST click failed: $it") }
+        if (xtest() != null) {
+            // v0.2.83: queued, not written here - see the XTEST PUMP comment.
+            // fakeButton() emits its own motion first, so the click still lands
+            // under the finger, and FIFO order keeps it behind any pending drag.
+            postXtest(motion = false) { c -> c.fakeButton(button, xInXSpace, yInXSpace, press) }
             return
         }
         ensureInputWriter()
@@ -3049,10 +3302,12 @@ class DesktopService(
 
     fun injectMotion(x: Int, y: Int) {
         injectCount++
-        val c = xtest()
-        if (c != null) {
-            runCatching { c.fakeMotion(x, y) }
-                .onFailure { controlPlaneFailure("XTEST motion failed: $it") }
+        if (xtest() != null) {
+            // The hot path of a drag: O(1) enqueue, coalesced with any motion
+            // still waiting, written on the pump thread. The UI thread never
+            // touches the socket, so a full send buffer can no longer stall
+            // touch dispatch (v0.2.83).
+            postXtest(motion = true) { c -> c.fakeMotion(x, y) }
             return
         }
         ensureInputWriter(); inputLine("M $x $y 0")
@@ -3061,10 +3316,8 @@ class DesktopService(
     /** Drag ended outside a click: just release button 1 at position. */
     fun fakeButtonReleaseOnly(x: Int, y: Int) {
         injectCount++
-        val c = xtest()
-        if (c != null) {
-            runCatching { c.fakeButton(1, x, y, false); surfaceXtestErrors(c) }
-                .onFailure { controlPlaneFailure("XTEST release failed: $it") }
+        if (xtest() != null) {
+            postXtest(motion = false) { c -> c.fakeButton(1, x, y, false) }
             return
         }
         ensureInputWriter(); inputLine("M $x $y 0"); inputLine("U 1 0 0")
@@ -3075,10 +3328,8 @@ class DesktopService(
         // v0.2.66 FIX: was the one entry point that bypassed xtest(), so it
         // kept injecting into a server the proof had just declared dead while
         // every other path had fallen back.
-        val c = xtest()
-        if (c != null) {
-            runCatching { c.fakeKey(keycode, press); surfaceXtestErrors(c) }
-                .onFailure { controlPlaneFailure("XTEST key failed: $it") }
+        if (xtest() != null) {
+            postXtest(motion = false) { c -> c.fakeKey(keycode, press) }
             return
         }
         noteInputDropped("keycode $keycode dropped: no XTEST, and the agent protocol is keysym-name based")
@@ -3107,10 +3358,17 @@ class DesktopService(
         injectCount++
         val c = xtest()
         if (c != null) {
-            val ok = runCatching { c.typeKeysymTap(ks) }.getOrDefault(false)
-            if (ok) { surfaceXtestErrors(c); return true }
-            noteInputDropped("keysym 0x${Integer.toHexString(ks)} is not in the server keymap")
-            return false
+            // v0.2.83: the WRITE is queued on the pump, but the keymap check
+            // stays synchronous - it is a pure in-memory lookup, and callers
+            // use `false` to mean "no encoding exists anywhere" (DesktopView
+            // then falls back to its own paths). Queueing that decision would
+            // make the return value a lie.
+            if (c.keysymKeycode(ks) < 0) {
+                noteInputDropped("keysym 0x${Integer.toHexString(ks)} is not in the server keymap")
+                return false
+            }
+            postXtest(motion = false) { it.typeKeysymTap(ks) }
+            return true
         }
         ensureInputWriter()
         val name = keysymNames[ks]
@@ -3135,15 +3393,18 @@ class DesktopService(
         if (ch == '\b') return injectKeysymTap(0xFF08)
         val c = xtest()
         if (c != null) {
-            // v0.2.67 FIX: falling through to inputLine() here was a silent
-            // drop - while XTEST owns input, inputLine()'s gate returns false,
-            // so a failed typeChar (write threw, or keysym not in keymap)
-            // vanished with no note at all. Distinguish the two.
-            val res = runCatching { c.typeChar(ch) }
-            res.onFailure { controlPlaneFailure("typeChar threw: $it"); return false }
-            if (res.getOrDefault(false)) { surfaceXtestErrors(c); return true }
-            noteInputDropped("char '$ch' has no keymap encoding on this server - dropped")
-            return false
+            // v0.2.83: same split as injectKeysymTap - synchronous keymap
+            // verdict, queued write. The keysym computed here is exactly the
+            // one X11Client.typeChar would use (Latin-1 direct, else the
+            // Unicode range), so the false verdict matches the old
+            // typeChar()==false case one-for-one.
+            val ks = if (ch.code < 0x100) ch.code else 0x01000000 + ch.code
+            if (c.keysymKeycode(ks) < 0) {
+                noteInputDropped("char '$ch' has no keymap encoding on this server - dropped")
+                return false
+            }
+            postXtest(motion = false) { it.typeChar(ch) }
+            return true
         }
         ensureInputWriter()
         return inputLine("T $ch")
@@ -3158,17 +3419,18 @@ class DesktopService(
     fun injectScroll(xInXSpace: Int, yInXSpace: Int, button: Int, clicks: Int) {
         injectCount++
         if (clicks <= 0 || button !in 4..7) return
-        val c = xtest()
-        if (c != null) {
-            runCatching {
+        if (xtest() != null) {
+            // v0.2.83: one queued task for the whole burst - a wheel flick is
+            // one logical event, and splitting it across pump turns would let
+            // a drag motion interleave between the clicks.
+            postXtest(motion = false) { c ->
                 // fakeButton() emits the motion itself, so the wheel lands
                 // wherever the fingers are rather than at the last click.
                 repeat(clicks.coerceAtMost(12)) {
                     c.fakeButton(button, xInXSpace, yInXSpace, true)
                     c.fakeButton(button, xInXSpace, yInXSpace, false)
                 }
-                surfaceXtestErrors(c)
-            }.onFailure { noteInputDropped("XTEST scroll failed: $it") }
+            }
             return
         }
         ensureInputWriter()
@@ -3198,21 +3460,35 @@ class DesktopService(
         if (!ctrl && !alt && !meta) return injectKeysymTap(ks)
         val c = xtest()
         if (c != null) {
-            val held = ArrayList<Int>(3)
-            val ok = runCatching {
-                // Order matters only for tidiness; release is the reverse.
-                if (ctrl) c.keysymKeycode(0xFFE3).takeIf { it > 0 }?.let { held.add(it); c.fakeKey(it, true) }
-                if (alt)  c.keysymKeycode(0xFFE9).takeIf { it > 0 }?.let { held.add(it); c.fakeKey(it, true) }
-                if (meta) c.keysymKeycode(0xFFEB).takeIf { it > 0 }?.let { held.add(it); c.fakeKey(it, true) }
-                val r = c.typeKeysymTap(ks)
-                held.asReversed().forEach { c.fakeKey(it, false) }
-                r
-            }.getOrDefault(false)
-            if (ok) { surfaceXtestErrors(c); return true }
-            if (held.isEmpty()) {
+            // v0.2.83: the whole combo is ONE queued task - modifier down,
+            // tap, modifier up must not be interleaved with anything else
+            // (least of all a coalescing drag motion). The keymap verdicts
+            // stay synchronous: they are pure lookups, and they decide which
+            // transport gets the combo at all.
+            if (c.keysymKeycode(ks) >= 0) {
+                postXtest(motion = false) { cc ->
+                    val held = ArrayList<Int>(3)
+                    // Order matters only for tidiness; release is the reverse.
+                    if (ctrl) cc.keysymKeycode(0xFFE3).takeIf { it > 0 }?.let { held.add(it); cc.fakeKey(it, true) }
+                    if (alt)  cc.keysymKeycode(0xFFE9).takeIf { it > 0 }?.let { held.add(it); cc.fakeKey(it, true) }
+                    if (meta) cc.keysymKeycode(0xFFEB).takeIf { it > 0 }?.let { held.add(it); cc.fakeKey(it, true) }
+                    cc.typeKeysymTap(ks)
+                    held.asReversed().forEach { cc.fakeKey(it, false) }
+                }
+                return true
+            }
+            val anyMod = listOfNotNull(
+                if (ctrl) 0xFFE3 else null,
+                if (alt) 0xFFE9 else null,
+                if (meta) 0xFFEB else null,
+            ).any { c.keysymKeycode(it) > 0 }
+            if (!anyMod) {
                 noteInputDropped("modifier keysym is not in the server keymap (no Ctrl/Alt/Super)")
                 return false
             }
+            // Base keysym missing from the XTEST keymap but modifiers present:
+            // pre-v0.2.83 this fell through to the FIFO agent (typeKeysymTap
+            // returned false with held non-empty). Keep that path.
         }
         ensureInputWriter()
         val name = keysymNames[ks] ?: if (ks in 0x20..0x7E) ks.toChar().toString() else null
@@ -3231,10 +3507,12 @@ class DesktopService(
     /** Type a whole IME commit at once — one agent line, one xdotool process. */
     fun injectText(text: String): Boolean {
         if (text.isEmpty()) return true
-        val c = xtest()
-        if (c != null) {
-            val ok = runCatching { c.typeString(text) }.getOrDefault(false)
-            if (ok) { surfaceXtestErrors(c); return true }
+        if (xtest() != null) {
+            // v0.2.83: the whole commit is one queued task (typeString batches
+            // its own writes), so an IME paste can neither be split by a drag
+            // motion nor block the UI thread on the socket.
+            postXtest(motion = false) { it.typeString(text) }
+            return true
         }
         ensureInputWriter()
         // The FIFO protocol is one command per LINE, so an embedded newline
@@ -3256,6 +3534,7 @@ class DesktopService(
         runCatching { activeSock?.close() }; activeSock = null   // v0.1.54
         runCatching { listener?.close() }; listener = null
         x11?.close(); x11 = null
+        clearXtestQueue()   // v0.2.83: never replay input into the next session
         // v0.2.59: drop the queued input and the FIFO handle. The writer thread
         // is a daemon and is reused by the next session; leaving the stream open
         // would keep writing into a FIFO the next agent has already unlinked.
