@@ -25,7 +25,7 @@
 <intent-filter> <action android:name="android.intent.action.MAIN" />
 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter> </activity> <activity android:theme="@style/EmuX.Prefs" android:name="com.emux.SettingsActivity" android:exported="false" />
-<service android:name="com.emux.terminal.TerminalService" android:exported="false" android:foregroundServiceType="specialUse">
+<service android:name="com.emux.terminal.TerminalService" android:exported="false" android:foregroundServiceType="specialUse|dataSync">
 <property android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE" android:value="Interactive Linux shell &amp; X11 desktop sessions kept alive while app is backgrounded" />
         </service> <service android:name="com.emux.api.EmuXExecuteService" android:permission="com.emux.RUN_COMMAND" android:exported="true">
 <intent-filter> <action android:name="com.emux.RUN_COMMAND" />

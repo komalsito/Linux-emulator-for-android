@@ -149,7 +149,7 @@ class SettingsActivity : AppCompatActivity() {
                         android.widget.Toast.makeText(act,
                             lp.title ?: "Nothing to select",
                             android.widget.Toast.LENGTH_SHORT).show()
-                        return
+                        return true   // "handled": must NOT fall through to the androidx chain
                     }
                     val checked = values.indexOfFirst { it.toString() == lp.value }
                     builder
@@ -350,8 +350,9 @@ class SettingsActivity : AppCompatActivity() {
         // appcompat-AlertDialog chain the field ROM silently drops. Unknown
         // dialog types still go to the androidx default, guarded so a
         // selector can never kill the app.
-        override fun onDisplayPreferenceDialog(preference: androidx.preference.DialogPreference) {
-            if (SettingsActivity.showPreferenceDialog(this, preference)) return
+        override fun onDisplayPreferenceDialog(preference: androidx.preference.Preference) {
+            if (preference is androidx.preference.DialogPreference &&
+                SettingsActivity.showPreferenceDialog(this, preference)) return
             val app = requireContext().applicationContext
             runCatching { super.onDisplayPreferenceDialog(preference) }
                 .onFailure {
@@ -516,8 +517,9 @@ class SettingsActivity : AppCompatActivity() {
         // actually runs, and its selectors are the exact rows the field report
         // names ("changing distros, window manager, etc. - click animation but
         // nothing displays"). Framework dialog, guarded androidx fallback.
-        override fun onDisplayPreferenceDialog(preference: androidx.preference.DialogPreference) {
-            if (SettingsActivity.showPreferenceDialog(this, preference)) return
+        override fun onDisplayPreferenceDialog(preference: androidx.preference.Preference) {
+            if (preference is androidx.preference.DialogPreference &&
+                SettingsActivity.showPreferenceDialog(this, preference)) return
             val app = requireContext().applicationContext
             runCatching { super.onDisplayPreferenceDialog(preference) }
                 .onFailure {
