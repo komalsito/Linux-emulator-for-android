@@ -32,10 +32,10 @@ private fun qualityPrediction(ctx: android.content.Context): String {
     val h = parts.getOrNull(1)?.toIntOrNull() ?: return ""
     if (kb <= 0 || w <= 0 || h <= 0) return ""
     val a = w.toFloat() / h.toFloat()
-    val sb = StringBuilder("\nYour pipe measured ${kb} KB/s: ")
+    val sb = StringBuilder("\nYour pipe measured $kb KB/s: ")
     for (L in listOf(1280, 960, 720, 540)) {
         val short = ((if (a >= 1f) L / a else L * a).toInt() / 2 * 2).coerceAtLeast(2)
-        sb.append("${L}px\u2248%.1ffps ".format(kb * 1024f / (L * short * 2f)))
+        sb.append("${L}px≈%.1ffps ".format(kb * 1024f / (L * short * 2f)))
     }
     return sb.toString()
 }
@@ -88,6 +88,104 @@ class SettingsActivity : AppCompatActivity() {
                     }
                 }
             }
+        }
+
+        /**
+         * v0.2.87 SETTINGS-SELECTOR FIX (field HUAWEI MRDI-W09, API 31, v0.2.86:
+         * "in settings I can't change settings - only the on/off toggles work;
+         * the others (distro, window manager, ...) only make the click animation
+         * but nothing displays in order to select a different option").
+         *
+         * The split tells us exactly where it broke. Toggles are
+         * TwoStatePreference, whose checked state flips inside
+         * performClick() itself - no dialog involved, and they kept working.
+         * The selectors are DialogPreference (ListPreference /
+         * EditTextPreference), whose ENTIRE path is androidx's default dialog
+         * chain: onDisplayPreferenceDialog -> PreferenceDialogFragmentCompat (a
+         * DialogFragment transaction with a target-fragment link) ->
+         * appcompat AlertDialog themed from the host. On this field ROM that
+         * chain silently opens nothing: the row's ripple plays (the tap is
+         * delivered, performClick ran) but no selection UI ever renders. Note
+         * the theme it resolves against - EmuX.Prefs is Material3 while its
+         * preferenceTheme is the Material2 PreferenceThemeOverlay, the exact
+         * mix this file has documented as ROM-fragile since v0.1.5.
+         *
+         * The fix applies the tier philosophy to dialogs: intercept the
+         * dispatch and show a FRAMEWORK AlertDialog (android.app, device-default
+         * alert theme - the dialog style the ROM itself renders for its own
+         * apps). Zero AppCompat/Material attribute resolution, no
+         * DialogFragment, no transaction, no target-fragment chain - nothing
+         * left for a ROM to silently swallow. Writes go through the same
+         * preference object (value/text + callChangeListener), so persistence,
+         * SimpleSummaryProvider updates and every reader ("distro", "wm",
+         * "capture_quality", ...) are byte-identical to the androidx dialog.
+         * runCatching keeps the settings contract: a selector that cannot
+         * open can never kill the app - it says so instead.
+         *
+         * Returns true when the preference was handled (including the
+         * "nothing to select" and "activity gone" degenerate cases, which must
+         * NOT fall through to the androidx chain); false only for dialog
+         * preference types this helper does not know, so the caller can hand
+         * them to the androidx default inside its own guard.
+         */
+        internal fun showPreferenceDialog(
+            from: PreferenceFragmentCompat,
+            preference: androidx.preference.DialogPreference
+        ): Boolean {
+            val isList = preference is androidx.preference.ListPreference
+            val isText = preference is androidx.preference.EditTextPreference
+            if (!isList && !isText) return false
+            val act = from.activity ?: return true   // detach race: swallow, never crash
+            runCatching {
+                val builder = android.app.AlertDialog.Builder(
+                    act, android.R.style.Theme_DeviceDefault_Dialog_Alert)
+                if (isList) {
+                    val lp = preference as androidx.preference.ListPreference
+                    val entries = lp.entries
+                    val values = lp.entryValues
+                    if (entries.isNullOrEmpty() || values.isNullOrEmpty()) {
+                        // A dead tap is still feedback: say there is nothing to
+                        // pick instead of pretending the tap worked.
+                        android.widget.Toast.makeText(act,
+                            lp.title ?: "Nothing to select",
+                            android.widget.Toast.LENGTH_SHORT).show()
+                        return
+                    }
+                    val checked = values.indexOfFirst { it.toString() == lp.value }
+                    builder
+                        .setTitle(lp.title ?: lp.dialogTitle)
+                        .setSingleChoiceItems(entries, checked) { d, which ->
+                            val v = values[which].toString()
+                            if (lp.callChangeListener(v)) lp.value = v
+                            d.dismiss()
+                        }
+                        .setNegativeButton(android.R.string.cancel, null)
+                        .show()
+                } else {
+                    val ep = preference as androidx.preference.EditTextPreference
+                    val input = android.widget.EditText(act).apply {
+                        setText(ep.text)
+                        setSelection(text?.length ?: 0)
+                        hint = ep.title
+                    }
+                    builder
+                        .setTitle(ep.dialogTitle ?: ep.title)
+                        .setView(input)
+                        .setPositiveButton(android.R.string.ok) { d, _ ->
+                            val v = input.text.toString()
+                            if (ep.callChangeListener(v)) ep.text = v
+                            d.dismiss()
+                        }
+                        .setNegativeButton(android.R.string.cancel, null)
+                        .show()
+                }
+            }.onFailure { t ->
+                com.emux.EmuXLog.e("preference dialog failed", t)
+                android.widget.Toast.makeText(act.applicationContext,
+                    "Could not open the selection dialog",
+                    android.widget.Toast.LENGTH_LONG).show()
+            }
+            return true
         }
     }
 
@@ -237,13 +335,30 @@ class SettingsActivity : AppCompatActivity() {
                 ?.setOnPreferenceClickListener {
                     com.emux.x11.DesktopService.restartDesktopRequested = true
                     android.widget.Toast.makeText(requireContext().applicationContext,
-                        "Restarting the desktop\u2026 (open windows will close)", android.widget.Toast.LENGTH_LONG).show()
+                        "Restarting the desktop… (open windows will close)", android.widget.Toast.LENGTH_LONG).show()
                     activity?.onBackPressedDispatcher?.onBackPressed()
                     true
                 }
             } catch (t: Throwable) {
                 SettingsActivity.degradeFromBind(this, t)
             }
+        }
+
+        // v0.2.87: every selector (distro, wm, capture quality, scroll speed,
+        // keyboard layout, mirror) opens through the framework-dialog path (see
+        // SettingsActivity.showPreferenceDialog) - never the DialogFragment +
+        // appcompat-AlertDialog chain the field ROM silently drops. Unknown
+        // dialog types still go to the androidx default, guarded so a
+        // selector can never kill the app.
+        override fun onDisplayPreferenceDialog(preference: androidx.preference.DialogPreference) {
+            if (SettingsActivity.showPreferenceDialog(this, preference)) return
+            val app = requireContext().applicationContext
+            runCatching { super.onDisplayPreferenceDialog(preference) }
+                .onFailure {
+                    com.emux.EmuXLog.e("androidx dialog fallback failed", it)
+                    android.widget.Toast.makeText(app,
+                        "Could not open this setting", android.widget.Toast.LENGTH_LONG).show()
+                }
         }
     }
 
@@ -307,10 +422,10 @@ class SettingsActivity : AppCompatActivity() {
                     "tune it against your own device. Applies when the desktop next starts." +
                     qualityPrediction(ctx)
                 entries = arrayOf(
-                    "Sharp \u2014 1280 px (default, unchanged; ~1.5 MB per frame)",
-                    "Balanced \u2014 960 px (~1.8\u00d7 the frame rate, ~0.8 MB)",
-                    "Fast \u2014 720 px (~3.2\u00d7 the frame rate, ~0.5 MB)",
-                    "Smooth \u2014 540 px (~5.6\u00d7 the frame rate, ~0.26 MB; the desktop gets small)")
+                    "Sharp — 1280 px (default, unchanged; ~1.5 MB per frame)",
+                    "Balanced — 960 px (~1.8× the frame rate, ~0.8 MB)",
+                    "Fast — 720 px (~3.2× the frame rate, ~0.5 MB)",
+                    "Smooth — 540 px (~5.6× the frame rate, ~0.26 MB; the desktop gets small)")
                 entryValues = arrayOf("1280", "960", "720", "540")
                 setDefaultValue(com.emux.x11.DesktopService.DEFAULT_CAPTURE_LONG_SIDE.toString())
             })
@@ -321,7 +436,7 @@ class SettingsActivity : AppCompatActivity() {
                 setOnPreferenceClickListener {
                     com.emux.x11.DesktopService.restartDesktopRequested = true
                     android.widget.Toast.makeText(ctx.applicationContext,
-                        "Restarting the desktop\u2026 (open windows will close)",
+                        "Restarting the desktop… (open windows will close)",
                         android.widget.Toast.LENGTH_LONG).show()
                     activity?.onBackPressedDispatcher?.onBackPressed()
                     true
@@ -339,10 +454,10 @@ class SettingsActivity : AppCompatActivity() {
                     "Trackpad deltas are fractional, so the pane accumulates the " +
                     "remainder and emits whole scroll steps."
                 entries = arrayOf(
-                    "Precise \u2014 1 line per notch",
-                    "Normal \u2014 3 lines (default)",
-                    "Fast \u2014 5 lines",
-                    "Very fast \u2014 9 lines")
+                    "Precise — 1 line per notch",
+                    "Normal — 3 lines (default)",
+                    "Fast — 5 lines",
+                    "Very fast — 9 lines")
                 entryValues = arrayOf("1", "3", "5", "9")
                 setDefaultValue("3")
                 summaryProvider = androidx.preference.ListPreference.SimpleSummaryProvider.getInstance()
@@ -395,6 +510,21 @@ class SettingsActivity : AppCompatActivity() {
                 // report described).
                 SettingsActivity.degradeFromBind(this, t)
             }
+        }
+
+        // v0.2.87: same override as Prefs - this is the tier the field device
+        // actually runs, and its selectors are the exact rows the field report
+        // names ("changing distros, window manager, etc. - click animation but
+        // nothing displays"). Framework dialog, guarded androidx fallback.
+        override fun onDisplayPreferenceDialog(preference: androidx.preference.DialogPreference) {
+            if (SettingsActivity.showPreferenceDialog(this, preference)) return
+            val app = requireContext().applicationContext
+            runCatching { super.onDisplayPreferenceDialog(preference) }
+                .onFailure {
+                    com.emux.EmuXLog.e("androidx dialog fallback failed", it)
+                    android.widget.Toast.makeText(app,
+                        "Could not open this setting", android.widget.Toast.LENGTH_LONG).show()
+                }
         }
     }
 }
