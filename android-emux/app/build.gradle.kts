@@ -6,6 +6,14 @@ plugins {
 android {
     namespace = "com.emux"
 
+    // v0.2.88 BUILD FIX: compileSdk was never specified in this repo's
+    // build file, and AGP 8.5.2 hard-fails project configuration without it
+    // ("compileSdkVersion is not specified", manual run #3). 34 is the
+    // correct level: every dependency in use requires it (androidx.core
+    // 1.13.x, appcompat 1.7.0, fragment 1.8.x) and AGP 8.5.x officially
+    // supports compileSdk 34.
+    compileSdk = 34
+
     // No NDK/C++ build here: EmuX runs a *pure-Android* terminal core
     // (com.termux:terminal-emulator + com.termux:view) — same engine Termux uses,
     // so PTY handling and rendering cost the same as Termux.
