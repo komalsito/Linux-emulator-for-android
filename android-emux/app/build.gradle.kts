@@ -34,6 +34,22 @@ android {
         // (adb install / GitHub Releases), same distribution model as Termux
         // on F-Droid.
         targetSdk = 28
+        // v0.2.90 (vc190): THE STALE-INPUT-SERVER FIX. Field (v0.2.89
+        // tablet, force-stop + relaunch): the Xvfb attempt ladder leaked
+        // live failed attempts on :0 (retire_own_xvfb "serving" keep-
+        // checks preserve anything that listens), and the next session
+        // input control plane connected to one of those zombies - green
+        // badge, proof ok, fail=0, while every tap landed on a bare-root
+        // server nobody streams; the real desktop on :1 never reacted
+        // (pointer pinned at center, xdotool-verified). (1) emux-x11 now
+        // retires a failed attempt unconditionally - a server the ladder
+        // abandoned is a stray by definition; adoption before the ladder
+        // is untouched. (2) X11Client exposes displayNum + resIdBase
+        // (setup-reply resource-id-base, unique per server instance) and
+        // DesktopService compares the input plane identity with the
+        // capture plane every 5 s and inside every reconnect attempt -
+        // a mismatch recycles the control plane onto the server the user
+        // actually sees. ENV_VERSION 80 re-seeds the guest script.
         // v0.2.89 (vc189): (1) emux-x11 governor now self-heals a WM-less
         // desktop - it checks/installs openbox/xterm/x11-apps (was furniture-
         // only, single attempt) and relaunches a dead/never-started WM, so
@@ -65,8 +81,8 @@ android {
         // on the field HUAWEI ROM (click ripple, no selection UI). ENV_VERSION
         // stays 77: no guest script changed, so existing installs must not
         // re-seed.
-        versionCode = 189
-        versionName = "0.2.89"
+        versionCode = 190
+        versionName = "0.2.90"
 
         ndk {
             abiFilters += listOf("arm64-v8a", "armeabi-v7a", "x86_64")

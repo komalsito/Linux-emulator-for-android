@@ -84,6 +84,17 @@ class X11Client(
     // speaks unix first; tcp stays as the fallback.
     private val unixSocketPath: String? = null,
 ) {
+    /** v0.2.90: the display number this client is attached to (the
+     *  constructor param was private; the input/capture identity guard
+     *  reads it to re-aim a mismatched control plane). */
+    val displayNum: Int get() = display
+    /** v0.2.90: this server resource-id-base from the connection setup
+     *  reply - unique per server instance. Two connections with different
+     *  bases are talking to two DIFFERENT X servers even when their display
+     *  numbers agree, which is the only reliable way to detect a leaked
+     *  zombie answering on a display the capture does not stream. */
+    val resIdBase: Int get() = resBase
+
     companion object {
         const val PORT_BASE = 6000
 

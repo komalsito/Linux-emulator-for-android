@@ -1606,6 +1606,28 @@ class DesktopService(
                         val cap = freshCaptureDisplay()
                         if (cap != null) captureDisplay = cap
                         val c = xtest() ?: continue
+                        // v0.2.90 SERVER-IDENTITY GUARD (the stale-input-server
+                        // fix): display NUMBERS cannot distinguish two servers
+                        // claiming the same number. The v0.2.89 field state was a
+                        // leaked :0 zombie answering the input plane (proof ok,
+                        // fail=0, inj climbing) while the capture streamed the
+                        // real desktop and xdotool showed the real server pointer
+                        // NEVER MOVED - every tap went into the zombie. The setup
+                        // reply resource-id-base is unique per server instance:
+                        // when the input plane base differs from the live capture
+                        // plane base, the input plane is on a wrong server -
+                        // recycle it and re-aim at the one the user sees.
+                        val ncap = nativeClient
+                        if (ncap != null && ncap.connected && c.resIdBase != ncap.resIdBase) {
+                            displayNum = ncap.displayNum
+                            captureDisplay = ncap.displayNum
+                            recycleControlPlane(
+                                "input plane is on a different X server than the streamed one " +
+                                    "(input res-id 0x" + Integer.toHexString(c.resIdBase) +
+                                    ", capture 0x" + Integer.toHexString(ncap.resIdBase) +
+                                    " on :" + ncap.displayNum + ") - reconnecting to the capture server")
+                            continue
+                        }
                         if (cap != null && cap != displayNum) {
                             displayNum = cap
                             recycleControlPlane(
@@ -2310,12 +2332,44 @@ class DesktopService(
                 // control plane expired beside a perfectly live display.
                 // X11Client now tries the unix socket first and throws
                 // only if both transports fail.
+                // v0.2.90: the live CAPTURE client paints what the user
+                // actually sees; when it is connected, its display and server
+                // identity outrank every marker file - two servers can claim
+                // the same display number (the v0.2.89 field state: a leaked
+                // :0 zombie answered the control plane while the desktop
+                // streamed from :1), and a number-comparing guard can never
+                // see that.
+                nativeClient?.takeIf { it.connected }?.let { nc ->
+                    if (displayNum != nc.displayNum) {
+                        noteInfo("control plane: capture client is on :" + nc.displayNum +
+                            " - following it (was :" + displayNum + ")")
+                        displayNum = nc.displayNum
+                        captureDisplay = nc.displayNum
+                    }
+                }
                 val c = X11Client(
                     display = displayNum,
                     unixSocketPath = java.io.File(
                         com.emux.core.FsLayout.linuxRoot(ctx),
                         "tmp/.X11-unix/X$displayNum").absolutePath)
                 c.connect()
+                // v0.2.90: connected to SOMETHING - prove it is the SAME
+                // server the capture streams. The setup reply resource-id-
+                // base is unique per server instance, so this is wire-level
+                // truth no stale marker or socket collision can fake: a wrong
+                // server answers every request (proof ok, fail 0) while
+                // every injection lands on a desktop nobody sees. Throw so
+                // the deadline loop re-aims and retries; displayNum now
+                // follows the capture client, so the retry lands right.
+                nativeClient?.takeIf { it.connected }?.let { nc ->
+                    if (c.resIdBase != nc.resIdBase) {
+                        runCatching { c.close() }
+                        throw java.io.IOException(
+                            "control plane reached a different X server (res-id 0x" +
+                                Integer.toHexString(c.resIdBase) + ") than the captured one (0x" +
+                                Integer.toHexString(nc.resIdBase) + " on :" + nc.displayNum + ")")
+                    }
+                }
                 x11 = c
                 inputDroppedNoted = false
                 inputTransport = "xtest"

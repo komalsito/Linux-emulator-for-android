@@ -1809,17 +1809,23 @@ else
   retire_own_xvfb() {
     [ -n "$XVFB_PID" ] || return 0
     kill -0 "$XVFB_PID" 2>/dev/null || { XVFB_PID=""; return 0; }
-    local RD RP RI
-    RD="${XVFB_PID_DN:-$DN}"; RP=$((6000 + RD))
-    if [ -e "/tmp/.X11-unix/X$RD" ] && [ "/tmp/.X11-unix/X$RD" -nt /tmp/emux_sess_marker ]; then
-      echo "emux-x11: keeping Xvfb pid $XVFB_PID - it serves :$RD (fresh unix socket)" >&2
-      XVFB_PID=""; return 0
-    fi
-    if command -v nc >/dev/null 2>&1 && nc -z 127.0.0.1 "$RP" >/dev/null 2>&1; then
-      echo "emux-x11: keeping Xvfb pid $XVFB_PID - tcp $RP answers" >&2
-      XVFB_PID=""; return 0
-    fi
-    echo "emux-x11: retiring our own unverified Xvfb pid $XVFB_PID on :$RD (no fresh socket, tcp $RP silent)" >&2
+    # v0.2.90 FIELD FIX (stray-Xvfb leak, the v0.2.89 tablet round): the old
+    # keep-checks below kept every FAILED attempt that still listened, so the
+    # ladder parked live-but-unverified Xvfbs on :0 for the rest of the app
+    # life - the field ran three X servers at once. The next session input
+    # control plane then connected to one of those zombies: green badge,
+    # proof ok, every tap injected into a bare-root server while the desktop
+    # the user watched streamed from :1 (pointer never moved off center -
+    # xdotool evidence). This function runs only when the ladder is about to
+    # launch the NEXT attempt, i.e. after x_up already FAILED for this pid:
+    # a server the ladder abandoned is a stray by definition, serving or
+    # not. Kill it (gently, then -9); never let kill -0 decide - on the
+    # field ROM it misreports freshly-forked tracees both ways. Adoption is
+    # untouched: it happens BEFORE the ladder, never inside it, so a
+    # VERIFIED pre-existing server is still adopted, never killed by this.
+    local RD RI
+    RD="${XVFB_PID_DN:-$DN}"
+    echo "emux-x11: retiring our own failed Xvfb attempt pid $XVFB_PID on :$RD (the ladder abandoned it)" >&2
     kill "$XVFB_PID" 2>/dev/null
     RI=0
     while kill -0 "$XVFB_PID" 2>/dev/null && [ "$RI" -lt 20 ]; do sleep 0.1; RI=$((RI + 1)); done
