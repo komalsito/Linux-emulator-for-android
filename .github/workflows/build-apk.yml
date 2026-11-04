@@ -13,6 +13,11 @@
 #   - setup-java cache:gradle: repeat builds resolve dependencies from cache
 #   - artifact retention 14 days, not 90 (artifact storage counts too)
 #   - unit tests are an optional input, OFF by default
+#
+# v0.2.87+ APK ARCHIVE POLICY: the root emux-debug.apk is gone; the versioned
+# archive lives in releases/ (in git). commit_apk is therefore OFF by default -
+# tick it only when a build is a keeper, and it will commit the versioned APK
+# into releases/ (never the repo root).
 name: Build APK (manual)
 
 on:
@@ -23,9 +28,9 @@ on:
         required: false
         default: 'false'
       commit_apk:
-        description: 'Commit the built APK into releases/ and the repo root (release convention)'
+        description: 'Commit this build into releases/ (the versioned APK archive)'
         required: false
-        default: 'true'
+        default: 'false'
 
 concurrency:
   group: build-apk-manual
@@ -83,22 +88,23 @@ jobs:
         working-directory: android-emux
         run: ./gradlew testDebugUnitTest --no-daemon
 
-      # Release convention: releases/emux-debug-v<version>-vc<code>.apk plus a
-      # refreshed root emux-debug.apk. Pushes by GITHUB_TOKEN never trigger
-      # other workflows, so this commit cannot start anything.
-      - name: Commit APK into the repo (release convention)
-        if: ${{ github.event.inputs.commit_apk != 'false' }}
+      # Archive policy: the versioned APK goes into releases/ ONLY (the root
+      # emux-debug.apk was dropped in v0.2.87). Off by default - the artifact
+      # above already covers "try this build"; this is for keepers.
+      # Pushes by GITHUB_TOKEN never trigger other workflows.
+      - name: Commit APK into releases/ (archive)
+        if: ${{ github.event.inputs.commit_apk == 'true' }}
         run: |
           APK="android-emux/app/build/outputs/apk/debug/app-debug.apk"
           VC=$(grep -oP 'versionCode = \K[0-9]+' android-emux/app/build.gradle.kts | head -1)
           VN=$(grep -oP 'versionName = "\K[^"]+' android-emux/app/build.gradle.kts | head -1)
-          cp "$APK" emux-debug.apk
-          cp "$APK" "releases/emux-debug-v${VN}-vc${VC}.apk"
+          DEST="releases/emux-debug-v${VN}-vc${VC}.apk"
+          cp "$APK" "$DEST"
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           # The branch may have moved while the build ran (about 10 minutes):
           # rebase first so the push cannot fail on a stale tip.
           git pull --rebase --autostash
-          git add emux-debug.apk "releases/emux-debug-v${VN}-vc${VC}.apk"
+          git add "$DEST"
           git commit -m "build: ship the v${VN} APK (vc${VC}) from the manual workflow (verify_apk passed on this run)" || echo "nothing changed - APK identical"
           git push
