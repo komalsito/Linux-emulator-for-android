@@ -604,7 +604,12 @@ class DesktopView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attrs) 
         // ours under it shows two pointers a few px apart - the "virtual mouse
         // lagging behind the real one" field complaint. Fingers clear the flag
         // on ACTION_DOWN and get the synthetic cursor back.
-        if (realMouseCursor) return
+        // v0.2.86: ...and an IDLE or unplugged mouse gets it back too: the
+        // suppression only lives REAL_MOUSE_GRACE_MS past the last mouse
+        // event, so a stray mouse-classified hover can never leave the pane
+        // permanently cursor-less ("there is no virtual mouse").
+        if (realMouseCursor &&
+            System.currentTimeMillis() - lastMouseInputMs < REAL_MOUSE_GRACE_MS) return
         if (cursorX < 0f || cursorY < 0f) return
         val (vx, vy) = xToView(cursorX, cursorY)
         if (vx < -40f || vy < -40f || vx > width + 40f || vy > height + 40f) return
@@ -643,9 +648,9 @@ class DesktopView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attrs) 
         if (a == android.view.MotionEvent.ACTION_HOVER_MOVE ||
             a == android.view.MotionEvent.ACTION_HOVER_ENTER) {
             if (isMouseInput(event)) {
-                realMouseCursor = true
+                noteMouseActive()
                 if (!frameless) {
-                    val (x, y) = mapToX(event.x, event.y, markCursor = false)
+                    val (x, y) = mapToX(event.x, event.y)
                     val now = System.currentTimeMillis()
                     val dt = now - lastHoverInjectMs
                     if (dt >= HOVER_MIN_INTERVAL_MS) {
@@ -700,8 +705,22 @@ class DesktopView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attrs) 
 
     /** True while a real mouse pointer is active: the system draws THAT
      *  cursor, so the synthetic one must not double it. A finger touch
-     *  clears it (fingers have no system cursor). */
+     *  clears it (fingers have no system cursor).
+     *  v0.2.86 FIX ("no virtual mouse"): the suppression now EXPIRES after
+     *  [REAL_MOUSE_GRACE_MS] of mouse silence. A disconnected mouse, an idle
+     *  trackpad - or one stray ROM hover event that classified as mouse -
+     *  used to hide the synthetic cursor permanently, and the pane was
+     *  cursor-less with no way to bring it back short of a finger tap. The
+     *  v0.2.66 contract stands: the pane ALWAYS shows where the X pointer
+     *  is. The mouse path marks cursorX/cursorY as it injects, so when the
+     *  suppression lapses the synthetic cursor reappears exactly at the real
+     *  X pointer - not at some stale finger position. */
     private var realMouseCursor = false
+    private var lastMouseInputMs = 0L
+    private fun noteMouseActive() {
+        realMouseCursor = true
+        lastMouseInputMs = System.currentTimeMillis()
+    }
 
     /** Mouse or trackpad? toolType decides; stylus/finger sources never count
      *  even when a ROM tags them SOURCE_MOUSE. */
@@ -713,7 +732,23 @@ class DesktopView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attrs) 
                 MotionEvent.TOOL_TYPE_FINGER -> return false
             }
         }
-        return e.isFromSource(InputDevice.SOURCE_MOUSE)
+        if (!e.isFromSource(InputDevice.SOURCE_MOUSE)) return false
+        // v0.2.86 FIX ("desktop not interactable, no virtual mouse"): toolType
+        // UNKNOWN + SOURCE_MOUSE is trusted ONLY when the originating device is
+        // not itself a touchscreen. Desktop-mode/PC-mode ROMs (Huawei-class)
+        // re-tag plain finger touches as SOURCE_MOUSE with toolType UNKNOWN;
+        // the old source-only fallback sent every finger gesture down the mouse
+        // path - which hides the synthetic cursor (realMouseCursor = true, so
+        // the pane looks cursor-less), strips the whole finger vocabulary
+        // (long-press right-click, two-finger scroll, tap timing) and, worst,
+        // can split ONE gesture across both paths when the classification
+        // flickers between DOWN and UP: the mouse path presses X button 1, the
+        // finger path receives the UP and never releases it, and a button left
+        // down in the server swallows every later click - the v0.2.79 lesson,
+        // reintroduced through a new seam. A real mouse/trackpad device never
+        // carries SOURCE_TOUCHSCREEN, so this cannot cost the v0.2.85 feature.
+        val dev = e.device ?: return true
+        return dev.sources and InputDevice.SOURCE_TOUCHSCREEN == 0
     }
 
     /** ACTION_SCROLL also accepts raw touchpad sources: some kernels report
@@ -773,6 +808,7 @@ class DesktopView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attrs) 
         when (event.actionMasked) {
             MotionEvent.ACTION_SCROLL -> {
                 if (!isWheelInput(event) || frameless) return false
+                noteMouseActive()
                 val v = event.getAxisValue(MotionEvent.AXIS_VSCROLL)
                 val h = event.getAxisValue(MotionEvent.AXIS_HSCROLL)
                 if (v == 0f && h == 0f) return false
@@ -782,7 +818,7 @@ class DesktopView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attrs) 
                 val nv = wheelAccumV.toInt(); if (nv != 0) wheelAccumV -= nv
                 val nh = wheelAccumH.toInt(); if (nh != 0) wheelAccumH -= nh
                 if (nv != 0 || nh != 0) {
-                    val (x, y) = mapToX(event.x, event.y, markCursor = false)
+                    val (x, y) = mapToX(event.x, event.y)
                     // one call = one batched XTEST burst for the whole gesture
                     desktop?.injectScrollPair(x, y, nv, nh)
                 }
@@ -790,11 +826,19 @@ class DesktopView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attrs) 
             }
             MotionEvent.ACTION_BUTTON_PRESS, MotionEvent.ACTION_BUTTON_RELEASE -> {
                 if (!isMouseInput(event) || frameless) return false
+                noteMouseActive()
                 val b = xButtonForBits(event.actionButton)
                 val press = event.actionMasked == MotionEvent.ACTION_BUTTON_PRESS
-                val (x, y) = mapToX(event.x, event.y, markCursor = false)
+                val (x, y) = mapToX(event.x, event.y)
                 if (press) {
-                    if (mouseExtraButton == 0 && mouseExtraButton != b) {
+                    // v0.2.86: `b != mouseHeldButton` - some trackpads report a
+                    // physical click as BOTH an ACTION_DOWN (handled by
+                    // onMouseTouchEvent) and an ACTION_BUTTON_PRESS. Pressing
+                    // the same X button twice turned one click into a
+                    // double-click; the DOWN path's button is never re-pressed
+                    // here, and releaseMouseButtons releases a shared button
+                    // exactly once.
+                    if (mouseExtraButton == 0 && b != mouseHeldButton) {
                         mouseExtraButton = b
                         desktop?.injectClick(x, y, b, press = true)
                     }
@@ -822,14 +866,25 @@ class DesktopView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attrs) 
             MotionEvent.ACTION_DOWN -> {
                 dismissIntroCard()
                 desktop?.noteTouch()
-                realMouseCursor = true
+                noteMouseActive()
+                // v0.2.86: a new DOWN is an exit for whatever the PREVIOUS
+                // gesture left held (a lost UP/CANCEL - e.g. the stream
+                // switched to the finger path mid-press, or the window lost
+                // focus). The v0.2.85 comment claimed "even a new DOWN goes
+                // through here"; the code never did. Now it does.
+                releaseMouseButtons(e)
                 mouseOverlayDown = onOverlayTouch(e.x, e.y)
                 if (mouseOverlayDown) return true
                 requestFocus()
                 if (!frameless) {
-                    val (x, y) = mapToX(e.x, e.y, markCursor = false)
+                    val (x, y) = mapToX(e.x, e.y)
                     mouseHeldButton = xButtonForBits(e.buttonState)
-                    desktop?.injectClick(x, y, mouseHeldButton, press = true)
+                    // v0.2.86: if a BUTTON_PRESS for the same button already
+                    // arrived (ROMs differ on which comes first), adopt it
+                    // instead of pressing twice - one physical click must be
+                    // ONE X press.
+                    if (mouseExtraButton == mouseHeldButton) mouseExtraButton = 0
+                    else desktop?.injectClick(x, y, mouseHeldButton, press = true)
                     val imm = context.getSystemService(
                         android.view.inputmethod.InputMethodManager::class.java)
                     imm?.showSoftInput(this, android.view.inputmethod.InputMethodManager.SHOW_IMPLICIT)
@@ -837,16 +892,18 @@ class DesktopView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attrs) 
                 return true
             }
             MotionEvent.ACTION_MOVE -> {
+                noteMouseActive()
                 if (mouseOverlayDown || frameless || mouseHeldButton == 0) return true
                 val now = System.currentTimeMillis()
                 if (now - lastMouseMotionTs >= 33) {   // <=30 motion events/s
                     lastMouseMotionTs = now
-                    val (x, y) = mapToX(e.x, e.y, markCursor = false)
+                    val (x, y) = mapToX(e.x, e.y)
                     desktop?.injectMotion(x, y)
                 }
                 return true
             }
             MotionEvent.ACTION_UP -> {
+                noteMouseActive()
                 if (mouseOverlayDown) { mouseOverlayDown = false; return true }
                 releaseMouseButtons(e)
                 return true
@@ -862,21 +919,46 @@ class DesktopView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attrs) 
 
     /** Release everything the mouse path pressed, at the lift point. A button
      *  left down in the server wedges every later click (v0.2.79), so every
-     *  exit - UP, CANCEL, even a new DOWN - goes through here. */
+     *  exit - UP, CANCEL, even a new DOWN - goes through here.
+     *  v0.2.86: when the DOWN path adopted a BUTTON_PRESS (extra == held)
+     *  there is only ONE press in the server, so only ONE release is sent. */
     private fun releaseMouseButtons(e: MotionEvent) {
         if (!frameless && (mouseHeldButton != 0 || mouseExtraButton != 0)) {
-            val (x, y) = mapToX(e.x, e.y, markCursor = false)
-            if (mouseExtraButton != 0) {
-                desktop?.injectClick(x, y, mouseExtraButton, press = false)
-                mouseExtraButton = 0
-            }
-            if (mouseHeldButton != 0) {
-                desktop?.injectClick(x, y, mouseHeldButton, press = false)
-                mouseHeldButton = 0
-            }
+            val (x, y) = mapToX(e.x, e.y)
+            val held = mouseHeldButton; val extra = mouseExtraButton
+            mouseExtraButton = 0; mouseHeldButton = 0
+            if (extra != 0) desktop?.injectClick(x, y, extra, press = false)
+            if (held != 0 && held != extra) desktop?.injectClick(x, y, held, press = false)
         } else {
             mouseExtraButton = 0; mouseHeldButton = 0
         }
+    }
+
+    /**
+     * v0.2.86 FIX ("the desktop is not interactable"): event-less release of
+     * whatever the mouse path holds, at the last known X pointer position.
+     * The gesture stream can stop belonging to the mouse path WITHOUT an
+     * UP/CANCEL ever reaching it:
+     *   - a finger joins mid-press (pointerCount becomes 2, the intercept in
+     *     onTouchEvent no longer matches, and the finger state machine - which
+     *     knows nothing of mouseHeldButton - owns the rest of the stream);
+     *   - a ROM reclassifies the lift (toolType/source flicker between DOWN
+     *     and UP sends the UP down the finger path);
+     *   - the window loses focus or the view detaches mid-press.
+     * In every one of those, button 1 stayed DOWN in the X server and the
+     * server then swallowed every later click - the exact v0.2.78/79
+     * click-swallow signature, which is why the field read "desktop not
+     * interactable" with a healthy capture pipe. Called from all of the above
+     * exits; a no-op when nothing is held.
+     */
+    private fun releaseMouseButtonsIfHeld() {
+        if (mouseHeldButton == 0 && mouseExtraButton == 0) return
+        val held = mouseHeldButton; val extra = mouseExtraButton
+        mouseHeldButton = 0; mouseExtraButton = 0; mouseOverlayDown = false
+        if (frameless || cursorX < 0f || cursorY < 0f) return
+        val x = cursorX.toInt(); val y = cursorY.toInt()
+        if (extra != 0) desktop?.injectClick(x, y, extra, press = false)
+        if (held != 0 && held != extra) desktop?.injectClick(x, y, held, press = false)
     }
 
     // ------------------------- gestures -------------------------
@@ -997,6 +1079,22 @@ class DesktopView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attrs) 
         removeCallbacks(fadeTick)
         removeCallbacks(hoverTrailRunnable)
         hoverTrailPosted = false
+        // v0.2.86: the DesktopService singleton OUTLIVES this view; a mouse
+        // button still held at detach would stay down in the X server and
+        // swallow the next session's clicks.
+        releaseMouseButtonsIfHeld()
+    }
+
+    /**
+     * v0.2.86: losing window focus mid-press (task switch, notification
+     * shade, screen off, an activity on top) can end the event stream
+     * without an UP or CANCEL ever reaching this view - the mouse path would
+     * keep its button down in the server forever. Same rule the finger path
+     * already applies on CANCEL: when the window goes away, let go.
+     */
+    override fun onWindowFocusChanged(hasWindowFocus: Boolean) {
+        super.onWindowFocusChanged(hasWindowFocus)
+        if (!hasWindowFocus) releaseMouseButtonsIfHeld()
     }
 
     private fun dp(v: Float) =
@@ -1032,6 +1130,11 @@ class DesktopView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attrs) 
                 // cursor a finger has, so un-hide it (the system draws one for
                 // mice, never for fingers).
                 realMouseCursor = false
+                // v0.2.86: if a mouse gesture was mid-press when this finger
+                // landed (its UP went elsewhere or never came), its button is
+                // still down in the server and would swallow this whole
+                // gesture. Release before starting finger state.
+                releaseMouseButtonsIfHeld()
                 // v0.2.61: the intro card is dismissed by the first touch, so
                 // it can never sit between the user and the desktop.
                 dismissIntroCard()
@@ -1075,6 +1178,10 @@ class DesktopView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attrs) 
                 // a pan/zoom, and button 1 must not stay down through it.
                 removeCallbacks(dtHoldRunnable)
                 releaseLeftDrag(event)
+                // v0.2.86: ...and same for a MOUSE press in progress: the
+                // stream just became multi-pointer, the onTouchEvent intercept
+                // no longer matches, and the mouse path will never see an UP.
+                releaseMouseButtonsIfHeld()
                 twoFingerDownTs = System.currentTimeMillis()
                 twoFingerMoved = false
                 scrollAccumY = 0f; scrollAccumX = 0f
@@ -1179,6 +1286,11 @@ class DesktopView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attrs) 
             MotionEvent.ACTION_UP -> {
                 removeCallbacks(longPressRunnable)
                 removeCallbacks(dtHoldRunnable)
+                // v0.2.86: classification flicker guard - if the DOWN of THIS
+                // gesture went to the mouse path (toolType/source said mouse)
+                // but its UP arrived classified as finger, the mouse path
+                // still holds the button. Release it here; a no-op otherwise.
+                releaseMouseButtonsIfHeld()
                 if (rightHeld) {
                     releaseRightButton(event)
                     releaseLeftDrag(event)
@@ -1241,6 +1353,8 @@ class DesktopView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attrs) 
                 // v0.2.79: a cancelled gesture (parent stole the touch, screen
                 // off, palm rejection) still has to let go of button 1.
                 releaseLeftDrag(event)
+                // v0.2.86: ...and of anything the mouse path holds.
+                releaseMouseButtonsIfHeld()
                 overlayDown = false
                 dragging = false; panning = false
                 return true
@@ -1489,6 +1603,13 @@ class DesktopView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attrs) 
         // v0.2.85: mouse hover injection budget - at most ~30 X motions per
         // second, with a trailing flush so the final position always lands.
         const val HOVER_MIN_INTERVAL_MS = 33L
+        // v0.2.86: synthetic-cursor suppression EXPIRES this long after the
+        // last real mouse/trackpad event. Long enough that an active system
+        // cursor is never doubled by ours (the v0.2.85 field complaint);
+        // short enough that an idle, disconnected, or merely misclassified
+        // pointer can never leave the pane permanently cursor-less (the
+        // v0.2.86 "no virtual mouse" complaint).
+        const val REAL_MOUSE_GRACE_MS = 2_500L
         // v0.2.79 double-tap-and-hold: the window in which a second tap counts,
         // how far it may wander, and how long the hold must last before it means
         // "grab" rather than "double-click". DT_HOLD_MS sits well under

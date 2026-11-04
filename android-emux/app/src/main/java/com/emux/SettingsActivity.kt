@@ -42,6 +42,55 @@ private fun qualityPrediction(ctx: android.content.Context): String {
 
 class SettingsActivity : AppCompatActivity() {
 
+    companion object {
+        /**
+         * v0.1.5: an explicit container id - android.R.id.content can collide
+         * with restored fragments. v0.2.86: promoted to a constant so the
+         * fragments themselves can re-target it when a tier fails at BIND
+         * time (see [degradeFromBind]).
+         */
+        const val CONTAINER_ID = 0x5E000001
+
+        /**
+         * v0.2.86 SETTINGS-CRASH FIX (field: "when I enter settings it
+         * crashes"). The v0.2.82 post-mortem proved the failure mode the
+         * activity-level try/catch CANNOT cover: on this androidx version
+         * PreferenceFragmentCompat.onCreatePreferences runs during
+         * dispatchActivityCreated from onStart - AFTER onCreate's guarded
+         * commitNow returned - so any Throwable thrown while the preferences
+         * bind escapes every tier switch and kills the process. Worse, that
+         * death left a fresh crash report, and MainActivity's degraded
+         * startup branch then died in onResume (fixed there with the
+         * ::b.isInitialized guard) - one settings crash became a permanent
+         * launch loop. Tier failures at bind time are now caught INSIDE the
+         * fragments and degrade by posting to the decor view (outside the
+         * fragment dispatch, where transactions are legal again):
+         * XML tier -> CodePrefs -> plain-widget last resort. Opening
+         * Settings can now never crash, which is what the tiers always
+         * claimed.
+         */
+        internal fun degradeFromBind(from: PreferenceFragmentCompat, cause: Throwable) {
+            com.emux.EmuXLog.e("settings tier failed at bind time", cause)
+            runCatching {
+                val act = from.activity as? SettingsActivity ?: return@runCatching
+                act.window.decorView.post {
+                    if (act.isFinishing || act.isDestroyed) return@post
+                    if (from is Prefs) {
+                        // XML tier died on the device: swap in the programmatic
+                        // screen. If the swap itself fails, fall to last resort.
+                        runCatching {
+                            act.supportFragmentManager.beginTransaction()
+                                .replace(CONTAINER_ID, CodePrefs())
+                                .commitNow()
+                        }.onFailure { act.renderLastResort(cause) }
+                    } else {
+                        act.renderLastResort(cause)
+                    }
+                }
+            }
+        }
+    }
+
     override fun attachBaseContext(newBase: Context) {
         try {
             super.attachBaseContext(newBase)
@@ -76,7 +125,7 @@ class SettingsActivity : AppCompatActivity() {
         //     entirely in code if XML inflation fails for any reason.
         setTheme(R.style.EmuX_Prefs)
         super.onCreate(savedInstanceState)
-        val containerId = 0x5E000001
+        val containerId = CONTAINER_ID
         setContentView(android.widget.FrameLayout(this).apply {
             id = containerId
             setBackgroundColor(0xFF101216.toInt())
@@ -104,8 +153,19 @@ class SettingsActivity : AppCompatActivity() {
         }
         // Absolute last resort: PreferenceFragmentCompat itself needs a valid
         // preferenceTheme; if even that resolution fails on some ROM, render the
-        // four settings with plain widgets — opening Settings can NEVER crash now.
+        // settings with plain widgets — opening Settings can NEVER crash now.
+        // v0.2.86: extracted into renderLastResort() so a tier that fails at
+        // BIND time (outside this method - see degradeFromBind) can fall to the
+        // exact same screen instead of killing the process.
         if (err != null && findFragment(containerId) == null) {
+            renderLastResort(err)
+        }
+    }
+
+    /** v0.2.86: the plain-widget settings screen. Never throws, never needs a
+     *  preferenceTheme, reads every value straight from the default prefs. */
+    internal fun renderLastResort(err: Throwable?) {
+        runCatching {
             setContentView(android.widget.ScrollView(this).apply {
                 addView(android.widget.LinearLayout(this@SettingsActivity).apply {
                     orientation = android.widget.LinearLayout.VERTICAL
@@ -135,6 +195,14 @@ class SettingsActivity : AppCompatActivity() {
                         text = "\n(fallback view — detail error: ${err?.javaClass?.name}: ${err?.message})"
                         setTextColor(0xFF8A93A0.toInt()); setTextIsSelectable(true)
                     })
+                    // v0.2.86: a bind-time degradation lands here with the
+                    // fragment container still attached to the old content;
+                    // setContentView replaced it, so offer the one action that
+                    // always helps - retry the normal tiers once.
+                    addView(android.widget.Button(this@SettingsActivity).apply {
+                        text = "Retry settings"
+                        setOnClickListener { recreate() }
+                    })
                 })
             })
         }
@@ -144,6 +212,10 @@ class SettingsActivity : AppCompatActivity() {
 
     class Prefs : PreferenceFragmentCompat() {
         override fun onCreatePreferences(savedInstanceState: Bundle?, rootKey: String?) {
+            // v0.2.86: this body can run during the activity's onStart dispatch
+            // (outside every guard onCreate owns - see degradeFromBind), so it
+            // must not be able to throw. Failure degrades to CodePrefs.
+            try {
             setPreferencesFromResource(R.xml.preferences, rootKey)
             // v0.1.53: manual dpkg/apt repair (same pass as app-start hygiene).
             findPreference<androidx.preference.Preference>("repair_apt")
@@ -165,18 +237,25 @@ class SettingsActivity : AppCompatActivity() {
                 ?.setOnPreferenceClickListener {
                     com.emux.x11.DesktopService.restartDesktopRequested = true
                     android.widget.Toast.makeText(requireContext().applicationContext,
-                        "Restarting the desktop\u2026 (open windows will close)",
-                        android.widget.Toast.LENGTH_LONG).show()
+                        "Restarting the desktop\u2026 (open windows will close)", android.widget.Toast.LENGTH_LONG).show()
                     activity?.onBackPressedDispatcher?.onBackPressed()
                     true
                 }
+            } catch (t: Throwable) {
+                SettingsActivity.degradeFromBind(this, t)
+            }
         }
     }
 
-    /** Same four settings, built programmatically — cannot fail on resources. */
+    /** Same settings, built programmatically — cannot fail on resources. */
     class CodePrefs : PreferenceFragmentCompat() {
         override fun onCreatePreferences(savedInstanceState: Bundle?, rootKey: String?) {
             val ctx = requireContext()
+            // v0.2.86: bind-time guard, same reasoning as Prefs - and this tier
+            // is the one the field HUAWEI actually runs (the XML tier throws
+            // there first), so a landmine in here is the "entering settings
+            // crashes" report. Degrades to the plain-widget last resort.
+            try {
             val screen = androidx.preference.PreferenceManager(ctx)
                 .createPreferenceScreen(ctx)
             // v0.1.47: distro selector (mirrors res/xml/preferences.xml)
@@ -309,6 +388,13 @@ class SettingsActivity : AppCompatActivity() {
                     ?: com.emux.core.BootstrapManager.MIRROR
             })
             preferenceScreen = screen
+            } catch (t: Throwable) {
+                // bindPreferences() tolerates a null preference screen, so no
+                // cleanup is needed here - just never let the throw escape the
+                // fragment dispatch (that is the process death the v0.2.82
+                // report described).
+                SettingsActivity.degradeFromBind(this, t)
+            }
         }
     }
 }

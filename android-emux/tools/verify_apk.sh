@@ -202,7 +202,15 @@ for sym in ('injectScroll','injectKeysymCombo','maybeShowIntro','initDamageTrack
             # two-axis service entry, the direct mouse gesture path and its
             # source check, plus the natural-scroll pref key string.
             'fakeScrollBurst','injectScrollPair','onMouseTouchEvent','isMouseInput',
-            'mouse_natural_scroll'):
+            'mouse_natural_scroll',
+            # v0.2.86: the settings/crash-loop hardening (bind-time tier
+            # degradation + the plain-widget last resort as a named method) and
+            # the mouse-path robustness set (event-less release of held buttons,
+            # expiring synthetic-cursor suppression). The onResume
+            # ::b.isInitialized guard inlines to bytecode and has no symbol;
+            # these four are the named half of the same fix round.
+            'degradeFromBind','renderLastResort','releaseMouseButtonsIfHeld',
+            'noteMouseActive'):
     hit=any(sym.encode() in b for b in blobs)
     out(hit,f"dex contains {sym}",
         "" if hit else "not found in any classes*.dex - the APK predates v0.2.60/v0.2.61")

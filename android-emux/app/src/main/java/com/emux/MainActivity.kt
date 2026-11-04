@@ -511,6 +511,7 @@ class MainActivity : AppCompatActivity() {
      *  frame has arrived it shows the diagnostic HISTORY (selfcheck,
      *  xvfb.log, repair/core-install results, session tails). */
     private fun updateDesktopStatus() {
+        if (!::b.isInitialized) return   // v0.2.86: degraded-startup branches have no desktopStatus view to update
         val d = desktop
         b.desktopStatus.text = when (d.state.value) {
             com.emux.x11.DesktopService.State.IDLE -> ""
@@ -1102,6 +1103,22 @@ class MainActivity : AppCompatActivity() {
     // -------------------------------------------------------- power lifecycle
     override fun onResume() {
         super.onResume()
+        // v0.2.86 CRASH-LOOP FIX (field HUAWEI MRDI-W09, API 31: "entering
+        // settings crashes" + the pasted report below). onCreate has two
+        // DEGRADED branches - the v0.2.62 prior-crash report view and the
+        // v0.1.3 startup-failure screen - that setContentView their own
+        // code-built UI and return WITHOUT ever running doOnCreate, so `b`
+        // (the view binding) is never initialized. onResume then dereferenced
+        // it unconditionally:
+        //   kotlin.UninitializedPropertyAccessException: lateinit property b
+        //     has not been initialized at MainActivity.onResume(MainActivity.kt:1106)
+        // That throw wrote a NEW crash report, which the NEXT launch consumed
+        // into the same degraded branch - a self-sustaining loop that made the
+        // app unopenable: the report screen (and its "Try starting EmuX
+        // anyway" escape hatch) died on resume before it could be read or
+        // tapped. Every lifecycle entry point that touches `b` must tolerate
+        // the degraded branches; this guard is the one the field report names.
+        if (!::b.isInitialized) return
         desktop.foreground = true
         b.termContainer.findViewWithTag<VtTerminalView>("term")?.requestFocus()
         // v0.2.79: Settings -> "Restart desktop now" sets this flag instead of
@@ -1128,6 +1145,7 @@ class MainActivity : AppCompatActivity() {
      * Xvfb at the OLD geometry and the setting would silently do nothing.
      */
     private fun restartDesktopNow() {
+        if (!::b.isInitialized) return   // v0.2.86: belt-and-braces - only reachable past onResume's guard
         desktop.stop()
         b.desktopStatus.text = getString(R.string.x_starting)
         lifecycleScope.launch {

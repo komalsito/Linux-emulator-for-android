@@ -137,4 +137,61 @@ class SettingsLaunchTest {
         btn?.performClick()          // "Install Linux": must not throw synchronously
         shadowOf(android.os.Looper.getMainLooper()).idle()
     }
+
+    /**
+     * v0.2.86 regression (field HUAWEI MRDI-W09, API 31 - "entering settings
+     * crashes", then the app never opened again): onCreate's degraded branches
+     * (the v0.2.62 prior-crash report view and the v0.1.3 startup-failure
+     * screen) setContentView their own code-built UI and return WITHOUT ever
+     * running doOnCreate, so the lateinit view binding `b` stays
+     * uninitialized. onResume dereferenced it unconditionally:
+     *
+     *   kotlin.UninitializedPropertyAccessException: lateinit property b has
+     *     not been initialized at MainActivity.onResume(MainActivity.kt:1106)
+     *
+     * That throw wrote a NEW crash report, which the next launch consumed into
+     * the same degraded branch - a self-sustaining loop that made one settings
+     * crash permanent ("EmuX keeps stopping" on every launch, escape hatch
+     * unreachable). setup() drives create→start→resume; with a fresh report on
+     * disk the resume must survive and the report screen must be showing.
+     */
+    @Test
+    fun priorCrashReportDoesNotCrashLoopOnResume() {
+        val app = org.robolectric.RuntimeEnvironment.getApplication()
+        // CrashReport.NAME is private; the on-disk contract is this exact file
+        // in filesDir, written by the process-wide uncaught handler.
+        val report = java.io.File(app.filesDir, "last_crash.txt")
+        report.parentFile?.mkdirs()
+        report.writeText(
+            "EmuX crash report\napp version : test\n\njava.lang.RuntimeException: synthetic\n")
+        check(System.currentTimeMillis() - report.lastModified() < 30 * 60 * 1000) {
+            "test clock: the report must be inside CrashReport's freshness window"
+        }
+
+        val activity = Robolectric.buildActivity(MainActivity::class.java).setup()
+        shadowOf(android.os.Looper.getMainLooper()).idle()
+
+        // Surviving setup() IS the regression assertion (pre-fix this threw
+        // UninitializedPropertyAccessException out of onResume). Additionally,
+        // the degraded screen - not the normal UI - must be what the user sees,
+        // and its escape hatch must be reachable.
+        val decor = activity.get().window.decorView
+        var sawReport = false; var sawEscape = false
+        fun walk(v: View) {
+            if (v is android.widget.TextView &&
+                v.text?.contains("EmuX crashed on the previous launch") == true) sawReport = true
+            if (v is android.widget.Button &&
+                v.text?.contains("Try starting EmuX anyway") == true) sawEscape = true
+            if (v is android.view.ViewGroup)
+                for (i in 0 until v.childCount) walk(v.getChildAt(i))
+        }
+        walk(decor)
+        check(sawReport) { "prior-crash launch did not render the crash report screen" }
+        check(sawEscape) { "crash report screen lost its 'Try starting anyway' escape hatch" }
+        // The normal UI's binding must NOT have been inflated on this branch -
+        // that is the invariant onResume now respects.
+        check(activity.get().findViewById<View>(R.id.btnInstall) == null) {
+            "degraded branch unexpectedly inflated the normal layout"
+        }
+    }
 }
