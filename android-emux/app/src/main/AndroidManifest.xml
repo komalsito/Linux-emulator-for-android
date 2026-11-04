@@ -103,11 +103,24 @@
             android:exported="false"
             android:theme="@style/EmuX.Prefs" />
 
-        <!-- The single process that hosts PTY sessions — mirrors Termux's design -->
+        <!-- The single process that hosts PTY sessions — mirrors Termux's design.
+             FIX (from the v0.2.85 field crash-report log tail, API 31):
+             this element declared ONLY specialUse (0x40000000), but
+             safeStartForeground() requests DATA_SYNC (type=1) on API 29-33, so
+             ActiveServices refused it on every launch:
+               "startForeground refused type=1 (IllegalArgumentException:
+                foregroundServiceType 0x00000001 is not a subset of
+                foregroundServiceType attribute 0x40000000 in service element)"
+             and each launch silently degraded to a TYPELESS foreground service
+             ("startForeground OK with type=0"). The FOREGROUND_SERVICE_DATA_SYNC
+             permission above has promised this fallback since it was added;
+             declaring the TYPE alongside specialUse is what makes the fallback
+             actually legal on API 29-33. API 34+ is unchanged (SPECIAL_USE is
+             still the first type requested; the specialUse property stays). -->
         <service
             android:name=".terminal.TerminalService"
             android:exported="false"
-            android:foregroundServiceType="specialUse">
+            android:foregroundServiceType="specialUse|dataSync">
             <property
                 android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
                 android:value="Interactive Linux shell &amp; X11 desktop sessions kept alive while app is backgrounded" />
