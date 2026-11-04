@@ -33,6 +33,10 @@ android {
         // is starting" card with the live diagnostic tail while frames
         // stream black (first-boot apt churn), dismissed by any touch.
         // ENV_VERSION 78 re-seeds the guest script on existing installs.
+        // (3) Settings selector rows now carry explicit click listeners
+        // opening the framework dialog directly - the v0.2.87
+        // onDisplayPreferenceDialog override alone was still ripple-only on
+        // the field ROM.
         // v0.2.87 (vc187): host-side fixes only - (1) TerminalService's manifest
         // foregroundServiceType now also declares dataSync, making the fallback
         // the FOREGROUND_SERVICE_DATA_SYNC permission has always promised legal

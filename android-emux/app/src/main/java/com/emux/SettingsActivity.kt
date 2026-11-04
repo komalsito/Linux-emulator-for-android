@@ -128,6 +128,43 @@ class SettingsActivity : AppCompatActivity() {
          * preference types this helper does not know, so the caller can hand
          * them to the androidx default inside its own guard.
          */
+        /**
+         * v0.2.88 SETTINGS ROUND 2 (field: v0.2.87 selectors STILL ripple-only
+         * on HUAWEI MRDI-W09). The v0.2.87 fix intercepted
+         * onDisplayPreferenceDialog - but that callback only fires from
+         * androidx's onPreferenceTreeClick -> dispatch chain, and on this ROM
+         * that chain evidently never reaches it: the ripple plays (the row's
+         * performClick runs - the toggles prove it, TwoStatePreference flips
+         * inside performClick) yet neither androidx's DialogFragment nor the
+         * v0.2.87 framework AlertDialog appeared. So the dialog path is now
+         * attached DIRECTLY: an explicit OnPreferenceClickListener on every
+         * ListPreference / EditTextPreference, calling the same framework
+         * AlertDialog helper. With a click listener set, performClick calls
+         * ONLY the listener (the androidx dialog dispatch is skipped by
+         * design), so the selector no longer depends on any fragment
+         * callback surviving the ROM. Called from both tiers inside their
+         * existing bind guards; failures degrade exactly like v0.2.86/87.
+         */
+        internal fun attachFrameworkDialogDispatch(from: PreferenceFragmentCompat) {
+            runCatching {
+                val screen = from.preferenceScreen ?: return
+                val stack = ArrayDeque<androidx.preference.Preference>()
+                stack.addLast(screen as androidx.preference.Preference)
+                while (stack.isNotEmpty()) {
+                    val p = stack.removeLast()
+                    if (p is androidx.preference.PreferenceGroup) {
+                        for (i in 0 until p.preferenceCount) stack.addLast(p.getPreference(i))
+                    }
+                    if (p is androidx.preference.ListPreference ||
+                        p is androidx.preference.EditTextPreference) {
+                        p.setOnPreferenceClickListener { pref ->
+                            showPreferenceDialog(from, pref as androidx.preference.DialogPreference)
+                        }
+                    }
+                }
+            }
+        }
+
         internal fun showPreferenceDialog(
             from: PreferenceFragmentCompat,
             preference: androidx.preference.DialogPreference
@@ -135,6 +172,9 @@ class SettingsActivity : AppCompatActivity() {
             val isList = preference is androidx.preference.ListPreference
             val isText = preference is androidx.preference.EditTextPreference
             if (!isList && !isText) return false
+            // v0.2.88: field evidence - a log line that proves whether the
+            // framework dialog path ran at all on the next report.
+            com.emux.EmuXLog.i("selector: framework dialog path key=" + preference.key)
             val act = from.activity ?: return true   // detach race: swallow, never crash
             runCatching {
                 val builder = android.app.AlertDialog.Builder(
@@ -339,6 +379,9 @@ class SettingsActivity : AppCompatActivity() {
                     activity?.onBackPressedDispatcher?.onBackPressed()
                     true
                 }
+            // v0.2.88 SETTINGS ROUND 2: explicit selector dispatch - see
+            // attachFrameworkDialogDispatch.
+            attachFrameworkDialogDispatch(this)
             } catch (t: Throwable) {
                 SettingsActivity.degradeFromBind(this, t)
             }
@@ -504,6 +547,11 @@ class SettingsActivity : AppCompatActivity() {
                     ?: com.emux.core.BootstrapManager.MIRROR
             })
             preferenceScreen = screen
+            // v0.2.88 SETTINGS ROUND 2: same explicit-listener dispatch as the
+            // XML tier - this is the tier the field ROM runs, and the v0.2.87
+            // onDisplayPreferenceDialog override alone left its selectors
+            // ripple-only there.
+            attachFrameworkDialogDispatch(this)
             } catch (t: Throwable) {
                 // bindPreferences() tolerates a null preference screen, so no
                 // cleanup is needed here - just never let the throw escape the
