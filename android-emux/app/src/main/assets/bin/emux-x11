@@ -1758,7 +1758,29 @@ else
     # succeeds, every real grab times out silently, "grab retry #10...").
     # With the extension disabled xwd can only use plain XGetImage, which
     # needs no shm syscalls at all. Our only clients are xwd/openbox.
-    "$XVFB" :"$DN" -screen 0 "$RES" -listen tcp -ac -extension MIT-SHM "$@" >/tmp/xvfb.log 2>&1 &
+    # v0.2.84 FBDIR - THE ZERO-PROCESS FRAMEBUFFER MAILBOX. -fbdir makes
+    # Xvfb keep its screen in an mmap'ed file (XWD format, validated against
+    # a real Xvfb_screen0: header 160B + palette + w*h*2 pixel bytes) that
+    # the app reads DIRECTLY off the shared rootfs. The fallback capture
+    # chain loses its per-frame xwd | xwdtopnm | pnmtoplainpnm text
+    # pipeline (megabytes of ASCII through proot, per frame - the slowest
+    # thing on the device), its socket push and its file copy, all at once.
+    # Detected once per Xvfb binary; when unsupported the flag is simply
+    # omitted and the app falls back to the v0.2.75 mailbox ladder.
+    if [ -z "$FBDIR_CHECKED" ]; then
+      FBDIR_CHECKED=1
+      FBDIR_OPT=""
+      mkdir -p /tmp/emux_fbdir 2>/dev/null
+      if "$XVFB" -help 2>&1 | grep -q -- "-fbdir"; then
+        FBDIR_OPT="-fbdir /tmp/emux_fbdir"
+        echo "emux-x11: fbdir ON - framebuffer file /tmp/emux_fbdir/Xvfb_screen0" >&2
+      else
+        echo "emux-x11: fbdir unsupported by $XVFB - fallback keeps the xwd chain" >&2
+      fi
+    fi
+    # stale screen files from a previous attempt would paint a photograph
+    rm -f /tmp/emux_fbdir/Xvfb_screen* 2>/dev/null
+    "$XVFB" :"$DN" -screen 0 "$RES" -listen tcp -ac -extension MIT-SHM ${FBDIR_OPT:-} "$@" >/tmp/xvfb.log 2>&1 &
     XPID=$!
     XVFB_PID=$XPID; XVFB_PID_DN=$DN     # v0.2.78: ours to retire if it never serves
     i=0
@@ -2364,7 +2386,7 @@ if [ "$RC" != 0 ] && [ ! -e /tmp/emux_xvfb_restarted ]; then
   echo "emux-x11: Xvfb died rc=$RC - restarting once${NOSHEM:+ with $NOSHEM}" >&2
   [ -f /tmp/xvfb.log ] && mv -f /tmp/xvfb.log /tmp/xvfb.log.1 2>/dev/null
   kill_stale_x
-  "$XVFB" :"$DN" -screen 0 "$RES" -listen tcp -ac -extension MIT-SHM -nolisten unix $NOSHEM >/tmp/xvfb.log 2>&1 &
+  "$XVFB" :"$DN" -screen 0 "$RES" -listen tcp -ac -extension MIT-SHM -nolisten unix ${FBDIR_OPT:-} $NOSHEM >/tmp/xvfb.log 2>&1 &
   XPID=$!
   i=0
   while ! x_up && [ "$i" -lt 150 ]; do sleep 0.1; i=$((i+1)); done

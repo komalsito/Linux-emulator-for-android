@@ -378,7 +378,14 @@ class DesktopView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attrs) 
             // with a healthy input path. Age the badge: >8 s without a frame
             // is STALE, in red, ticking, and repainting itself.
             val ageMs = System.currentTimeMillis() - lastFrameMs
-            if (ageMs > 8_000) {
+            // v0.2.84: "no frames for 8 s" is only STALE when no capture
+            // source has PROVEN itself in that window either. With band-diff
+            // capture a quiet desktop sends no frames BY DESIGN while its
+            // grabs/reads keep succeeding - that is IDLE (green badge below),
+            // not dead (this red one). The field's "LIVE 0.0 fps" complaint
+            // and a false STALE are the same confusion from two sides.
+            val proofAge = desktop?.sourceProofAgeSec ?: -1L
+            if (ageMs > 8_000 && !(proofAge in 0..8)) {
                 val stale = Paint().apply { color = Color.argb(0xE0, 0xEF, 0x53, 0x50); textSize = sp(10f) }
                 canvas.drawText(
                     "STALE ${ageMs / 1000}s - no frames arriving (capture dead? respawning) " +
@@ -421,8 +428,18 @@ class DesktopView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attrs) 
                 }
                 val kb = d?.nativeKbPerS ?: -1L
                 val ms = d?.nativeGrabMs ?: -1L
-                var line = "LIVE %.1f fps  %s  %dKB/s  %dms/refresh".format(
-                    sweepFps, d?.captureGeometry ?: "?", kb, ms)
+                // v0.2.84 HONEST RATE: LIVE shows the measured update rate
+                // while updates flow; IDLE says nothing has CHANGED (which for
+                // a damage-driven, band-diffed pipeline is the success state,
+                // not a stall); cap~Nfps is the pipe's real full-frame
+                // capacity from the measured KB/s - the capture rate that
+                // never collapses to 0.0 because the desktop is quiet.
+                val head = if (ageMs > 2_000) "IDLE ${ageMs / 1000}s - nothing changing"
+                           else "LIVE %.1f fps".format(sweepFps)
+                val cap = d?.nativeCapacityFps ?: -1
+                var line = head + "  %s  %dKB/s".format(d?.captureGeometry ?: "?", kb) +
+                    (if (cap > 0) "  cap~%dfps".format(cap) else "") +
+                    "  %dms/refresh".format(ms)
                 // v0.2.80: when no sweep has completed, or one is stuck, say where
                 // it got to and why - the -1/-1 badge answered none of that.
                 if (d != null && (d.nativeMisses > 0 || ms <= 0)) {
@@ -446,6 +463,9 @@ class DesktopView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attrs) 
                 line += "  src=${d?.captureMode ?: "-"}"
                 
                 canvas.drawText(line, 16f, sp(16f), badge)
+                // v0.2.84: while IDLE, tick once a second so the readout stays
+                // true (frames are not arriving to invalidate us).
+                if (ageMs > 2_000) postInvalidateDelayed(1_000)
                 if (desktop?.captureQualityPending == true) {
                     val pend = Paint().apply { color = Color.argb(0xC0, 0xFF, 0xB7, 0x4D); textSize = sp(9f) }
                     // sp(28f) is the INPUT line, so this rides at the bottom of

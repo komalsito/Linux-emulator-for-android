@@ -172,6 +172,39 @@ class X11Client(
          *  DesktopService carries it, so nothing is lost by stopping here. */
         const val MAX_RECTS_PER_DRAIN = 256
 
+        /**
+         * v0.2.84: RGB565 little-endian value -> opaque ARGB8888, as ONE
+         * 64K-entry table. Public because DesktopService's band-diff painter
+         * converts ONLY the bands that actually changed (and the -fbdir
+         * mailbox files carry the same 565 format), so the conversion moved
+         * out of the grab and into the painter. 256 KB of heap, built once,
+         * and it makes the per-pixel work a single array load.
+         */
+        @JvmField
+        val RGB565_TO_ARGB: IntArray = buildRgb565Lut()
+
+        /**
+         * Explicit while-loop build, NOT `IntArray(65536) { ... }`: kotlinc
+         * 1.9.24 at -jvm-target 17 miscompiles the inlined array factory
+         * inside <clinit> — the loop counter lands in a local slot that is
+         * read before any store ("Unexpected read of missing local at index
+         * 2"), the class file fails verification, and d8 drops X11Client
+         * from the dex entirely. A plain function with a plain loop
+         * compiles to bytecode every tool agrees on. Same table, same math.
+         */
+        private fun buildRgb565Lut(): IntArray {
+            val lut = IntArray(65536)
+            var v = 0
+            while (v < 65536) {
+                lut[v] = -0x1000000 or
+                    (((v ushr 11) and 0x1F) * 255 / 31 shl 16) or
+                    (((v ushr 5) and 0x3F) * 255 / 63 shl 8) or
+                    ((v and 0x1F) * 255 / 31)
+                v++
+            }
+            return lut
+        }
+
         // v0.2.78: the button-delivery probe window. Small, and painted bright
         // green so that a field screenshot which happens to catch its ~1 s
         // lifetime is self-explanatory rather than mysterious.
@@ -1431,6 +1464,89 @@ class X11Client(
         }
         lastGrabError = ""
         return out
+    }
+
+    /**
+     * v0.2.84: the same grab as [grabRegionArgb], but the payload stays RAW
+     * RGB565 little-endian — byte-for-byte the format of the RGB_565 bitmap
+     * AND of Xvfb's -fbdir screen file. Zero conversion here: the caller
+     * (DesktopService's band-diff painter) compares the bytes against the
+     * previous frame and converts ONLY the 32-row bands that actually
+     * changed, so an idle healer sweep costs a grab plus a memcmp and
+     * uploads nothing, and a mailbox frame skips the screen entirely when
+     * the desktop did not change.
+     *
+     * @param out receives w*h*2 bytes, row-major, no stride padding.
+     * @return the number of valid bytes (w*h*2), or -1 on failure with the
+     *         reason in [lastGrabError] (same error contract as grabRegionArgb).
+     */
+    fun grabRegion565(
+        x: Int, y: Int, w: Int, h: Int, timeoutMs: Int, out: ByteArray,
+    ): Int {
+        if (rootWindow == 0 || w <= 0 || h <= 0) return -1
+        val n = w * h * 2
+        if (out.size < n) return -1
+        // 16-byte body / 5-unit request — the v0.2.83 wire fix, unchanged.
+        val req = ByteBuffer.allocate(16).order(order)
+        req.putInt(rootWindow)
+        req.putShort(x.toShort())
+        req.putShort(y.toShort())
+        req.putShort(w.toShort())
+        req.putShort(h.toShort())
+        req.putInt(-1)                  // plane-mask: all planes
+        lastXErr = ""; lastXErrCode = -1
+        val need = w * h * 4            // worst case is depth 24/32
+        var tb = tailBuf
+        if (tb == null || tb.size < need) { tb = ByteArray(need); tailBuf = tb }
+        val rep = requestReplyFull(OP_GET_IMAGE, 2, req.array(), timeoutMs, tb)
+        if (rep == null) {
+            lastGrabError = lastReadErr.ifBlank { lastXErr.ifBlank { "no-reply" } }
+            return -1
+        }
+        val r = rep.pkt
+        if (r[0].toInt() != PKT_REPLY) {
+            lastGrabError = "pkt=${r[0]} err=${r[1].toInt() and 0xFF}"
+            return -1
+        }
+        val replyDepth = r[1].toInt() and 0xFF
+        if (replyDepth != 16 && replyDepth != 24 && replyDepth != 32) {
+            lastGrabError = "depth=$replyDepth"
+            return -1
+        }
+        val bpp = if (replyDepth == 16) 2 else 4
+        val data = rep.tail
+        val have = rep.tailLen
+        if (data == null || have <= 0) { lastGrabError = "no-payload"; return -1 }
+        if (have < w * h * bpp) { lastGrabError = "short=$have"; return -1 }
+        val stride = have / h
+        if (stride < w * bpp) { lastGrabError = "stride=$stride"; return -1 }
+        if (bpp == 2 && stride == w * 2) {
+            System.arraycopy(data, 0, out, 0, n)     // the field-fast path: pure copy
+        } else {
+            // Strided 565, or a 24/32-bit server: repack to contiguous 565.
+            var src = 0
+            var dst = 0
+            for (row in 0 until h) {
+                if (bpp == 2) {
+                    System.arraycopy(data, src, out, dst, w * 2)
+                } else {
+                    var o = src
+                    for (cx in 0 until w) {
+                        val rr = data[o + 2].toInt() and 0xFF
+                        val gg = data[o + 1].toInt() and 0xFF
+                        val bb = data[o].toInt() and 0xFF
+                        val v = ((rr ushr 3) shl 11) or ((gg ushr 2) shl 5) or (bb ushr 3)
+                        out[dst + cx * 2] = (v and 0xFF).toByte()
+                        out[dst + cx * 2 + 1] = ((v ushr 8) and 0xFF).toByte()
+                        o += 4
+                    }
+                }
+                src += stride
+                dst += w * 2
+            }
+        }
+        lastGrabError = ""
+        return n
     }
 
     fun close() {

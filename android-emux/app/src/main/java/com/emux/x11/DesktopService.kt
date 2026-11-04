@@ -291,12 +291,46 @@ class DesktopService(
     @Volatile var nativeBandRows: Int = 0; private set
     @Volatile private var lastAnyFrameAtMs = 0L
 
-    /** True while native capture has delivered a frame in the last 15 s —
+    // ------------------------------------------------------------- v0.2.84
+    // PROOF vs PAINT. The band-diff painter (see diffUpload) makes "no frame
+    // delivered" a SUCCESS state: an idle desktop produces no changed bands,
+    // so nothing is uploaded and nativeFrames stays put. Every liveness gate
+    // that used frame delivery as its proof would then declare a perfectly
+    // healthy pipeline dead (and the badge showed "LIVE 0.0 fps" for what is
+    // really "nothing changed"). So the two notions are now separate:
+    //   nativeProofAtMs      - the last grab that SUCCEEDED (bytes crossed the
+    //                          wire, whatever the diff made of them);
+    //   lastSourceProofAtMs  - the same, for ANY capture source (native, fbdir,
+    //                          mailbox, socket) - the silence watchdog's clock;
+    //   lastAnyFrameAtMs     - the last frame that actually PAINTED new pixels.
+    @Volatile private var nativeProofAtMs = 0L
+    @Volatile private var lastSourceProofAtMs = 0L
+
+    /** Bands found byte-identical and skipped, since session start (telemetry). */
+    @Volatile var diffSkips: Long = 0; private set
+
+    /** Wall-clock ms of the last PAINTED update - the badge's idle detector. */
+    val lastFrameAtMs: Long get() = lastAnyFrameAtMs
+
+    /**
+     * What the pipe can actually carry, in full-screen frames per second,
+     * from the measured KB/s: the REAL capture rate - a ceiling that does not
+     * fall to zero when the desktop is idle. Badge shows `cap~Nfps`.
+     */
+    val nativeCapacityFps: Int get() {
+        val kb = nativeKbPerS
+        if (kb <= 0 || sessionW <= 0 || sessionH <= 0) return -1
+        return ((kb.toLong() * 1024L) / (sessionW.toLong() * sessionH * 2L)).toInt()
+    }
+
+    /** True while native capture's grab path has worked within the last 15 s —
      *  the guest publication file is then stale BY DESIGN and must not be
-     *  used for capage/plane-agreement/wedge decisions. */
+     *  used for capage/plane-agreement/wedge decisions.
+     *  v0.2.84: keyed on grab PROOF, not painted frames - an idle desktop
+     *  paints nothing by design and is still perfectly fresh. */
     private val nativeFresh: Boolean
-        get() = nativeFrameAtMs != 0L &&
-            System.currentTimeMillis() - nativeFrameAtMs < 15_000
+        get() = nativeProofAtMs != 0L &&
+            System.currentTimeMillis() - nativeProofAtMs < 15_000
 
     /**
      * Dedicated capture connection + GetImage loop. Runs until the session
@@ -363,17 +397,24 @@ class DesktopService(
                     var bandRows = 64
                     var refreshes = 0
                     var kbEwma = -1L          // v0.2.80: measured from real bands
-                    var bandBuf = IntArray(w * bandRows)
+                    // v0.2.84: sweep bands land as RAW RGB565 (grabRegion565)
+                    // and go through the band-diff painter - half the memory of
+                    // the old IntArray bandBuf, and unchanged rows are never
+                    // converted nor uploaded at all.
+                    var bandBytes = ByteArray(w * bandRows * 2)
                     fun setBands(r: Int) {
                         bandRows = r.coerceIn(4, h)
                         nativeBandRows = bandRows
-                        if (bandBuf.size < w * bandRows) bandBuf = IntArray(w * bandRows)
+                        if (bandBytes.size < w * bandRows * 2) bandBytes = ByteArray(w * bandRows * 2)
                     }
                     run {
                         val p0 = System.currentTimeMillis()
-                        val probe = runCatching { c.grabRegionArgb(0, 0, w, 16, 10_000, null) }.getOrNull()
+                        val probeBytes = ByteArray(w * 16 * 2)
+                        val probeN = runCatching { c.grabRegion565(0, 0, w, 16, 10_000, probeBytes) }.getOrDefault(-1)
                         val pms = (System.currentTimeMillis() - p0).coerceAtLeast(1)
-                        if (probe != null) {
+                        if (probeN > 0) {
+                            nativeProofAtMs = System.currentTimeMillis()
+                            lastSourceProofAtMs = nativeProofAtMs
                             nativeKbPerS = (w * 16 * 2) / pms
                             kbEwma = nativeKbPerS
                             setBands(((nativeKbPerS * 1024 * 6 / 5) / (w * 2)).toInt().coerceIn(8, h))
@@ -404,11 +445,12 @@ class DesktopService(
                     else noteInfo(
                         "native capture on :$displayNum: DAMAGE unavailable - full sweeps as before")
                     val partCap = (h / 2).coerceAtLeast(64)
-                    val partBuf = IntArray(w * partCap)
                     // v0.2.83: a band taller than this is grabbed in chunks, so
                     // even a full-screen damage burst paints progressively
                     // instead of vanishing behind one giant reply.
                     val chunkRows = minOf(partCap, 256)
+                    // v0.2.84: chunks land raw (565) for the band-diff painter.
+                    val partBytes = ByteArray(w * chunkRows * 2)
                     // v0.2.83 PERSISTENT DIRTY BANDS - the replacement for the
                     // v0.2.82 union rectangle. That design merged ALL damage
                     // since the last tick into ONE rect, and whenever the rect
@@ -449,6 +491,13 @@ class DesktopService(
                     // sweep, whose adaptive band sizing is the real healer for
                     // a degrading pipe.
                     var dmgMisses = 0
+                    // v0.2.84 ADAPTIVE HEALER: the diff made an all-unchanged
+                    // sweep almost free, but it still crosses the pipe. Stretch
+                    // the cadence while sweeps keep coming back clean (idle
+                    // desktop) and snap back the moment anything uploads.
+                    val HEALER_TICKS = 150
+                    var healerEvery = HEALER_TICKS
+                    var cleanHealers = 0
                     // v0.2.82: start one tick below the healer so the FIRST loop
                     // iteration is a full sweep. Damage events only report
                     // changes AFTER we subscribe; without this the pane sat on
@@ -463,14 +512,14 @@ class DesktopService(
                         // guest mailbox pipelines - co-running them is CPU
                         // contention against the very grabs that make the
                         // desktop feel fast (see retireMailPipelines).
-                        if (nativeFrames >= 8L && (fbMailSession != null || captureSession != null))
+                        if (nativeFresh && (fbMailSession != null || captureSession != null))
                             retireMailPipelines()
                         if (dmgOk) {
                             ticks++
                             // ~every 5 s a full sweep anyway: the healer, for
                             // anything DAMAGE cannot see (server-side sprite
                             // draws, a missed event, our own bookkeeping).
-                            if (ticks % 150 != 0) {
+                            if (ticks % healerEvery != 0) {
                                 // Block for the first rect ONLY when nothing is
                                 // pending (the idle path costs one parked read,
                                 // never a poll); when bands are waiting from the
@@ -485,7 +534,22 @@ class DesktopService(
                                         (r[1] + r[3]).coerceIn(0, h))
                                 }
                                 if (dirtyBands.isEmpty()) continue   // the drain already waited
-                                dirtyBands.sortBy { it[1] }
+                                // v0.2.84 DRAG PRIORITY: while a button is
+                                // down, the band under the pointer goes FIRST -
+                                // the user's eye is there, and on a
+                                // budget-limited tick the region being watched
+                                // must never be the one left pending. Other
+                                // ticks keep top-down order.
+                                if (ptrDown && System.currentTimeMillis() - ptrAtMs < 1_500) {
+                                    val py = ptrY
+                                    dirtyBands.sortBy { b ->
+                                        when {
+                                            py < b[1] -> b[1] - py
+                                            py >= b[3] -> py - b[3] + 1
+                                            else -> 0
+                                        }
+                                    }
+                                } else dirtyBands.sortBy { it[1] }
                                 var painted = false
                                 var failed = false
                                 var bands = 0
@@ -504,20 +568,29 @@ class DesktopService(
                                     while (by < b[3]) {
                                         val rows = minOf(chunkRows, b[3] - by)
                                         val gt = System.currentTimeMillis()
-                                        val px = runCatching {
-                                            c.grabRegionArgb(b[0], by, bw, rows, bandTimeout, partBuf)
-                                        }.getOrNull()
-                                        if (px == null) {
+                                        val n = runCatching {
+                                            c.grabRegion565(b[0], by, bw, rows, bandTimeout, partBytes)
+                                        }.getOrDefault(-1)
+                                        if (n <= 0) {
                                             addDirty(b[0], by, b[0] + bw, b[3])  // keep the rest pending
                                             failed = true
                                             break
                                         }
-                                        synchronized(frameLock) {
-                                            currentFrame?.setPixels(px, 0, bw, b[0], by, bw, rows)
+                                        nativeProofAtMs = System.currentTimeMillis()
+                                        lastSourceProofAtMs = nativeProofAtMs
+                                        // v0.2.84: upload only the 32-row
+                                        // slices that actually differ from the
+                                        // mirror. DAMAGE says the server
+                                        // touched these rows; the diff says
+                                        // which of them the USER will see
+                                        // change (a cursor blink back to the
+                                        // same pixels, an expose of unchanged
+                                        // wallpaper - all free now).
+                                        if (diffUpload(b[0], by, bw, rows, partBytes, 0, w, h) > 0) {
+                                            frameId++
+                                            onUiInvalidated()      // progressive paint per chunk
+                                            painted = true
                                         }
-                                        frameId++
-                                        onUiInvalidated()      // progressive paint per chunk
-                                        painted = true
                                         val bms = (System.currentTimeMillis() - gt).coerceAtLeast(1)
                                         val bkb = (bw.toLong() * rows * 2) / bms
                                         kbEwma = if (kbEwma <= 0) bkb else (kbEwma * 3 + bkb) / 4
@@ -547,6 +620,7 @@ class DesktopService(
                                         capturePubAtMs = nativeFrameAtMs
                                         nativeMisses = 0; nativeLastErr = ""
                                         nativeBandY = h
+                                        healerEvery = HEALER_TICKS; cleanHealers = 0
                                         if (state.value == State.AWAITING_FRAMES)
                                             state.value = State.CONNECTED
                                         // damage mode paces at 8 ms, not the
@@ -576,6 +650,7 @@ class DesktopService(
                         // ONLY frame source and must run to completion.
                         val sweepDeadline = if (dmgOk) t0 + 8_000L else Long.MAX_VALUE
                         var capped = false
+                        var sweepUploaded = 0
                         while (y < h) {
                             if (System.currentTimeMillis() > sweepDeadline) {
                                 capped = true
@@ -584,8 +659,10 @@ class DesktopService(
                             }
                             val rows = minOf(bandRows, h - y)
                             val tb = System.currentTimeMillis()
-                            val b = runCatching { c.grabRegionArgb(0, y, w, rows, bandTimeout, bandBuf) }.getOrNull()
-                            if (b == null) { ok = false; break }
+                            val n = runCatching { c.grabRegion565(0, y, w, rows, bandTimeout, bandBytes) }.getOrDefault(-1)
+                            if (n <= 0) { ok = false; break }
+                            nativeProofAtMs = System.currentTimeMillis()
+                            lastSourceProofAtMs = nativeProofAtMs
                             // v0.2.80: KB/s from the bands that ACTUALLY land, so
                             // the badge can never show -1 on a live session (the
                             // field screenshot did: probe failed, no sweep ever
@@ -594,12 +671,16 @@ class DesktopService(
                             val bkb = (w * rows * 2) / bms
                             kbEwma = if (kbEwma <= 0) bkb else (kbEwma * 3 + bkb) / 4
                             if (nativeKbPerS <= 0) nativeKbPerS = kbEwma
-                            synchronized(frameLock) {
-                                currentFrame?.setPixels(b, 0, w, 0, y, w, rows)
+                            // v0.2.84: the healer sweep is a DIFF now - an idle
+                            // desktop costs the grab plus a memcmp per band and
+                            // uploads nothing, invalidates nothing, and does not
+                            // dent the LIVE fps reading with fake frames.
+                            if (diffUpload(0, y, w, rows, bandBytes, 0, w, h) > 0) {
+                                sweepUploaded++
+                                frameId++
+                                lastAnyFrameAtMs = System.currentTimeMillis()
+                                onUiInvalidated()          // progressive paint per band
                             }
-                            frameId++
-                            lastAnyFrameAtMs = System.currentTimeMillis()
-                            onUiInvalidated()          // progressive paint per band
                             y += rows
                         }
                         if (!ok) {
@@ -646,14 +727,38 @@ class DesktopService(
                             else bandRows * 2
                             if (target > bandRows) setBands(minOf(target, bandRows * 2))
                         }
-                        nativeFrames++
-                        nativeFrameAtMs = System.currentTimeMillis()
                         captureDisplay = displayNum
-                        capturePubAtMs = nativeFrameAtMs   // capage badge follows the real source
-                        if (state.value == State.AWAITING_FRAMES) state.value = State.CONNECTED
                         refreshes++
+                        // v0.2.84 PROOF vs PAINT: a completed sweep proves the
+                        // pipeline even when the diff found nothing to upload;
+                        // it counts as a FRAME only when pixels changed.
+                        // Edge case: an all-black first screen diffs clean
+                        // against the zeroed mirror, yet the pane (a fresh
+                        // black bitmap) is already correct and the frameless
+                        // deadline needs frameId to move - promote like a
+                        // painted sweep.
+                        if (sweepUploaded == 0 && refreshes == 1) {
+                            frameId++
+                            lastAnyFrameAtMs = System.currentTimeMillis()
+                            onUiInvalidated()
+                            sweepUploaded = 1
+                        }
+                        if (sweepUploaded > 0) {
+                            nativeFrames++
+                            nativeFrameAtMs = System.currentTimeMillis()
+                            capturePubAtMs = nativeFrameAtMs   // capage badge follows the real source
+                            if (state.value == State.AWAITING_FRAMES) state.value = State.CONNECTED
+                            healerEvery = HEALER_TICKS
+                            cleanHealers = 0
+                        } else if (!capped) {
+                            // idle desktop: stretch the healer towards ~4x while
+                            // sweeps keep coming back byte-clean.
+                            cleanHealers++
+                            if (cleanHealers >= 2)
+                                healerEvery = minOf(healerEvery * 2, HEALER_TICKS * 4)
+                        }
                         if (refreshes % 25 == 0) {
-                            noteInfo("native capture: ${nativeGrabMs}ms/refresh, band ${bandRows}r, ~${nativeKbPerS}KB/s, frames=$nativeFrames")
+                            noteInfo("native capture: ${nativeGrabMs}ms/refresh, band ${bandRows}r, ~${nativeKbPerS}KB/s, frames=$nativeFrames, diff-skips=$diffSkips, healer=${healerEvery}t")
                             // v0.2.80: remember the pipe so Settings can predict
                             // fps per quality option, and the next start can be
                             // sized from evidence instead of a default.
@@ -817,6 +922,9 @@ class DesktopService(
         nativeGrabMs = -1L; nativeErr = ""; lastAnyFrameAtMs = 0L
         nativeKbPerS = -1L; nativeBandRows = 0
         nativeDamageOn = false
+        // v0.2.84: proof clocks + the band-diff mirror die with the session.
+        nativeProofAtMs = 0L; lastSourceProofAtMs = 0L; diffSkips = 0
+        invalidatePrevRaw()
         state.value = State.STARTING_X
         scope.launch {
             try {
@@ -1201,6 +1309,11 @@ class DesktopService(
                     listOf("tmp/emux_x_up", "tmp/emux_display_num").forEach {
                         java.io.File(rootfs, it).delete()
                     }
+                    // v0.2.84: a stale -fbdir screen file would paint the
+                    // PREVIOUS session's photograph before the new Xvfb starts
+                    // (mmap writes never touch mtime, so the reader cannot
+                    // date it - delete it instead; emux-x11 recreates it).
+                    java.io.File(rootfs, "tmp/emux_fbdir/Xvfb_screen0").delete()
                     (0..4).forEach { n -> java.io.File(rootfs, "tmp/.X11-unix/X$n").delete() }
                 }
                 killDesktopGuests()
@@ -1564,8 +1677,12 @@ class DesktopService(
                                 }
                             }
                         }
-                        val silentMs = if (lastAnyFrameAtMs == 0L) Long.MAX_VALUE
-                            else System.currentTimeMillis() - lastAnyFrameAtMs
+                        // v0.2.84: silence = no source PROVED itself (a frame
+                        // that diffed clean is a healthy idle pipeline, not
+                        // silence - counting paints here would fire the
+                        // watchdog on a perfectly fine still desktop).
+                        val silentMs = if (lastSourceProofAtMs == 0L) Long.MAX_VALUE
+                            else System.currentTimeMillis() - lastSourceProofAtMs
                         if (silentMs <= 25_000) continue
                         val why = nativeErr.ifBlank { if (nativeFrames > 0) "native silent" else "native no-frames" }
                         if (captureSession == null) {
@@ -1993,6 +2110,7 @@ class DesktopService(
         // the new attempt straight to CONNECTED with a stale bitmap.
         frameId = 0
         currentFrame = null
+        invalidatePrevRaw()   // v0.2.84: bitmap gone, mirror meaningless
         pumpedCaptureSession = null
         captureRespawns = 0
         runCatching { frameReader?.cancel() }; frameReader = null
@@ -2399,9 +2517,99 @@ class DesktopService(
         }
     }
 
+    // ------------------------------------------------------------------ v0.2.84
+    // BAND-DIFF PAINTER: "only repaint what changed, on the app side".
+    //
+    // prevRaw mirrors EXACTLY what the bitmap shows, as raw RGB565 LE bytes -
+    // the same format every source already delivers (GetImage depth-16
+    // replies, the -fbdir screen file, emux_frame.rgb). Any full or partial
+    // frame goes through diffUpload(): it compares 32-row bands against
+    // prevRaw, and only the bands that actually differ are LUT-converted and
+    // uploaded with setPixels; identical bands cost a byte-compare and
+    // nothing else. A frame with zero changed bands is skipped ENTIRELY - no
+    // frameId++, no invalidate, no redraw.
+    //
+    // This kills the last unconditional full-screen work: the ~5 s healer
+    // sweep used to re-upload 1.5 MB of identical pixels every time (and the
+    // mailbox paths converted their WHOLE frame per pixel with Color.rgb).
+    // Invariant: every bitmap write through this class updates prevRaw, so
+    // the mirror never drifts; paths that cannot maintain it (the legacy
+    // socket push, the generic IntArray paintMail) call invalidatePrevRaw()
+    // and the next diff repaints once, fully.
+    /** Rows compared/uploaded per slice. 32 rows of 576 px = 36 KB - small
+     *  enough to upload precisely, big enough that the compare stays a tight
+     *  byte loop (a full 1.5 MB frame is 40 slices). */
+    private val RAW_BAND = 32
+    private var prevRaw: ByteArray? = null
+    private var prevW = 0
+    private var prevH = 0
+    private var diffPx: IntArray? = null
+
+    private fun ensurePrevRaw(w: Int, h: Int): ByteArray {
+        var p = prevRaw
+        if (p == null || prevW != w || prevH != h || p.size != w * h * 2) {
+            p = ByteArray(w * h * 2)
+            prevRaw = p; prevW = w; prevH = h
+        }
+        return p
+    }
+
+    /** Forget the mirror - next diffUpload repaints everything once. */
+    private fun invalidatePrevRaw() { prevRaw = null }
+
+    /**
+     * Compare a raw RGB565 LE block ([w] x [rows] at frame position [fx],[fy],
+     * pixels starting at raw[off0], row-contiguous) against the mirror and
+     * upload only the changed [RAW_BAND]-row slices into the bitmap.
+     *
+     * @return number of slices uploaded; 0 means the block was byte-identical
+     *         to what is already on screen and NOTHING was touched.
+     */
+    private fun diffUpload(fx: Int, fy: Int, w: Int, rows: Int,
+                           raw: ByteArray, off0: Int, bmpW: Int, bmpH: Int): Int {
+        val bmp = currentFrame ?: return 0
+        val prev = ensurePrevRaw(bmpW, bmpH)
+        var px = diffPx
+        val need = bmpW * RAW_BAND
+        if (px == null || px.size < need) { px = IntArray(need); diffPx = px }
+        val lut = X11Client.RGB565_TO_ARGB
+        var uploaded = 0
+        var r = 0
+        synchronized(frameLock) {
+            while (r < rows) {
+                val sliceRows = minOf(RAW_BAND, rows - r)
+                val len = sliceRows * w * 2
+                val ro = off0 + r * w * 2
+                val po = (fy + r) * bmpW * 2 + fx * 2
+                var i = 0
+                while (i < len && raw[ro + i] == prev[po + i]) i++
+                if (i < len) {
+                    var j = 0; var k = 0
+                    while (k < len) {
+                        val v = (raw[ro + k].toInt() and 0xFF) or
+                            ((raw[ro + k + 1].toInt() and 0xFF) shl 8)
+                        px[j++] = lut[v]
+                        k += 2
+                    }
+                    bmp.setPixels(px, 0, w, fx, fy + r, w, sliceRows)
+                    for (rr in 0 until sliceRows) {
+                        System.arraycopy(raw, ro + rr * w * 2,
+                            prev, po + rr * bmpW * 2, w * 2)
+                    }
+                    uploaded++
+                } else diffSkips++
+                r += sliceRows
+            }
+        }
+        return uploaded
+    }
+
     /** Convert incoming RGB565 rows into the reused RGB_565 bitmap (memcpy-fast). */
     private fun writeDirtyRegion(x: Int, y: Int, w: Int, h: Int, rows: Array<ByteArray>) {
         val bmp = currentFrame ?: return
+        lastSourceProofAtMs = System.currentTimeMillis()
+        // v0.2.84: this region path does not maintain the byte mirror.
+        invalidatePrevRaw()
         // v0.1.20 BUGFIX (garbage colors even if frames arrived): the old code
         // byte-swapped every pixel through an intermediate buffer using bit math
         // that mixed up the field boundaries. The wire format is plain RGB565
@@ -2418,13 +2626,12 @@ class DesktopService(
             val need = w * h
             var px = scratchPx
             if (px == null || px.size < need) { px = IntArray(need); scratchPx = px }
+            // v0.2.84: one LUT load per pixel instead of Color.rgb()'s
+            // multiplies/divides (same table the diff painter uses).
+            val lut = X11Client.RGB565_TO_ARGB
             for (j in 0 until need) {
                 val v = (buf[j * 2].toInt() and 0xFF) or ((buf[j * 2 + 1].toInt() and 0xFF) shl 8)
-                px[j] = android.graphics.Color.rgb(
-                    ((v shr 11) and 0x1F) * 255 / 31,
-                    ((v shr 5) and 0x3F) * 255 / 63,
-                    (v and 0x1F) * 255 / 31,
-                )
+                px[j] = lut[v]
             }
             bmp.setPixels(px, 0, w, x, y, w, h)
         }
@@ -2464,6 +2671,13 @@ class DesktopService(
             noteInfo("mail capture NOT started (native XGetImage is fresh, $nativeFrames frames): $reason")
             return
         }
+        // v0.2.84: with the -fbdir framebuffer file present, the mail reader
+        // already paints with ZERO guest processes - spawning the xwd text
+        // chain beside it would only steal CPU from the reads.
+        if (fbdirAvailable()) {
+            noteInfo("mail capture NOT started (Xvfb -fbdir file present - zero-process mailbox is active): $reason")
+            return
+        }
         capMailMode = true
         noteInfo("v0.2.76 mail capture: $reason - emux-capture in mailbox mode (file only, no nc push)")
         captureSession = TerminalSession(
@@ -2477,6 +2691,12 @@ class DesktopService(
         // v0.2.83: same gate as ensureMailCapture - see the comment there.
         if (nativeFresh) {
             noteInfo("fbmail NOT started (native XGetImage is fresh, $nativeFrames frames): $reason")
+            return
+        }
+        // v0.2.84: -fbdir SUPERSEDES emux-fbmail - same XWD format, written by
+        // the server itself instead of a per-frame guest xwd under proot.
+        if (fbdirAvailable()) {
+            noteInfo("fbmail NOT started (Xvfb -fbdir file supersedes the per-frame xwd chain): $reason")
             return
         }
         noteInfo("v0.2.75 fbmail: $reason - starting filesystem-mailbox capture (guest xwd -> file -> host read)")
@@ -2524,8 +2744,56 @@ class DesktopService(
             val root = com.emux.core.FsLayout.linuxRoot(ctx)
             val rgb = java.io.File(root, "tmp/emux_frame.rgb")
             val xwd = java.io.File(root, "tmp/emux_fb.xwd")
+            // v0.2.84 FBDIR — THE ZERO-PROCESS FALLBACK. emux-x11 now starts
+            // Xvfb with `-fbdir /tmp/emux_fbdir`, which makes the SERVER ITSELF
+            // keep its framebuffer in an mmap'ed file in XWD format — the same
+            // format emux_fb.xwd uses, so the parser is shared. The guest-side
+            // chain the field measured as the slowest thing on the device
+            // (xwd | xwdtopnm | pnmtoplainpnm: every frame becomes a ~10 MB
+            // TEXT file under proot, plus a socket push or file copy) simply
+            // does not exist on this path: the host reads the file straight
+            // from the page cache and the band-diff painter uploads only what
+            // changed. One caveat drives the design: mmap writes never touch
+            // mtime, so there is no freshness signal — the reader re-reads on
+            // every tick and lets the diff decide. An unchanged desktop costs
+            // one page-cache read plus a memcmp and paints NOTHING.
+            val fbd = java.io.File(root, "tmp/emux_fbdir/Xvfb_screen0")
             var rgbMod = -1L; var xwdMod = -1L
+            var rawBuf: ByteArray? = null
             while (isActive && state.value != State.IDLE && state.value != State.ERROR) {
+                // fbdir only while native is NOT proven fresh: co-reading
+                // would compete with native grabs and could paint an older
+                // copy over a newer damage frame.
+                if (!nativeFresh && fbd.isFile) {
+                    val want = fbd.length()
+                    if (want in 105..64_000_000L) {
+                        val wi = want.toInt()
+                        var buf = rawBuf
+                        if (buf == null || buf.size < wi) { buf = ByteArray(wi); rawBuf = buf }
+                        val got = runCatching {
+                            java.io.DataInputStream(java.io.FileInputStream(fbd)).use {
+                                it.readFully(buf, 0, wi)
+                            }
+                            wi
+                        }.getOrDefault(-1)
+                        if (got == wi) {
+                            lastSourceProofAtMs = System.currentTimeMillis()
+                            val hd = xwdHeaderOf(buf, got)
+                            if (hd != null && hd.bpp == 16 && hd.le && hd.bpl == hd.w * 2 &&
+                                got >= hd.off + hd.w * hd.h * 2) {
+                                // fast path: contiguous RGB565 LE, straight
+                                // into the band differ. (A torn read - Xvfb
+                                // redrawing mid-read - shows for one tick and
+                                // the next read heals it; the old xwd chain
+                                // had the same race with a 100x bigger window.)
+                                paintRawFrame(hd.w, hd.h, buf, hd.off, "fbdir")
+                            } else {
+                                val dec = decodeXwdToFrame(buf.copyOf(got))
+                                if (dec != null) paintMail(dec.first, dec.second, dec.third, "fbdir")
+                            }
+                        }
+                    }
+                }
                 val rm = rgb.lastModified()
                 if (rm > 0 && rm != rgbMod) {
                     rgbMod = rm
@@ -2534,41 +2802,70 @@ class DesktopService(
                         val before = rgb.lastModified()
                         val bytes = runCatching { rgb.readBytes() }.getOrNull()
                         if (bytes != null && bytes.size == want && rgb.lastModified() == before) {
-                            var px = fbPx
-                            if (px == null || px.size < sessionW * sessionH) {
-                                px = IntArray(sessionW * sessionH); fbPx = px
-                            }
-                            var i = 0; var j = 0
-                            while (i < bytes.size) {
-                                val v = (bytes[i].toInt() and 0xFF) or
-                                    ((bytes[i + 1].toInt() and 0xFF) shl 8)
-                                px[j++] = android.graphics.Color.rgb(
-                                    ((v shr 11) and 0x1F) * 255 / 31,
-                                    ((v shr 5) and 0x3F) * 255 / 63,
-                                    (v and 0x1F) * 255 / 31)
-                                i += 2
-                            }
-                            paintMail(sessionW, sessionH, px, "mail")
+                            // v0.2.84: headerless raw RGB565 - the per-pixel
+                            // Color.rgb conversion loop is gone; the band
+                            // differ converts only what changed.
+                            paintRawFrame(sessionW, sessionH, bytes, 0, "mail")
                         }
                     }
                 }
                 val xm = xwd.lastModified()
                 if (xm > 0 && xm != xwdMod && xwd.length() > 104) {
                     xwdMod = xm
-                    val dec = runCatching { xwd.readBytes() }.getOrNull()
-                        ?.let { decodeXwdToFrame(it) }
-                    if (dec != null) paintMail(dec.first, dec.second, dec.third, "fbmail")
+                    val bytes = runCatching { xwd.readBytes() }.getOrNull()
+                    if (bytes != null) {
+                        val hd = xwdHeaderOf(bytes)
+                        if (hd != null && hd.bpp == 16 && hd.le && hd.bpl == hd.w * 2 &&
+                            bytes.size >= hd.off + hd.w * hd.h * 2) {
+                            paintRawFrame(hd.w, hd.h, bytes, hd.off, "fbmail")
+                        } else {
+                            val dec = decodeXwdToFrame(bytes)
+                            if (dec != null) paintMail(dec.first, dec.second, dec.third, "fbmail")
+                        }
+                    }
                 }
                 kotlinx.coroutines.delay(150)
             }
         }
     }
 
+    /**
+     * v0.2.84: paint one raw RGB565 LE full frame (pixels at raw[off0],
+     * row-contiguous) through the band-diff painter. Shared by every mailbox
+     * source: the -fbdir screen file, emux_frame.rgb and 16-bpp emux_fb.xwd
+     * dumps. A frame in which nothing changed is skipped ENTIRELY: no
+     * conversion, no setPixels, no frameId++, no invalidate.
+     */
+    private fun paintRawFrame(w: Int, h: Int, raw: ByteArray, off0: Int, mode: String) {
+        lastSourceProofAtMs = System.currentTimeMillis()
+        if (w <= 0 || h <= 0) return
+        ensureBitmap(w, h)
+        val n = diffUpload(0, 0, w, h, raw, off0, w, h)
+        if (n == 0) return
+        fbFrames++
+        if (captureMode != mode) {
+            captureMode = mode
+            noteInfo(
+                "v0.2.84 mailbox capture UP ($mode): ${w}x${h} band-diffed from the shared filesystem" +
+                    if (mode == "fbdir") " - Xvfb -fbdir: ZERO guest processes per frame" else "")
+        }
+        lastAnyFrameAtMs = System.currentTimeMillis()
+        capturePubAtMs = lastAnyFrameAtMs
+        captureDisplay = displayNum
+        frameId++
+        if (state.value == State.AWAITING_FRAMES) state.value = State.CONNECTED
+        frameCallback?.invoke()
+    }
+
     private fun paintMail(w: Int, h: Int, px: IntArray, mode: String) {
+        lastSourceProofAtMs = System.currentTimeMillis()
         synchronized(frameLock) {
             ensureBitmap(w, h)
             currentFrame?.setPixels(px, 0, w, 0, 0, w, h)
         }
+        // v0.2.84: the generic IntArray path does not maintain the byte
+        // mirror - forget it, and the next diffUpload repaints once, fully.
+        invalidatePrevRaw()
         fbFrames++
         if (captureMode != mode) {
             captureMode = mode
@@ -2582,25 +2879,30 @@ class DesktopService(
         frameCallback?.invoke()
     }
 
-    /** Parse an XWD dump (xwd -root) into packed ARGB. Endian- and depth-
-     *  agnostic (16/24/32 bpp, LSB/MSB); returns null on anything unexpected
-     *  so the loop simply waits for the next mailbox drop. */
-    private fun decodeXwdToFrame(b: ByteArray): Triple<Int, Int, IntArray>? {
-        if (b.size < 104) return null
-        // Validated against a real `xwd -root` dump (Xvfb 21.1.7, depth 16):
-        // the HEADER is big-endian on this xwd even though the image
-        // byte_order field says LSBFirst, header_size is 107 (not 100) and
-        // ncolors lives at offset 76. Pixels start at header_size +
-        // ncolors*12. Detect the header endian by plausibility, never by
-        // assumption — this parser gets exactly one chance per field round.
-        val cand = listOf(java.nio.ByteOrder.BIG_ENDIAN, java.nio.ByteOrder.LITTLE_ENDIAN)
-        val le = cand.firstOrNull { o ->
-            val hs = java.nio.ByteBuffer.wrap(b, 0, 4).order(o).int
-            val w = java.nio.ByteBuffer.wrap(b, 16, 4).order(o).int
-            val h = java.nio.ByteBuffer.wrap(b, 20, 4).order(o).int
-            hs in 96..4096 && w in 1..8192 && h in 1..8192
-        } ?: return null
-        val bb = java.nio.ByteBuffer.wrap(b).order(le)
+    /** The XWD header fields the readers need; [le] is the HEADER endianness. */
+    private class XwdHdr(val le: Boolean, val w: Int, val h: Int, val off: Int,
+                         val bpl: Int, val bpp: Int, val depth: Int, val byteOrder: Int)
+
+    /**
+     * Parse an XWD header — `xwd -root` dumps AND Xvfb's -fbdir screen files
+     * are the same format (v0.2.84 validated byte-for-byte against a real
+     * Xvfb_screen0: header_size 160, file_version 7, ZPixmap, depth/bpp 16,
+     * bytes_per_line = width*2, ncolors at offset 76, pixels at
+     * header_size + ncolors*12). Header endianness is DETECTED by
+     * plausibility, never assumed — the same rule decodeXwdToFrame has used
+     * since v0.2.75 (this xwd writes a big-endian header while its image
+     * byte_order field says LSBFirst).
+     */
+    private fun xwdHeaderOf(b: ByteArray, size: Int = b.size): XwdHdr? {
+        if (size < 104) return null
+        val leO = listOf(java.nio.ByteOrder.BIG_ENDIAN, java.nio.ByteOrder.LITTLE_ENDIAN)
+            .firstOrNull { o ->
+                val hs = java.nio.ByteBuffer.wrap(b, 0, 4).order(o).int
+                val w = java.nio.ByteBuffer.wrap(b, 16, 4).order(o).int
+                val h = java.nio.ByteBuffer.wrap(b, 20, 4).order(o).int
+                hs in 96..4096 && w in 1..8192 && h in 1..8192
+            } ?: return null
+        val bb = java.nio.ByteBuffer.wrap(b).order(leO)
         val headerSize = bb.getInt(0)
         val depth = bb.getInt(12); val w = bb.getInt(16); val h = bb.getInt(20)
         val byteOrder = bb.getInt(28); val bpp = bb.getInt(44); val bpl = bb.getInt(48)
@@ -2608,9 +2910,26 @@ class DesktopService(
         if (w <= 0 || h <= 0 || w > 4096 || h > 4096 || depth == 0) return null
         if (bpp != 16 && bpp != 24 && bpp != 32) return null
         val off = headerSize + ncolors * 12
-        if (b.size < off + bpl.toLong() * h) return null
+        if (off < 0 || off.toLong() + bpl.toLong() * h > size.toLong()) return null
+        return XwdHdr(leO == java.nio.ByteOrder.LITTLE_ENDIAN, w, h, off, bpl, bpp, depth, byteOrder)
+    }
+
+    /** True when the -fbdir framebuffer file is present: every mailbox frame
+     *  can then be had with ZERO guest processes, so the per-frame xwd chains
+     *  are strictly worse and must not start (v0.2.84). */
+    private fun fbdirAvailable(): Boolean = runCatching {
+        val f = java.io.File(com.emux.core.FsLayout.linuxRoot(ctx), "tmp/emux_fbdir/Xvfb_screen0")
+        f.isFile && f.length() > 104
+    }.getOrDefault(false)
+
+    /** Parse an XWD dump (xwd -root) into packed ARGB. Endian- and depth-
+     *  agnostic (16/24/32 bpp, LSB/MSB); returns null on anything unexpected
+     *  so the loop simply waits for the next mailbox drop. */
+    private fun decodeXwdToFrame(b: ByteArray): Triple<Int, Int, IntArray>? {
+        val hd = xwdHeaderOf(b) ?: return null
+        val w = hd.w; val h = hd.h; val off = hd.off; val bpl = hd.bpl; val bpp = hd.bpp
         var px = fbPx; if (px == null || px.size < w * h) { px = IntArray(w * h); fbPx = px }
-        val lsb = byteOrder == 0
+        val lsb = hd.byteOrder == 0
         val step = bpp / 8
         var y = 0
         while (y < h) {
@@ -2736,6 +3055,18 @@ class DesktopService(
 
     /** Touches that reached DesktopView.onTouchEvent (ACTION_DOWN). */
     @Volatile var touchCount: Long = 0L
+
+    // v0.2.84 DRAG PRIORITY: the capture loop orders pending damage bands by
+    // distance to this pointer while a button is down, so the region the user
+    // is watching is the region that paints first (see the damage loop).
+    @Volatile private var ptrX = 0
+    @Volatile private var ptrY = 0
+    @Volatile private var ptrDown = false
+    @Volatile private var ptrAtMs = 0L
+    private fun notePointer(x: Int, y: Int, down: Boolean?) {
+        ptrX = x; ptrY = y; ptrAtMs = System.currentTimeMillis()
+        if (down != null) ptrDown = down
+    }
 
     /** Injection calls the service actually made (any transport). */
     @Volatile var injectCount: Long = 0L
@@ -3063,6 +3394,14 @@ class DesktopService(
     val capturePubAgeSec: Long get() =
         if (capturePubAtMs < 0) -1 else (System.currentTimeMillis() - capturePubAtMs) / 1000
 
+    /** v0.2.84: seconds since ANY capture source last PROVED itself (a
+     *  successful grab or mailbox read - changed pixels or not); -1 if never.
+     *  The badge's idle-vs-dead discriminator: a diffed pipeline delivers no
+     *  frames on a still desktop while staying perfectly alive. */
+    val sourceProofAgeSec: Long get() =
+        if (lastSourceProofAtMs == 0L) -1
+        else (System.currentTimeMillis() - lastSourceProofAtMs) / 1000
+
     /** v0.2.70: last capture error tail, painted on the pane while STALE so a
      *  screenshot names the tool killing the stream (no adb, no terminal). */
     @Volatile var lastCapErr: String = ""; private set
@@ -3288,6 +3627,7 @@ class DesktopService(
 
     fun injectClick(xInXSpace: Int, yInXSpace: Int, button: Int = 1, press: Boolean) {
         injectCount++
+        notePointer(xInXSpace, yInXSpace, press)
         if (xtest() != null) {
             // v0.2.83: queued, not written here - see the XTEST PUMP comment.
             // fakeButton() emits its own motion first, so the click still lands
@@ -3302,6 +3642,7 @@ class DesktopService(
 
     fun injectMotion(x: Int, y: Int) {
         injectCount++
+        notePointer(x, y, null)
         if (xtest() != null) {
             // The hot path of a drag: O(1) enqueue, coalesced with any motion
             // still waiting, written on the pump thread. The UI thread never
@@ -3316,6 +3657,7 @@ class DesktopService(
     /** Drag ended outside a click: just release button 1 at position. */
     fun fakeButtonReleaseOnly(x: Int, y: Int) {
         injectCount++
+        notePointer(x, y, false)
         if (xtest() != null) {
             postXtest(motion = false) { c -> c.fakeButton(1, x, y, false) }
             return
@@ -3419,6 +3761,7 @@ class DesktopService(
     fun injectScroll(xInXSpace: Int, yInXSpace: Int, button: Int, clicks: Int) {
         injectCount++
         if (clicks <= 0 || button !in 4..7) return
+        notePointer(xInXSpace, yInXSpace, null)
         if (xtest() != null) {
             // v0.2.83: one queued task for the whole burst - a wheel flick is
             // one logical event, and splitting it across pump turns would let

@@ -163,6 +163,13 @@ out('desktop-items-0.conf' in g, "APK's emux-x11 has the pcmanfm desktop-items r
     "no desktop-items-0.conf handling - pre-v0.2.60 guest script")
 out(bool(re.search(r'(?m)^doctor\(\)',g)), "APK's emux-x11 has the doctor subcommand",
     "no doctor() - pre-v0.2.61")
+# v0.2.84: the zero-process framebuffer mailbox. The guest script must launch
+# Xvfb with -fbdir (detected at runtime, but the CODE has to be in the asset),
+# or the app's fbdir reader never sees a file and the fallback keeps spawning
+# the xwd|xwdtopnm|pnmtoplainpnm text chain per frame.
+out('-fbdir /tmp/emux_fbdir' in g and 'FBDIR_CHECKED' in g,
+    "APK's emux-x11 launches Xvfb with -fbdir (v0.2.84 zero-process framebuffer mailbox)",
+    "no -fbdir handling - pre-v0.2.84 guest script")
 PYEOF
 
 # ---- 4. dex carries the current host-side code ----------------------------
@@ -181,7 +188,10 @@ for sym in ('injectScroll','injectKeysymCombo','maybeShowIntro','initDamageTrack
             # v0.2.83: the GetImage BadLength fix + event parking must be IN the
             # shipped dex. pendingEvents/requestReplyFull/damageRectOf are private
             # but D8 (no minification) keeps the names; hasQueuedEvent is public.
-            'pendingEvents','requestReplyFull','damageRectOf','hasQueuedEvent','postXtest'):
+            'pendingEvents','requestReplyFull','damageRectOf','hasQueuedEvent','postXtest',
+            # v0.2.84: raw-565 grabs + the band-diff painter + the fbdir mailbox
+            # reader must all be in the shipped dex.
+            'grabRegion565','diffUpload','paintRawFrame','xwdHeaderOf','fbdirAvailable'):
     hit=any(sym.encode() in b for b in blobs)
     out(hit,f"dex contains {sym}",
         "" if hit else "not found in any classes*.dex - the APK predates v0.2.60/v0.2.61")

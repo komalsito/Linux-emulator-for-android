@@ -467,6 +467,60 @@ fun main(args: Array<String>) {
         val g = c.grabRegionArgb(300, 500, 80, 60, 20_000, null)
         ck(g != null && g[0] == GREEN, "grabbing just the damaged rectangle returns the new pixels",
             if (g == null) "err=${c.lastGrabError}" else "0x${Integer.toHexString(g[0])}")
+
+        // ---- 4b. v0.2.84: raw-565 grab + public LUT (the band-diff painter) --
+        // Reflection on purpose: the harness must still COMPILE against
+        // pre-v0.2.84 clients, where both checks then fail as intended.
+        run {
+            val G565 = to565(0x00, 0xFF, 0x00)
+            val m = runCatching {
+                c.javaClass.getMethod("grabRegion565",
+                    Int::class.javaPrimitiveType, Int::class.javaPrimitiveType,
+                    Int::class.javaPrimitiveType, Int::class.javaPrimitiveType,
+                    Int::class.javaPrimitiveType, ByteArray::class.java)
+            }.getOrNull()
+            if (m == null) {
+                ck(false, "grabRegion565 (v0.2.84 raw-byte grab) exists",
+                    "no such method on this client")
+            } else {
+                val buf = ByteArray(80 * 60 * 2)
+                val n = runCatching {
+                    m.invoke(c, 300, 500, 80, 60, 20_000, buf) as Int
+                }.getOrDefault(-1)
+                var all = n == buf.size
+                var i = 0
+                while (all && i < buf.size) {
+                    val v = (buf[i].toInt() and 0xFF) or ((buf[i + 1].toInt() and 0xFF) shl 8)
+                    if (v != G565) all = false
+                    i += 2
+                }
+                ck(all, "grabRegion565 returns the painted rect as raw RGB565 LE, stride-free",
+                    if (all) "80x60, every 16-bit unit = 0x${Integer.toHexString(G565)}"
+                    else "n=$n err=${c.lastGrabError}")
+            }
+            val lut = runCatching {
+                c.javaClass.getField("RGB565_TO_ARGB").get(null) as IntArray
+            }.getOrNull()
+            if (lut == null) {
+                ck(false, "RGB565_TO_ARGB LUT is public (v0.2.84)",
+                    "no such field on this client")
+            } else {
+                // full sweep: all 65536 entries against the component math
+                // grabRegionArgb uses (r*255/31, g*255/63, b*255/31).
+                var bad = -1
+                for (v in 0 until 65536) {
+                    val exp = -0x1000000 or
+                        (((v ushr 11) and 0x1F) * 255 / 31 shl 16) or
+                        (((v ushr 5) and 0x3F) * 255 / 63 shl 8) or
+                        ((v and 0x1F) * 255 / 31)
+                    if (lut[v] != exp) { bad = v; break }
+                }
+                ck(bad < 0 && (g == null || lut[G565] == g[0]),
+                    "the LUT is exact for all 65536 codes and agrees with grabRegionArgb",
+                    if (bad >= 0) "lut[0x${Integer.toHexString(bad)}]=0x${Integer.toHexString(lut[bad])}"
+                    else "lut[0x${Integer.toHexString(G565)}]=0x${Integer.toHexString(lut[G565])}")
+            }
+        }
     }
 
     // ---- 5. events during a reply are queued, not dropped -------------
