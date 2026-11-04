@@ -83,7 +83,12 @@ if [ -n "$BT" ]; then
   APK_PKG=$(echo "$BADGING" | sed -n "s/^package: name='\([^']*\)'.*/\1/p" | head -1)
   APK_VC=$(echo "$BADGING"  | sed -n "s/.*versionCode='\([^']*\)'.*/\1/p" | head -1)
   APK_VN=$(echo "$BADGING"  | sed -n "s/.*versionName='\([^']*\)'.*/\1/p" | head -1)
-  APK_MIN=$(echo "$BADGING" | sed -n "s/^sdkVersion:'\([^']*\)'.*/\1/p" | head -1)
+  # v0.2.89: current aapt2 (the newest build-tools on fresh runners) renamed
+  # this badging field from sdkVersion:'N' to minSdkVersion:'N' - the
+  # legacy-only regex made the gate false-fail a perfectly current APK
+  # ("FAIL minSdkVersion matches source (24), found ''" on the v0.2.88
+  # build; the same aapt2 change broke other projects' CI). Accept both.
+  APK_MIN=$(echo "$BADGING" | sed -n "s/^\(sdkVersion\|minSdkVersion\):'\([^']*\)'.*/\2/p" | head -1)
   APK_TGT=$(echo "$BADGING" | sed -n "s/^targetSdkVersion:'\([^']*\)'.*/\1/p" | head -1)
   APK_LAUNCH=$(echo "$BADGING" | sed -n "s/^launchable-activity: name='\([^']*\)'.*/\1/p" | head -1)
   ck "package is com.emux" "$([ "$APK_PKG" = com.emux ] && echo 1 || echo 0)" "found '$APK_PKG'"

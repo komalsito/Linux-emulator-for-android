@@ -34,6 +34,17 @@ android {
         // (adb install / GitHub Releases), same distribution model as Termux
         // on F-Droid.
         targetSdk = 28
+        // v0.2.89 (vc189): (1) emux-x11 governor now self-heals a WM-less
+        // desktop - it checks/installs openbox/xterm/x11-apps (was furniture-
+        // only, single attempt) and relaunches a dead/never-started WM, so
+        // windows regain decorations and tint2 lists tasks + a Terminal
+        // launcher (field: fresh Ubuntu rootfs, HUAWEI MRDI-W09, no WM);
+        // (2) the desktop helper key bar and its top-right "keys" toggle are
+        // removed, and the terminal extra-keys row is removed app-wide
+        // (field request; hardware-keyboard paths unchanged);
+        // (3) verify_apk accepts aapt2's renamed minSdkVersion badging
+        // field (the false FAIL on the v0.2.88 build).
+        // ENV_VERSION 79 re-seeds the guest script on existing installs.
         // v0.2.88 (vc188): (1) emux-x11 furniture detection is argv-exact
         // now (running0) and tint2's launch is verified with a strike
         // fallback, so a first boot no longer eats its own taskbar to an
@@ -54,8 +65,8 @@ android {
         // on the field HUAWEI ROM (click ripple, no selection UI). ENV_VERSION
         // stays 77: no guest script changed, so existing installs must not
         // re-seed.
-        versionCode = 188
-        versionName = "0.2.88"
+        versionCode = 189
+        versionName = "0.2.89"
 
         ndk {
             abiFilters += listOf("arm64-v8a", "armeabi-v7a", "x86_64")

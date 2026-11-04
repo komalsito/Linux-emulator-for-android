@@ -19,7 +19,6 @@ import com.emux.core.BootstrapReporter
 import com.emux.core.FsLayout
 import com.emux.core.RootManager
 import com.emux.databinding.ActivityMainBinding
-import com.emux.terminal.ExtraKeysView
 import com.emux.terminal.TerminalService
 import com.emux.terminal.VtTerminalView
 import com.emux.x11.DesktopService
@@ -211,7 +210,6 @@ class MainActivity : AppCompatActivity() {
 
         wireTabs()
         applyPhoneLayout()
-        wireExtraKeys()
         androidx.preference.PreferenceManager.getDefaultSharedPreferences(this)
             .registerOnSharedPreferenceChangeListener(distroPrefListener)
         requestNotificationIfNeeded()
@@ -827,28 +825,6 @@ class MainActivity : AppCompatActivity() {
             start = end + 1
         }
         return sp
-    }
-
-    private fun wireExtraKeys() {
-        // v0.1.54: pgup/pgdn page the renderer scrollback locally.
-        b.extraKeys.localScrollSink = { pagesUp ->
-            runOnUiThread {
-                b.termContainer.findViewWithTag<com.emux.terminal.VtTerminalView>("term")
-                    ?.scrollPage(pagesUp)
-            }
-        }
-        b.extraKeys.currentSessionSink = { bytes -> termView?.session?.write(bytes) }
-        // v0.1.90: the es⇄ key toggles the terminal physical-keyboard layout
-        // (Auto<->Spanish) with visible feedback - works regardless of ROM
-        // shortcut behaviour, unlike Alt+Shift which some ROMs swallow.
-        b.extraKeys.langToggleSink = {
-            val sp = androidx.preference.PreferenceManager.getDefaultSharedPreferences(this)
-            val cur = sp.getString("term_keylayout", "auto") ?: "auto"
-            val next = if (cur == "es") "auto" else "es"
-            sp.edit().putString("term_keylayout", next).apply()
-            val msg = "\r\n[emux] terminal keyboard layout: $next\r\n"
-            termView?.session?.write(msg.toByteArray())
-        }
     }
 
     private fun observeSessions() {

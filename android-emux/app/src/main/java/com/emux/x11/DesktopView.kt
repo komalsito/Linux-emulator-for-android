@@ -42,14 +42,12 @@ import kotlin.math.min
  *                      scroll quantises into X buttons 4-7 with per-axis
  *                      remainder accumulation; fingers keep everything above
  *                      untouched, and a stylus IS a finger here
- *  - "keys" toggle   → on-screen Esc/Tab/Ctrl/Alt/Super/BackSpace + wheel.
- *                      Ctrl/Alt/Super are STICKY: arm one and the next key from
- *                      the soft keyboard becomes that shortcut (Ctrl+C).
+ *  (v0.2.89: the "keys" toggle and its helper key bar are REMOVED - field
+ *   request; the view stays fit-to-screen.)
  *
- * Discoverability (v0.2.61): the bar is hidden behind that toggle, so on the
- * FIRST desktop session after install the bar opens itself and a gesture card
- * fades in over the live desktop for a few seconds. Any touch dismisses the
- * card; the user's own bar choice is remembered from then on.
+ * Discoverability (v0.2.61): on the FIRST desktop session after install a
+ * gesture card fades in over the live desktop for a few seconds; any touch
+ * dismisses it.
  */
 class DesktopView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attrs) {
 
@@ -626,7 +624,7 @@ class DesktopView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attrs) 
         val lines = hist?.lines()?.filter { it.isNotBlank() }?.takeLast(8) ?: emptyList()
         val cardW = (width * 0.86f).coerceAtMost(dp(440f))
         val cardH = pad * 2 + sp(30f) + lines.size * lh
-        val bottomGuard = if (helperBarVisible) barHeight() else dp(8f)
+        val bottomGuard = dp(8f)   // v0.2.89: helper bar removed
         val top = (height - bottomGuard) - cardH - dp(12f)
         val left = (width - cardW) / 2f
         val card = RectF(left, top, left + cardW, top + cardH)
@@ -1113,12 +1111,11 @@ class DesktopView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attrs) 
     private var scrollAccumY = 0f; private var scrollAccumX = 0f
     private var lastPanX = 0f; private var lastPanY = 0f
 
-    // Sticky modifiers: tap Ctrl on the helper bar, then type 'c' on the soft
-    // keyboard and get Ctrl+C. Cleared by the next key that consumes them.
+    // Sticky modifiers. v0.2.89: the helper bar that set them is gone; nothing
+    // currently sets these, the plumbing stays for a future input path.
     private var stickyCtrl = false
     private var stickyAlt = false
     private var stickyMeta = false
-    private var helperBarVisible = false
 
     // v0.2.61 DISCOVERABILITY. Two things made the new input model hard to
     // find: the gesture cheat-sheet was drawn only on the FRAMELESS pane, so it
@@ -1144,27 +1141,16 @@ class DesktopView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attrs) 
         }
     }
 
-    /** Runs on the first frame: opens the bar + shows the card, once ever. */
+    /** Runs on the first frame: shows the gesture card, once ever.
+     *  v0.2.89: the helper-bar auto-open is gone with the bar itself. */
     private fun maybeShowIntro() {
         val p = uiPrefs
         val seen = runCatching { p?.getBoolean(KEY_INTRO_SEEN, false) ?: false }.getOrDefault(false)
-        if (seen) {
-            helperBarVisible = runCatching { p?.getBoolean(KEY_BAR_VISIBLE, false) ?: false }
-                .getOrDefault(false)
-            return
-        }
-        helperBarVisible = true
+        if (seen) return
         hintUntilMs = System.currentTimeMillis() + HINT_MS
-        runCatching {
-            p?.edit()?.putBoolean(KEY_INTRO_SEEN, true)
-                ?.putBoolean(KEY_BAR_VISIBLE, true)?.apply()
-        }
+        runCatching { p?.edit()?.putBoolean(KEY_INTRO_SEEN, true)?.apply() }
         removeCallbacks(fadeTick)
         postDelayed(fadeTick, FADE_TICK_MS)
-    }
-
-    private fun persistBarVisibility() {
-        runCatching { uiPrefs?.edit()?.putBoolean(KEY_BAR_VISIBLE, helperBarVisible)?.apply() }
     }
 
     private fun dismissIntroCard() {
@@ -1412,7 +1398,8 @@ class DesktopView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attrs) 
                 // the fit<->fill view toggle, so the desktop only ever saw ONE
                 // click per gesture - i.e. "the desktop shows but nothing
                 // opens", no matter how healthy the transport was. The view
-                // toggle now lives on the FIT chip of the helper bar.
+                // toggle lived on the FIT chip until v0.2.89 removed the
+                // helper bar; the view now stays fit-to-screen.
                 lastTapUpMs = System.currentTimeMillis()
                 lastTapUpX = event.x; lastTapUpY = event.y
                 val (x, y) = mapToX(event.x, event.y)
@@ -1515,16 +1502,8 @@ class DesktopView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attrs) 
         desktop?.injectClick(x, y, button = 3, press = false)
     }
 
-    // ------------------------- on-screen key helpers -------------------------
-    private class Chip(val label: String, val id: Int)
-    private val chips = listOf(
-        Chip("Esc", CHIP_ESC), Chip("Tab", CHIP_TAB), Chip("Ctrl", CHIP_CTRL),
-        Chip("Alt", CHIP_ALT), Chip("Super", CHIP_META), Chip("\u25B2", CHIP_UP),
-        Chip("\u25BC", CHIP_DOWN), Chip("\u232B", CHIP_BKSP), Chip("FIT", CHIP_FILL),
-    )
-    private val chipRects = ArrayList<RectF>()
-    private var toggleRect = RectF()
-    private fun barHeight() = dp(40f)
+    // ---------------- on-screen key helpers (v0.2.89: the chip bar is gone;
+    // the keysym plumbing below stays) ----------------
 
     /** Keysym for a character: Latin-1 maps 1:1, everything else is 0x01000000+cp. */
     private fun keysymFor(ch: Char) = if (ch.code < 0x100) ch.code else 0x01000000 + ch.code
@@ -1546,79 +1525,20 @@ class DesktopView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attrs) 
         }
     }
 
-    private fun handleChip(id: Int) {
-        val d = desktop ?: return
-        val (cx, cy) = mapToX(width / 2f, height / 2f, markCursor = false)
-        when (id) {
-            CHIP_ESC -> sendKeysym(0xFF1B)
-            CHIP_TAB -> sendKeysym(0xFF09)
-            CHIP_BKSP -> sendKeysym(0xFF08)
-            CHIP_CTRL -> { stickyCtrl = !stickyCtrl; invalidate() }
-            CHIP_ALT -> { stickyAlt = !stickyAlt; invalidate() }
-            CHIP_META -> { stickyMeta = !stickyMeta; invalidate() }
-            CHIP_UP -> d.injectScroll(cx, cy, 4, 3)
-            CHIP_DOWN -> d.injectScroll(cx, cy, 5, 3)
-            // v0.2.66 FIX: the fit<->fill view toggle USED to live on double-tap,
-            // which made a real double-click impossible - and every desktop
-            // (pcmanfm icons, file managers, "Execute/Cancel" dialogs) needs a
-            // double-click to activate anything. Double-tap is now delivered to
-            // X as a genuine double-click; the view toggle lives here instead.
-            CHIP_FILL -> { coverMode = !coverMode; scale = 1f; tx = 0f; ty = 0f; invalidate() }
-            CHIP_TOGGLE -> { helperBarVisible = !helperBarVisible; persistBarVisibility(); invalidate() }
-        }
-        performHapticFeedback(android.view.HapticFeedbackConstants.KEYBOARD_TAP)
-    }
-
-    /** Overlay hit-test. Returns true when the touch was consumed by a control. */
+    /** Overlay hit-test. Returns true when the touch was consumed by a control.
+     *  v0.2.89: the "keys" toggle and the helper key bar are gone (field
+     *  request), so no overlay control is tappable any more. Kept as a stub
+     *  because both touch paths still call it. */
     private fun onOverlayTouch(sx: Float, sy: Float): Boolean {
-        if (toggleRect.contains(sx, sy)) { handleChip(CHIP_TOGGLE); return true }
-        if (!helperBarVisible || sy < height - barHeight()) return false
-        for (i in chips.indices) {
-            if (i >= chipRects.size) return false
-            val r = chipRects[i]
-            if (sx >= r.left && sx <= r.right) { handleChip(chips[i].id); return true }
-        }
         return false
     }
 
     private fun drawOverlay(canvas: Canvas) {
-        // Always-on toggle: the bar itself is hidden by default because tint2
-        // lives at the bottom of the X screen and a permanent strip would cover
-        // the panel the user is trying to click.
-        val ts = dp(30f)
-        toggleRect = RectF(width - ts - dp(6f), dp(6f), width - dp(6f), dp(6f) + ts)
-        val boxP = Paint().apply { color = Color.argb(0xB0, 0x1B, 0x24, 0x30); style = Paint.Style.FILL }
-        canvas.drawRoundRect(toggleRect, dp(6f), dp(6f), boxP)
-        val lbl = Paint().apply {
-            textSize = sp(9f); isAntiAlias = true; textAlign = Paint.Align.CENTER
-            color = if (helperBarVisible) Color.argb(0xF0, 0x4F, 0xC3, 0xF7) else Color.argb(0xC0, 0xFF, 0xFF, 0xFF)
-        }
-        canvas.drawText("keys", toggleRect.centerX(), toggleRect.centerY() + sp(3.5f), lbl)
-
-        if (helperBarVisible) {
-            val h = barHeight(); val top = height - h
-            chipRects.clear()
-            canvas.drawRect(0f, top, width.toFloat(), height.toFloat(),
-                Paint().apply { color = Color.argb(0xD8, 0x10, 0x16, 0x1E) })
-            val n = chips.size
-            val pad = dp(4f)
-            val cw = (width - pad * (n + 1)) / n
-            val tp = Paint().apply { textSize = sp(11f); isAntiAlias = true; textAlign = Paint.Align.CENTER }
-            for (i in 0 until n) {
-                val l = pad + i * (cw + pad)
-                val r = RectF(l, top + pad, l + cw, height - pad)
-                chipRects.add(r)
-                val on = when (chips[i].id) {
-                    CHIP_CTRL -> stickyCtrl; CHIP_ALT -> stickyAlt; CHIP_META -> stickyMeta; else -> false
-                }
-                canvas.drawRoundRect(r, dp(5f), dp(5f), Paint().apply {
-                    color = if (on) Color.argb(0xE8, 0x4F, 0xC3, 0xF7) else Color.argb(0x44, 0xFF, 0xFF, 0xFF)
-                    style = Paint.Style.FILL
-                })
-                tp.color = if (on) Color.argb(0xFF, 0x08, 0x14, 0x1C) else Color.argb(0xE8, 0xFF, 0xFF, 0xFF)
-                canvas.drawText(chips[i].label, r.centerX(), r.centerY() + sp(4f), tp)
-            }
-        }
+        // v0.2.89: the top-right "keys" toggle and the 40dp helper key bar are
+        // removed (field request: the row duplicated the removed terminal
+        // extra-keys strip and covered tint2's panel area). Only the sticky-
+        // modifier hint remains, and nothing sets sticky modifiers from the
+        // UI any more - kept for a future input path.
         if (stickyCtrl || stickyAlt || stickyMeta) {
             val mods = buildString {
                 if (stickyCtrl) append("Ctrl ")
@@ -1636,14 +1556,15 @@ class DesktopView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attrs) 
         // the two overprinted into unreadable garbage and the one line that
         // disambiguates the input path ("proof=ok touch=18 inj=36 ...") could
         // not be read. Legend moves below the badges; text now matches the
-        // v0.2.66 gesture contract (double-tap is a real double-click; the
-        // fit<->fill toggle lives on the FIT chip).
+        // v0.2.66 gesture contract (double-tap is a real double-click).
+        // v0.2.89: the FIT chip is gone with the helper bar - the view stays
+        // fit-to-screen, so the legend drops the FIT=fill mention.
         val hp = Paint().apply { color = Color.argb(0x78, 0xFF, 0xFF, 0xFF); textSize = sp(9f) }
         // Two lines, not three: sp(72f) belongs to the sticky-modifier
         // "next key:" hint and a third legend line overprints it.
         canvas.drawText("tap=click  drag=left-drag(held)  2tap+HOLD=grab  double-tap=2xclick",
             16f, sp(52f), hp)
-        canvas.drawText("long-press=right-drag  2-finger=middle/scroll  pinch=zoom  FIT=fill",
+        canvas.drawText("long-press=right-drag  2-finger=middle/scroll  pinch=zoom",
             16f, sp(62f), hp)
     }
 
@@ -1652,8 +1573,7 @@ class DesktopView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attrs) 
      *
      * Drawn over the LIVE desktop (the frameless pane already has its own
      * cheat-sheet), faded out over the last third of [HINT_MS], dismissed by
-     * any touch. Kept clear of the top-right "keys" toggle so the thing the
-     * card tells you about stays tappable while you read it.
+     * any touch.
      */
     private fun drawIntroCard(canvas: Canvas) {
         val now = System.currentTimeMillis()
@@ -1669,18 +1589,16 @@ class DesktopView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attrs) 
             "long-press  =  right click (hold + drag to right-drag)",
             "two-finger tap  =  middle click (paste in a terminal)",
             "two-finger drag  =  scroll wheel  \u00b7  pans when zoomed",
-            // v0.2.79: this said "double-tap = fit / fill", which has been wrong
-            // since v0.2.66 made double-tap a real double-click and moved the
-            // view toggle to the FIT chip. A card that misdescribes the gestures
-            // is worse than no card.
-            "pinch  =  zoom  \u00b7  FIT chip  =  fit / fill",
-            "keys  =  Esc Tab Ctrl Alt Super arrows \u232b",
-            "Ctrl/Alt/Super are sticky: tap Ctrl, then type c \u2192 Ctrl+C",
+            // v0.2.79: this said "double-tap = fit / fill", which was wrong
+            // since v0.2.66 made double-tap a real double-click. The FIT chip
+            // that replaced it is gone too - v0.2.89 removed the helper key
+            // bar, so the view stays fit-to-screen.
+            "pinch  =  zoom",
         )
         val pad = dp(10f)
         val lh = sp(12.5f)
         val titleH = sp(16f)
-        val cardW = width - dp(52f)          // leave the "keys" toggle clear
+        val cardW = width - dp(52f)
         val cardH = pad * 2 + titleH + lh * lines.size
         val top = dp(46f)
         val card = RectF(dp(8f), top, dp(8f) + cardW, top + cardH)
@@ -1724,16 +1642,11 @@ class DesktopView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attrs) 
         const val TWO_FINGER_TAP_MS = 260L
         const val TWO_FINGER_TAP_SLOP = 26f
         const val SCROLL_STEP_PX = 44f
-        const val CHIP_ESC = 1; const val CHIP_TAB = 2; const val CHIP_CTRL = 3
-        const val CHIP_ALT = 4; const val CHIP_META = 5; const val CHIP_UP = 6
-        const val CHIP_DOWN = 7; const val CHIP_BKSP = 8; const val CHIP_TOGGLE = 9
-        const val CHIP_FILL = 10
         // v0.2.61 intro card: long enough to read seven lines on a phone,
         // short enough that it is gone before the user wants the screen back.
         const val HINT_MS = 11_000L
         const val FADE_TICK_MS = 200L
         const val KEY_INTRO_SEEN = "gesture_intro_seen"
-        const val KEY_BAR_VISIBLE = "helper_bar_visible"
     }
 }
 

@@ -2224,20 +2224,39 @@ fi
         echo "emux-x11: governor: input agent (pid $APID) dead - relaunching" >&2
         start_agent
       fi
-    fi
-    if { [ ! -x /usr/bin/tint2 ] || [ ! -x /usr/bin/pcmanfm ] || [ ! -x /usr/bin/xdotool ] || [ ! -x /usr/bin/picom ]; } && [ "$APTTRIED" = 0 ]; then
+    fi    # v0.2.89: the check used to cover FURNITURE ONLY and tried apt exactly
+    # once. Field v0.2.88 (fresh Ubuntu rootfs): the first big install died
+    # partway, tint2/pcmanfm healed via this governor but openbox/xterm/
+    # xsetroot stayed missing - a WM-LESS desktop: pcmanfm dialogs had no
+    # min/max/close/resize decorations and tint2 listed no tasks and no
+    # terminal launcher (no EWMH _NET_CLIENT_LIST without a WM). Check the
+    # WM set too, and retry (a once-only flag can never heal a download
+    # that failed mid-way).
+    if { [ ! -x /usr/bin/tint2 ] || [ ! -x /usr/bin/pcmanfm ] || [ ! -x /usr/bin/xdotool ] || [ ! -x /usr/bin/picom ] || [ ! -x /usr/bin/openbox ] || [ ! -x /usr/bin/xterm ] || [ ! -x /usr/bin/xsetroot ]; } && [ "$APTTRIED" -lt 3 ]; then
       if ! apt_busy; then
-        APTTRIED=1
-        echo "emux-x11: governor installing missing furniture (tint2/pcmanfm/xdotool/picom)" >&2
+        APTTRIED=$((APTTRIED + 1))
+        echo "emux-x11: governor installing missing furniture/wm (tint2/pcmanfm/xdotool/picom/openbox/xterm/x11-apps) - attempt $APTTRIED/3" >&2
         ( apt_lists_stale && apt_update_once
           DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-            tint2 pcmanfm mousepad x11-xserver-utils xdotool picom >>/tmp/emux_rest.log 2>&1
+            tint2 pcmanfm mousepad x11-xserver-utils xdotool picom openbox xterm x11-apps >>/tmp/emux_rest.log 2>&1
           dpkg --configure -a >>/tmp/emux_rest.log 2>&1
-          if [ ! -x /usr/bin/xdotool ]; then
-            echo "emux-x11: governor install FAILED - xdotool still missing; rest.log tail:" >&2
+          if [ ! -x /usr/bin/xdotool ] || [ ! -x /usr/bin/openbox ]; then
+            echo "emux-x11: governor install FAILED - xdotool/openbox still missing; rest.log tail:" >&2
             tail -6 /tmp/emux_rest.log >&2 2>/dev/null
           fi ) &
       fi
+    fi
+    # v0.2.89: WM watchdog. start_wm() runs exactly once per session; if the
+    # WM binary was missing at that instant (fresh rootfs whose first install
+    # died partway) or the WM died later, NOTHING ever relaunched it. A
+    # WM-less desktop has no window decorations, an empty tint2 taskbar and
+    # no way to open a terminal from the panel. Relaunch whenever the
+    # preferred WM and every fallback is down but a binary exists - which
+    # also covers "the governor just installed openbox mid-session".
+    if ! running0 "$WM" && ! running0 openbox && ! running0 icewm && ! running0 fluxbox && ! running0 twm \
+       && { [ -x "/usr/bin/$WM" ] || [ -x /usr/bin/openbox ] || [ -x /usr/bin/icewm ] || [ -x /usr/bin/twm ]; }; then
+      echo "emux-x11: governor: no window manager running - (re)launching $WM" >&2
+      start_wm "$WM"
     fi
     has=0
     # v0.2.88: argv[0]-exact has-scan. The old whole-cmdline grep
