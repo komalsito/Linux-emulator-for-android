@@ -1,0 +1,104 @@
+# Manual-only APK build.
+#
+# WHY THIS SHAPE: this workflow has NO push / pull_request / schedule triggers -
+# commits (human or AI) can never start it. The only entry point is the "Run
+# workflow" button in the Actions tab, so free Actions minutes are spent only
+# when a human deliberately presses it. Even the APK commit-back step at the
+# end cannot chain anything: pushes made with GITHUB_TOKEN never trigger other
+# workflows (GitHub guarantees this), and there are no other triggers anyway.
+#
+# Cost controls built in:
+#   - timeout-minutes: a wedged build cannot drain the quota
+#   - concurrency + cancel-in-progress: no double builds
+#   - setup-java cache:gradle: repeat builds resolve dependencies from cache
+#   - artifact retention 14 days, not 90 (artifact storage counts too)
+#   - unit tests are an optional input, OFF by default
+name: Build APK (manual)
+
+on:
+  workflow_dispatch:
+    inputs:
+      run_tests:
+        description: 'Run the Robolectric unit tests too (adds a few minutes)'
+        required: false
+        default: 'false'
+      commit_apk:
+        description: 'Commit the built APK into releases/ and the repo root (release convention)'
+        required: false
+        default: 'true'
+
+concurrency:
+  group: build-apk-manual
+  cancel-in-progress: true
+
+permissions:
+  contents: write   # for the optional APK commit-back step; everything else needs only read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: gradle
+
+      # local.properties pins a machine-local SDK path (/opt/android-sdk); the
+      # runner provides ANDROID_HOME and Gradle falls back to it once the file
+      # is gone.
+      - name: Drop machine-local SDK path
+        run: rm -f android-emux/local.properties
+
+      # The committed debug-keystore/emux-debug.jks is picked up by the debug
+      # signingConfig, so the APK has the same signature as every release -
+      # adb install -r over an existing install works, no data loss.
+      - name: Build debug APK
+        working-directory: android-emux
+        run: ./gradlew assembleDebug --no-daemon --stacktrace
+
+      # Upload BEFORE the gates: even if verify or tests fail below, the APK
+      # stays downloadable from this run's page.
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: emux-debug
+          path: android-emux/app/build/outputs/apk/debug/*.apk
+          retention-days: 14
+          if-no-files-found: error
+
+      # The repo's own 76-check release gate: identity, signature, guest
+      # assets, dex symbols, dependency markers - proves the APK matches the
+      # tree before anyone installs it.
+      - name: Verify APK against the working tree (release gate)
+        run: sh android-emux/tools/verify_apk.sh android-emux/app/build/outputs/apk/debug/app-debug.apk
+
+      - name: Unit tests
+        if: ${{ github.event.inputs.run_tests == 'true' }}
+        working-directory: android-emux
+        run: ./gradlew testDebugUnitTest --no-daemon
+
+      # Release convention: releases/emux-debug-v<version>-vc<code>.apk plus a
+      # refreshed root emux-debug.apk. Pushes by GITHUB_TOKEN never trigger
+      # other workflows, so this commit cannot start anything.
+      - name: Commit APK into the repo (release convention)
+        if: ${{ github.event.inputs.commit_apk != 'false' }}
+        run: |
+          APK="android-emux/app/build/outputs/apk/debug/app-debug.apk"
+          VC=$(grep -oP 'versionCode = \K[0-9]+' android-emux/app/build.gradle.kts | head -1)
+          VN=$(grep -oP 'versionName = "\K[^"]+' android-emux/app/build.gradle.kts | head -1)
+          cp "$APK" emux-debug.apk
+          cp "$APK" "releases/emux-debug-v${VN}-vc${VC}.apk"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          # The branch may have moved while the build ran (about 10 minutes):
+          # rebase first so the push cannot fail on a stale tip.
+          git pull --rebase --autostash
+          git add emux-debug.apk "releases/emux-debug-v${VN}-vc${VC}.apk"
+          git commit -m "build: ship the v${VN} APK (vc${VC}) from the manual workflow (verify_apk passed on this run)" || echo "nothing changed - APK identical"
+          git push

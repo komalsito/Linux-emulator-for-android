@@ -5,7 +5,6 @@ plugins {
 
 android {
     namespace = "com.emux"
-    compileSdk = 34
 
     // No NDK/C++ build here: EmuX runs a *pure-Android* terminal core
     // (com.termux:terminal-emulator + com.termux:view) — same engine Termux uses,
@@ -27,6 +26,15 @@ android {
         // (adb install / GitHub Releases), same distribution model as Termux
         // on F-Droid.
         targetSdk = 28
+        // v0.2.87 (vc187): host-side fixes only - (1) TerminalService's manifest
+        // foregroundServiceType now also declares dataSync, making the fallback
+        // the FOREGROUND_SERVICE_DATA_SYNC permission has always promised legal
+        // on API 29-33 (the v0.2.85 field log tail: "startForeground refused
+        // type=1"); (2) Settings selectors open through a framework AlertDialog,
+        // because the androidx DialogFragment + appcompat chain renders nothing
+        // on the field HUAWEI ROM (click ripple, no selection UI). ENV_VERSION
+        // stays 77: no guest script changed, so existing installs must not
+        // re-seed.
         versionCode = 187
         versionName = "0.2.87"
 
@@ -65,7 +73,7 @@ android {
             // Fall back to the auto-generated debug key when the committed
             // keystore is absent (fresh clone without debug-keystore/).
             val ks = rootProject.file("debug-keystore/emux-debug.jks")
-            if (ks.isFile) signingConfig = signingConfigs.getByName("emuxDebug")
+            if (ks.isFile) signingConfig = signingConfig.getByName("emuxDebug")
         }
     }
 
@@ -107,7 +115,7 @@ dependencies {
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")
     // v0.1.47 multi-distro: pure-Java XZ/LZMA2 decoder (0BSD) — the Debian and
     // Ubuntu catalog images are .tar.xz, and host xz(1)/tar -J availability on
-    // Android 7-15 ROMs is inconsistent. Host tooling is still tried first;
+    // Android 7–15 ROMs is inconsistent. Host tooling is still tried first;
     // this is the guaranteed fallback inside extractTarXz().
     implementation("org.tukaani:xz:1.10")
 
