@@ -41,6 +41,23 @@
         <item>540</item>
     </string-array>
 
+    <!-- v0.2.85: mouse/trackpad wheel scale. One wheel notch or trackpad
+         flick emits this many X scroll clicks. Trackpads report fractional
+         AXIS_VSCROLL, so the view accumulates a per-axis remainder and emits
+         one click per whole notch times this factor. -->
+    <string-array name="mouse_scroll_scale_entries">
+        <item>Precise — 1 line per notch</item>
+        <item>Normal — 3 lines (default)</item>
+        <item>Fast — 5 lines</item>
+        <item>Very fast — 9 lines</item>
+    </string-array>
+    <string-array name="mouse_scroll_scale_values">
+        <item>1</item>
+        <item>3</item>
+        <item>5</item>
+        <item>9</item>
+    </string-array>
+
     <string-array name="distro_values">
         <item>alpine</item>
         <item>debian</item>

@@ -7,6 +7,7 @@ import android.graphics.Paint
 import android.graphics.Rect
 import android.graphics.RectF
 import android.util.AttributeSet
+import android.view.InputDevice
 import android.view.MotionEvent
 import android.view.ScaleGestureDetector
 import android.view.View
@@ -35,6 +36,12 @@ import kotlin.math.min
  *                      is what you actually need
  *  - pinch-to-zoom   → viewport only, clamped so one X px ≥ 0.25 screen px
  *  - double-tap      → toggle letterbox-fit ↔ fill-screen
+ *  - mouse/trackpad  → the DIRECT path (v0.2.85): buttons press on press
+ *                      (right-click is a right-click, not a long-press),
+ *                      hover moves the real X pointer, wheel/two-finger
+ *                      scroll quantises into X buttons 4-7 with per-axis
+ *                      remainder accumulation; fingers keep everything above
+ *                      untouched, and a stylus IS a finger here
  *  - "keys" toggle   → on-screen Esc/Tab/Ctrl/Alt/Super/BackSpace + wheel.
  *                      Ctrl/Alt/Super are STICKY: arm one and the next key from
  *                      the soft keyboard becomes that shortcut (Ctrl+C).
@@ -593,6 +600,11 @@ class DesktopView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attrs) 
     private var cursorY = -1f
     private val cursorPath = android.graphics.Path()
     private fun drawCursor(canvas: Canvas) {
+        // v0.2.85: a real mouse brings its OWN system-drawn cursor; drawing
+        // ours under it shows two pointers a few px apart - the "virtual mouse
+        // lagging behind the real one" field complaint. Fingers clear the flag
+        // on ACTION_DOWN and get the synthetic cursor back.
+        if (realMouseCursor) return
         if (cursorX < 0f || cursorY < 0f) return
         val (vx, vy) = xToView(cursorX, cursorY)
         if (vx < -40f || vy < -40f || vx > width + 40f || vy > height + 40f) return
@@ -615,15 +627,256 @@ class DesktopView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attrs) 
         })
     }
 
-    /** Trackpad / mouse hover: move the drawn cursor, never inject a click. */
+    /**
+     * Trackpad / mouse hover.
+     *
+     * v0.2.85 REAL POINTER FOLLOW: for a mouse/trackpad this now injects the
+     * hover into X (coalesced to <=30/s with a trailing flush, so the FINAL
+     * position always lands - hover highlights live or die on it), and the
+     * synthetic drawn cursor hides: Android already draws the system pointer
+     * for a real mouse, and two cursors a few px apart read as "virtual mouse
+     * lagging behind the real one". Finger/stylus hover keeps the old
+     * behaviour exactly: move the drawn cursor, inject nothing.
+     */
     override fun onHoverEvent(event: android.view.MotionEvent): Boolean {
-        if (event.actionMasked == android.view.MotionEvent.ACTION_HOVER_MOVE ||
-            event.actionMasked == android.view.MotionEvent.ACTION_HOVER_ENTER) {
+        val a = event.actionMasked
+        if (a == android.view.MotionEvent.ACTION_HOVER_MOVE ||
+            a == android.view.MotionEvent.ACTION_HOVER_ENTER) {
+            if (isMouseInput(event)) {
+                realMouseCursor = true
+                if (!frameless) {
+                    val (x, y) = mapToX(event.x, event.y, markCursor = false)
+                    val now = System.currentTimeMillis()
+                    val dt = now - lastHoverInjectMs
+                    if (dt >= HOVER_MIN_INTERVAL_MS) {
+                        lastHoverInjectMs = now
+                        if (hoverTrailPosted) {
+                            removeCallbacks(hoverTrailRunnable); hoverTrailPosted = false
+                        }
+                        pendingHoverX = -1
+                        desktop?.injectMotion(x, y)
+                    } else {
+                        // Inside the coalescing window: remember the position
+                        // and let the trailing runnable inject it once. Without
+                        // the trailing flush the pointer would stop up to 33 ms
+                        // short of where the mouse actually is.
+                        pendingHoverX = x; pendingHoverY = y
+                        if (!hoverTrailPosted) {
+                            hoverTrailPosted = true
+                            postDelayed(hoverTrailRunnable, HOVER_MIN_INTERVAL_MS - dt)
+                        }
+                    }
+                }
+                return true
+            }
             mapToX(event.x, event.y)
             invalidate()
             return true
         }
         return super.onHoverEvent(event)
+    }
+
+    private var lastHoverInjectMs = 0L
+    private var pendingHoverX = -1
+    private var pendingHoverY = -1
+    private var hoverTrailPosted = false
+    private val hoverTrailRunnable = Runnable {
+        hoverTrailPosted = false
+        val x = pendingHoverX; val y = pendingHoverY
+        if (x >= 0) {
+            pendingHoverX = -1
+            lastHoverInjectMs = System.currentTimeMillis()
+            desktop?.injectMotion(x, y)
+        }
+    }
+
+    // ------------------------- mouse / trackpad (v0.2.85) -------------------------
+    // External pointers get the DIRECT path: real buttons (press on DOWN, no
+    // tap delay, no long-press-to-right-click), real wheel events
+    // (ACTION_SCROLL with fractional trackpad deltas and per-axis remainder
+    // accumulation), and hover that moves the X pointer. Fingers and styli
+    // keep the touch gesture machine untouched - a stylus is touch here by
+    // design (M-Pencil users get the same tap/long-press/two-finger model).
+
+    /** True while a real mouse pointer is active: the system draws THAT
+     *  cursor, so the synthetic one must not double it. A finger touch
+     *  clears it (fingers have no system cursor). */
+    private var realMouseCursor = false
+
+    /** Mouse or trackpad? toolType decides; stylus/finger sources never count
+     *  even when a ROM tags them SOURCE_MOUSE. */
+    private fun isMouseInput(e: MotionEvent): Boolean {
+        if (e.pointerCount > 0) {
+            when (e.getToolType(0)) {
+                MotionEvent.TOOL_TYPE_MOUSE -> return true
+                MotionEvent.TOOL_TYPE_STYLUS, MotionEvent.TOOL_TYPE_ERASER,
+                MotionEvent.TOOL_TYPE_FINGER -> return false
+            }
+        }
+        return e.isFromSource(InputDevice.SOURCE_MOUSE)
+    }
+
+    /** ACTION_SCROLL also accepts raw touchpad sources: some kernels report
+     *  two-finger flicks as SOURCE_TOUCHPAD rather than SOURCE_MOUSE. */
+    private fun isWheelInput(e: MotionEvent): Boolean =
+        isMouseInput(e) || e.isFromSource(InputDevice.SOURCE_TOUCHPAD)
+
+    /** Android button bits -> X button numbers. X: 1 left, 2 middle, 3 right,
+     *  8 back, 9 forward. TERTIARY is the middle button on Android. */
+    private fun xButtonForBits(bits: Int): Int = when {
+        bits and MotionEvent.BUTTON_PRIMARY != 0 -> 1
+        bits and MotionEvent.BUTTON_SECONDARY != 0 -> 3
+        bits and MotionEvent.BUTTON_TERTIARY != 0 -> 2
+        bits and MotionEvent.BUTTON_BACK != 0 -> 8
+        bits and MotionEvent.BUTTON_FORWARD != 0 -> 9
+        else -> 1
+    }
+
+    // Wheel accumulators. Trackpads send small FRACTIONAL values (0.1-notch
+    // events are normal); only whole notches become X wheel clicks, and the
+    // remainder carries into the next event, so a slow two-finger crawl still
+    // scrolls exactly, and a fast flick does not round away its tail.
+    private var wheelAccumV = 0f
+    private var wheelAccumH = 0f
+
+    // The mouse DOWN/UP path holds ONE button; BUTTON_PRESS/RELEASE (fired
+    // when a second button joins a held one, e.g. right-click during a drag)
+    // tracks its own. Both must die on CANCEL or the button stays down in the
+    // server and every later click is swallowed - the v0.2.79 lesson.
+    private var mouseHeldButton = 0
+    private var mouseExtraButton = 0
+    private var mouseOverlayDown = false
+    private var lastMouseMotionTs = 0L
+
+    /** Settings live in the DEFAULT shared prefs (SettingsActivity's file),
+     *  and getSharedPreferences can throw on some OEM ROMs - guarded, with
+     *  sane defaults, like every other prefs access in this view. */
+    private val settingsPrefs
+        get() = runCatching {
+            androidx.preference.PreferenceManager.getDefaultSharedPreferences(context)
+        }.getOrNull()
+
+    private fun mouseScrollScale(): Float =
+        settingsPrefs?.getString("mouse_scroll_scale", "3")?.toFloatOrNull()
+            ?.coerceIn(0.1f, 16f) ?: 3f
+
+    private fun mouseNaturalScroll(): Boolean =
+        settingsPrefs?.getBoolean("mouse_natural_scroll", false) ?: false
+
+    /**
+     * Wheel + extra mouse buttons. ACTION_SCROLL is the ONLY route a trackpad
+     * two-finger scroll arrives by; ACTION_BUTTON_PRESS/RELEASE carry any
+     * button pressed or released while another is already down (the first
+     * press of a gesture comes through onTouchEvent as ACTION_DOWN instead).
+     */
+    override fun onGenericMotionEvent(event: MotionEvent): Boolean {
+        when (event.actionMasked) {
+            MotionEvent.ACTION_SCROLL -> {
+                if (!isWheelInput(event) || frameless) return false
+                val v = event.getAxisValue(MotionEvent.AXIS_VSCROLL)
+                val h = event.getAxisValue(MotionEvent.AXIS_HSCROLL)
+                if (v == 0f && h == 0f) return false
+                val k = mouseScrollScale() * (if (mouseNaturalScroll()) -1f else 1f)
+                wheelAccumV = (wheelAccumV + v * k).coerceIn(-64f, 64f)
+                wheelAccumH = (wheelAccumH + h * k).coerceIn(-64f, 64f)
+                val nv = wheelAccumV.toInt(); if (nv != 0) wheelAccumV -= nv
+                val nh = wheelAccumH.toInt(); if (nh != 0) wheelAccumH -= nh
+                if (nv != 0 || nh != 0) {
+                    val (x, y) = mapToX(event.x, event.y, markCursor = false)
+                    // one call = one batched XTEST burst for the whole gesture
+                    desktop?.injectScrollPair(x, y, nv, nh)
+                }
+                return true
+            }
+            MotionEvent.ACTION_BUTTON_PRESS, MotionEvent.ACTION_BUTTON_RELEASE -> {
+                if (!isMouseInput(event) || frameless) return false
+                val b = xButtonForBits(event.actionButton)
+                val press = event.actionMasked == MotionEvent.ACTION_BUTTON_PRESS
+                val (x, y) = mapToX(event.x, event.y, markCursor = false)
+                if (press) {
+                    if (mouseExtraButton == 0 && mouseExtraButton != b) {
+                        mouseExtraButton = b
+                        desktop?.injectClick(x, y, b, press = true)
+                    }
+                } else if (mouseExtraButton == b) {
+                    mouseExtraButton = 0
+                    desktop?.injectClick(x, y, b, press = false)
+                }
+                return true
+            }
+        }
+        return super.onGenericMotionEvent(event)
+    }
+
+    /**
+     * The mouse gesture path: DOWN presses the mapped button immediately
+     * (right-click is a RIGHT-CLICK, not a 450 ms long-press), MOVE with a
+     * button down is a real drag (motion coalesced to <=30/s), UP releases.
+     * None of the finger machinery runs: no tap delay, no double-tap state,
+     * no long-press runnable, no two-finger anything - a physical mouse
+     * reports its own buttons and its own timing, and double-clicks arrive as
+     * two real DOWN/UP pairs the X client times for itself.
+     */
+    private fun onMouseTouchEvent(e: MotionEvent): Boolean {
+        when (e.actionMasked) {
+            MotionEvent.ACTION_DOWN -> {
+                dismissIntroCard()
+                desktop?.noteTouch()
+                realMouseCursor = true
+                mouseOverlayDown = onOverlayTouch(e.x, e.y)
+                if (mouseOverlayDown) return true
+                requestFocus()
+                if (!frameless) {
+                    val (x, y) = mapToX(e.x, e.y, markCursor = false)
+                    mouseHeldButton = xButtonForBits(e.buttonState)
+                    desktop?.injectClick(x, y, mouseHeldButton, press = true)
+                    val imm = context.getSystemService(
+                        android.view.inputmethod.InputMethodManager::class.java)
+                    imm?.showSoftInput(this, android.view.inputmethod.InputMethodManager.SHOW_IMPLICIT)
+                }
+                return true
+            }
+            MotionEvent.ACTION_MOVE -> {
+                if (mouseOverlayDown || frameless || mouseHeldButton == 0) return true
+                val now = System.currentTimeMillis()
+                if (now - lastMouseMotionTs >= 33) {   // <=30 motion events/s
+                    lastMouseMotionTs = now
+                    val (x, y) = mapToX(e.x, e.y, markCursor = false)
+                    desktop?.injectMotion(x, y)
+                }
+                return true
+            }
+            MotionEvent.ACTION_UP -> {
+                if (mouseOverlayDown) { mouseOverlayDown = false; return true }
+                releaseMouseButtons(e)
+                return true
+            }
+            MotionEvent.ACTION_CANCEL -> {
+                mouseOverlayDown = false
+                releaseMouseButtons(e)
+                return true
+            }
+        }
+        return true
+    }
+
+    /** Release everything the mouse path pressed, at the lift point. A button
+     *  left down in the server wedges every later click (v0.2.79), so every
+     *  exit - UP, CANCEL, even a new DOWN - goes through here. */
+    private fun releaseMouseButtons(e: MotionEvent) {
+        if (!frameless && (mouseHeldButton != 0 || mouseExtraButton != 0)) {
+            val (x, y) = mapToX(e.x, e.y, markCursor = false)
+            if (mouseExtraButton != 0) {
+                desktop?.injectClick(x, y, mouseExtraButton, press = false)
+                mouseExtraButton = 0
+            }
+            if (mouseHeldButton != 0) {
+                desktop?.injectClick(x, y, mouseHeldButton, press = false)
+                mouseHeldButton = 0
+            }
+        } else {
+            mouseExtraButton = 0; mouseHeldButton = 0
+        }
     }
 
     // ------------------------- gestures -------------------------
@@ -742,6 +995,8 @@ class DesktopView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attrs) 
     override fun onDetachedFromWindow() {
         super.onDetachedFromWindow()
         removeCallbacks(fadeTick)
+        removeCallbacks(hoverTrailRunnable)
+        hoverTrailPosted = false
     }
 
     private fun dp(v: Float) =
@@ -765,10 +1020,18 @@ class DesktopView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attrs) 
     })
 
     override fun onTouchEvent(event: MotionEvent): Boolean {
+        // v0.2.85: a real mouse/trackpad button gets the DIRECT path (press on
+        // DOWN, release on UP, no finger-gesture interpretation at all). The
+        // stylus deliberately does NOT take this path - it is touch by design.
+        if (event.pointerCount == 1 && isMouseInput(event)) return onMouseTouchEvent(event)
         scaleDetector.onTouchEvent(event)
         val multiTouch = event.pointerCount > 1
         when (event.actionMasked) {
             MotionEvent.ACTION_DOWN -> {
+                // v0.2.85: a finger is back - the synthetic cursor is the only
+                // cursor a finger has, so un-hide it (the system draws one for
+                // mice, never for fingers).
+                realMouseCursor = false
                 // v0.2.61: the intro card is dismissed by the first touch, so
                 // it can never sit between the user and the desktop.
                 dismissIntroCard()
@@ -1223,6 +1486,9 @@ class DesktopView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attrs) 
 
     private companion object {
         const val LONG_PRESS_MS = 450L
+        // v0.2.85: mouse hover injection budget - at most ~30 X motions per
+        // second, with a trailing flush so the final position always lands.
+        const val HOVER_MIN_INTERVAL_MS = 33L
         // v0.2.79 double-tap-and-hold: the window in which a second tap counts,
         // how far it may wander, and how long the hold must last before it means
         // "grab" rather than "double-click". DT_HOLD_MS sits well under

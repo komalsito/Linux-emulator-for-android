@@ -103,6 +103,7 @@ private class Painter(host: String, port: Int) {
     private var seq = 0
     private val order = ByteOrder.LITTLE_ENDIAN
     var root = 0; private set
+    var rootVisual = 0; private set
     var width = 0; private set
     var height = 0; private set
     var depth = 0; private set
@@ -136,6 +137,7 @@ private class Painter(host: String, port: Int) {
         val foff = ((32 + vlen + 3) / 4) * 4
         val soff = foff + nFormats * 8
         root = g.getInt(soff)
+        rootVisual = g.getInt(soff + 32)
         width = g.getShort(soff + 20).toInt() and 0xFFFF
         height = g.getShort(soff + 22).toInt() and 0xFFFF
         depth = rest[soff + 38].toInt() and 0xFF
@@ -250,6 +252,65 @@ private class Painter(host: String, port: Int) {
         val fg = ByteBuffer.allocate(8).order(order)
         fg.putInt(g); fg.putInt(0)
         sendNoReply(56, 0, fg.array())
+    }
+
+    /**
+     * v0.2.85: a mapped window that LISTENS for button/motion events, so an
+     * injected burst can be proven by what actually arrives - the same trick
+     * X11Client.probeButtonDelivery plays, but on the harness's own connection
+     * (events cross connections fine: delivery is by pointer position). No WM
+     * runs on this display, so the window sits exactly where it is created.
+     * CreateWindow encoding mirrors X11Client's probe window (InputOutput,
+     * root visual at this depth, CWBackPixel|CWEventMask = 1<<1 | 1<<11).
+     */
+    fun listenWindow(x: Int, y: Int, w: Int, h: Int, mask: Int): Int {
+        val wid = newId()
+        val body = ByteBuffer.allocate(36).order(order)
+        body.putInt(wid)
+        body.putInt(root)                      // parent
+        body.putShort(x.toShort()); body.putShort(y.toShort())
+        body.putShort(w.toShort()); body.putShort(h.toShort())
+        body.putShort(0)                       // border-width
+        body.putShort(if (rootVisual == 0) 0 else 1)   // CopyFromParent / InputOutput
+        body.putInt(rootVisual)                // visual (0 = CopyFromParent)
+        body.putInt((1 shl 1) or (1 shl 11))   // CWBackPixel | CWEventMask
+        body.putInt(0x1020f6)                  // back pixel
+        body.putInt(mask)
+        sendNoReply(1, if (rootVisual == 0) 0 else depth, body.array())
+        sendNoReply(8, 0, ByteBuffer.allocate(4).order(order).putInt(wid).array())  // MapWindow
+        return wid
+    }
+
+    /**
+     * Read packets for up to [ms] and count button/motion events:
+     * returns [press4, release4, press7, release7, motion]. Quiet periods end
+     * on the read timeout; the loop keeps going until the deadline so a burst
+     * that the server delivers in several writes is still counted whole.
+     */
+    fun drainButtonEvents(ms: Int): IntArray {
+        val n = IntArray(5)
+        val deadline = System.currentTimeMillis() + ms
+        s.soTimeout = 100
+        try {
+            while (System.currentTimeMillis() < deadline) {
+                val h = ByteArray(32)
+                try { ins.readFully(h) } catch (_: java.net.SocketTimeoutException) { continue }
+                val t = h[0].toInt() and 0xFF
+                val detail = h[1].toInt() and 0xFF
+                when (t) {
+                    4 -> if (detail == 4) n[0]++ else if (detail == 7) n[2]++
+                    5 -> if (detail == 4) n[1]++ else if (detail == 7) n[3]++
+                    6 -> n[4]++
+                    0 -> noteError(h, ByteBuffer.wrap(h).order(order).getShort(2).toInt() and 0xFFFF)
+                    1, 35 -> {
+                        val u = ByteBuffer.wrap(h).order(order).getInt(4)
+                        if (u > 0) ins.readFully(ByteArray(u * 4))
+                    }
+                }
+            }
+        } catch (_: Exception) {
+        } finally { s.soTimeout = 10_000 }
+        return n
     }
 
     private fun noteError(h: ByteArray, sq: Int) {
@@ -565,6 +626,41 @@ fun main(args: Array<String>) {
     }
     ck(probe.presses >= 1, "probeButtonDelivery sees its own injected ButtonPress",
         probe.detail.take(110))
+
+    // ---- 7b. v0.2.85: the batched wheel burst (mouse/trackpad scroll) ---
+    // One fakeScrollBurst call must deliver EVERY notch of BOTH axes to a
+    // real listening window - presses AND releases - with the burst's own
+    // leading motion aiming the pointer into it. Reflection on purpose: the
+    // harness must still compile against pre-v0.2.85 clients.
+    run {
+        val m = runCatching {
+            c.javaClass.getMethod("fakeScrollBurst",
+                Int::class.javaPrimitiveType, Int::class.javaPrimitiveType,
+                Int::class.javaPrimitiveType, Int::class.javaPrimitiveType,
+                Int::class.javaPrimitiveType, Int::class.javaPrimitiveType)
+        }.getOrNull()
+        if (m == null) {
+            ck(false, "fakeScrollBurst (v0.2.85 batched wheel) exists",
+                "no such method on this client")
+        } else {
+            val wx = 300; val wy = 700; val ww = 140; val wh = 100
+            // ButtonPress | ButtonRelease | PointerMotion | Exposure | StructureNotify
+            p.listenWindow(wx, wy, ww, wh,
+                (1 shl 2) or (1 shl 3) or (1 shl 6) or (1 shl 15) or (1 shl 17))
+            p.sync()
+            Thread.sleep(300)
+            p.drainButtonEvents(150)              // discard the map/expose flood
+            m.invoke(c, wx + ww / 2, wy + wh / 2, 4, 2, 7, 1)
+            val n = p.drainButtonEvents(1_500)
+            ck(n[0] == 2 && n[1] == 2 && n[2] == 1 && n[3] == 1,
+                "one fakeScrollBurst delivers every notch of both axes (2x button4 + 1x button7, press AND release)",
+                "press4=${n[0]} rel4=${n[1]} press7=${n[2]} rel7=${n[3]} motion=${n[4]}")
+            val q = c.queryPointerRoot()
+            ck(q != null && q.first in wx..(wx + ww) && q.second in wy..(wy + wh),
+                "the burst's leading motion aims the pointer into the scrolled window",
+                "${q?.first},${q?.second}")
+        }
+    }
 
     // ---- 8. what the fixed pipeline costs -----------------------------
     println("  -- measured cost of one update (this machine, no proot) --")

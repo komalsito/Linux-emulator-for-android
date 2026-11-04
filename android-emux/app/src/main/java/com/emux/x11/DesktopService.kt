@@ -3785,6 +3785,34 @@ class DesktopService(
     }
 
     /**
+     * v0.2.85 MOUSE/TRACKPAD WHEEL: one whole ACTION_SCROLL gesture - BOTH
+     * axes, every whole notch - as a single queued XTEST burst (one buffered
+     * write on the wire; see [X11Client.fakeScrollBurst]). [vNotches] positive
+     * = wheel up = button 4, negative = button 5; [hNotches] positive = right
+     * = button 7, negative = left = button 6. DesktopView owns the fractional
+     * accumulation (trackpads send 0.1-notch events); values arrive here whole.
+     */
+    fun injectScrollPair(xInXSpace: Int, yInXSpace: Int, vNotches: Int, hNotches: Int) {
+        if (vNotches == 0 && hNotches == 0) return
+        injectCount++
+        notePointer(xInXSpace, yInXSpace, null)
+        val vBtn = if (vNotches > 0) 4 else 5
+        val hBtn = if (hNotches > 0) 7 else 6
+        val vn = minOf(kotlin.math.abs(vNotches), 24)
+        val hn = minOf(kotlin.math.abs(hNotches), 24)
+        if (xtest() != null) {
+            postXtest(motion = false) { c ->
+                c.fakeScrollBurst(xInXSpace, yInXSpace, vBtn, vn, hBtn, hn)
+            }
+            return
+        }
+        ensureInputWriter()
+        inputLine("M $xInXSpace $yInXSpace 0")
+        repeat(vn) { inputLine("D $vBtn 0 0"); inputLine("U $vBtn 0 0") }
+        repeat(hn) { inputLine("D $hBtn 0 0"); inputLine("U $hBtn 0 0") }
+    }
+
+    /**
      * Tap a keysym with Ctrl / Alt / Super held down.
      *
      * Shift is deliberately NOT a parameter: [X11Client.typeKeysymTap] already

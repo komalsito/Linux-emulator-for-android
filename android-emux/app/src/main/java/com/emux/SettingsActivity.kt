@@ -126,6 +126,10 @@ class SettingsActivity : AppCompatActivity() {
                         (sp.getString("capture_quality", "1280") ?: "1280") + " px long side" +
                             qualityPrediction(this@SettingsActivity))
                     row("Keep-awake burst", if (sp.getBoolean("keepawake_burst", true)) "ON" else "OFF")
+                    row("Mouse / trackpad scroll speed",
+                        (sp.getString("mouse_scroll_scale", "3") ?: "3") + " lines per notch")
+                    row("Natural scrolling (mouse)",
+                        if (sp.getBoolean("mouse_natural_scroll", false)) "ON" else "OFF")
                     row("Mirror", sp.getString("mirror", com.emux.core.BootstrapManager.MIRROR) ?: "")
                     addView(android.widget.TextView(this@SettingsActivity).apply {
                         text = "\n(fallback view — detail error: ${err?.javaClass?.name}: ${err?.message})"
@@ -248,6 +252,28 @@ class SettingsActivity : AppCompatActivity() {
                 key = "keepawake_burst"; title = "Keep-awake during activity"
                 summary = "Hold wake lock briefly after typing; auto-expire when idle"
                 setDefaultValue(true)
+            })
+            // v0.2.85: external mouse / trackpad (mirrors res/xml/preferences.xml).
+            screen.addPreference(androidx.preference.ListPreference(ctx).apply {
+                key = "mouse_scroll_scale"; title = "Mouse / trackpad scroll speed"
+                summary = "How far one wheel notch or two-finger flick scrolls. " +
+                    "Trackpad deltas are fractional, so the pane accumulates the " +
+                    "remainder and emits whole scroll steps."
+                entries = arrayOf(
+                    "Precise \u2014 1 line per notch",
+                    "Normal \u2014 3 lines (default)",
+                    "Fast \u2014 5 lines",
+                    "Very fast \u2014 9 lines")
+                entryValues = arrayOf("1", "3", "5", "9")
+                setDefaultValue("3")
+                summaryProvider = androidx.preference.ListPreference.SimpleSummaryProvider.getInstance()
+            })
+            screen.addPreference(androidx.preference.SwitchPreferenceCompat(ctx).apply {
+                key = "mouse_natural_scroll"; title = "Natural scrolling (mouse / trackpad)"
+                summary = "On: content follows the two fingers / wheel like a touchscreen. " +
+                    "Off: classic wheel direction. External pointer only - the on-screen " +
+                    "two-finger gesture is unchanged."
+                setDefaultValue(false)
             })
             // v0.1.53: manual dpkg/apt repair (programmatic screen mirror).
             screen.addPreference(androidx.preference.Preference(ctx).apply {

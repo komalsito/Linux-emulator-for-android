@@ -70,6 +70,23 @@
         app:title="Restart desktop now"
         app:summary="Applies the capture quality immediately. Restarting ends the X session, so open windows are lost - the Linux terminal is not affected." />
 
+    <!-- v0.2.85: external mouse / trackpad. These take effect on the next
+         scroll gesture (read live), no desktop restart needed. -->
+    <ListPreference
+        app:key="mouse_scroll_scale"
+        app:title="Mouse / trackpad scroll speed"
+        app:summary="How far one wheel notch or two-finger flick scrolls. Trackpad deltas are fractional, so the pane accumulates the remainder and emits whole scroll steps - a slow crawl still moves exactly."
+        app:entries="@array/mouse_scroll_scale_entries"
+        app:entryValues="@array/mouse_scroll_scale_values"
+        app:defaultValue="3"
+        app:useSimpleSummaryProvider="true" />
+
+    <SwitchPreferenceCompat
+        app:key="mouse_natural_scroll"
+        app:title="Natural scrolling (mouse / trackpad)"
+        app:summary="On: content follows the two fingers / wheel like a touchscreen (scroll down moves the page down). Off: classic wheel direction. Applies to the external pointer only - the on-screen two-finger gesture is unchanged."
+        app:defaultValue="false" />
+
     <EditTextPreference
         app:key="mirror"
         app:title="@string/pref_distro_title"

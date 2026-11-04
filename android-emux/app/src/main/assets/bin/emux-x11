@@ -547,6 +547,20 @@ start_furniture() {
 # and the tint2 config is rewritten only when the installed-app set
 # changes, so a later REST install adds its icons live (start_furniture
 # calls this) without clobbering a hand-edited config on every open.
+# v0.2.85: PER-FILE OPT-OUT of the rice re-seed. Everything below is
+# regenerated under version stamps on every launch - that is how the field
+# fixes reach every device reliably ("write once if absent" lost the
+# click-swallow audit badly, see write_rc_xml) - but a user who themes their
+# own desktop needs the seeder to keep its hands off THEIR files. Drop an
+# empty marker into ~/.config/emux/ and that config is yours permanently:
+#   ~/.config/emux/keep-tint2rc    never rewrite the tint2 panel again
+#   ~/.config/emux/keep-autostart  never rewrite the openbox autostart again
+#   ~/.config/emux/keep-pcmanfm    never touch pcmanfm.conf, the per-screen
+#                                  desktop-items-0.conf, or libfm.conf again
+# EmuX-owned files (.desktop launchers, Welcome.txt, the Emux theme, rc.xml -
+# whose rewrite is the click-swallow FIX) are still seeded regardless; the
+# rc.xml audit always runs and `doctor` always reports what it found.
+emux_keep() { [ -e "$HOME/.config/emux/keep-$1" ]; }
 seed_desktop_config() {
   mkdir -p "$HOME/.local/share/applications" "$HOME/Desktop" \
     "$HOME/.config/tint2" "$HOME/.config/openbox" "$HOME/.config/pcmanfm/default" 2>/dev/null
@@ -555,11 +569,15 @@ seed_desktop_config() {
   # default; double-tap now reaches X as a real double-click, but libfm also
   # offers single-click-to-open, which is the friendlier contract for touch.
   # Only seed it when the user has no opinion yet - never overwrite a choice.
+  if emux_keep pcmanfm; then
+    echo "emux-x11: keep-pcmanfm marker - libfm/pcmanfm configs left alone" >&2
+  else
   mkdir -p "$HOME/.config/libfm" 2>/dev/null
   if [ ! -e "$HOME/.config/libfm/libfm.conf" ]; then
     printf '[config]\nsingle_click=1\n' > "$HOME/.config/libfm/libfm.conf" 2>/dev/null
   elif ! grep -q '^single_click=' "$HOME/.config/libfm/libfm.conf" 2>/dev/null; then
     printf 'single_click=1\n' >> "$HOME/.config/libfm/libfm.conf" 2>/dev/null
+  fi
   fi
   # --- .desktop launchers (only for installed apps) ---
   APPS=""
@@ -654,7 +672,9 @@ EOF
   STAMP="$HOME/.config/tint2/.emux-apps"
   OLD_APPS=""
   [ -e "$STAMP" ] && OLD_APPS=$(cat "$STAMP" 2>/dev/null)
-  if [ ! -e "$HOME/.config/tint2/tint2rc" ] || [ "$APPS" != "$OLD_APPS" ]; then
+  if emux_keep tint2rc; then
+    echo "emux-x11: keep-tint2rc marker - the user's panel config is NOT rewritten" >&2
+  elif [ ! -e "$HOME/.config/tint2/tint2rc" ] || [ "$APPS" != "$OLD_APPS" ]; then
     if [ -e "$HOME/.config/tint2/tint2rc" ] && ! grep -q "EmuX" "$HOME/.config/tint2/tint2rc" 2>/dev/null; then
       cp "$HOME/.config/tint2/tint2rc" "$HOME/.config/tint2/tint2rc.emux-bak" 2>/dev/null
     fi
@@ -795,7 +815,9 @@ EOF
   fi
   PFD="$HOME/.config/pcmanfm/default"
   mkdir -p "$PFD" 2>/dev/null
-  if [ ! -e "$PFD/pcmanfm.conf" ] || \
+  if emux_keep pcmanfm; then
+    : # keep-pcmanfm: the user's pcmanfm.conf is theirs - no rewrite, no repair
+  elif [ ! -e "$PFD/pcmanfm.conf" ] || \
      ! grep -qF "$EMUX_RICE_STAMP" "$PFD/pcmanfm.conf" 2>/dev/null; then
     {
       echo "# $EMUX_RICE_STAMP"
@@ -817,7 +839,9 @@ EOF
   # icon layout/sort order survive either way - just the background keys are
   # rewritten. Idempotent: once repaired, the gate no longer matches.
   PFI="$PFD/desktop-items-0.conf"
-  if [ ! -e "$PFI" ]; then
+  if emux_keep pcmanfm; then
+    : # keep-pcmanfm also owns the per-screen desktop layer
+  elif [ ! -e "$PFI" ]; then
     {
       echo "# $EMUX_RICE_STAMP"
       echo "[*]"
@@ -932,7 +956,7 @@ THEME
     echo "emux-x11: rc.xml audit clean ($RCX_EFF binds no Frame/Client/Desktop context)" >&2
   fi
   # --- tint2 refresh: darker bar, bigger icons (rewrite once per stamp) ---
-  if [ -e "$HOME/.config/tint2/tint2rc" ] && ! grep -q "EmuX tint2 panel (v0.2.54)" "$HOME/.config/tint2/tint2rc" 2>/dev/null; then
+  if ! emux_keep tint2rc && [ -e "$HOME/.config/tint2/tint2rc" ] && ! grep -q "EmuX tint2 panel (v0.2.54)" "$HOME/.config/tint2/tint2rc" 2>/dev/null; then
     cp "$HOME/.config/tint2/tint2rc" "$HOME/.config/tint2/tint2rc.pre-rice" 2>/dev/null
     rm -f "$HOME/.config/tint2/tint2rc" 2>/dev/null
   fi
@@ -955,6 +979,12 @@ THEME
   # Set when we just displaced a user's own autostart; the generated file then
   # chains it back (see the tail of the block below).
   EMUX_USER_BAK=""
+  if emux_keep autostart; then
+    # v0.2.85: the user's own autostart runs as-is (start_wm passes whatever
+    # is at $OBX/autostart to `openbox --startup`). No backup, no rewrite,
+    # no chaining - the marker means the file is theirs.
+    echo "emux-x11: keep-autostart marker - the user's autostart runs as-is" >&2
+  else
   if [ -e "$OBX/autostart" ] && ! grep -qF "$EMUX_AUTOSTART_STAMP" "$OBX/autostart" 2>/dev/null; then
     if grep -q "EmuX desktop v0.2" "$OBX/autostart" 2>/dev/null; then
       : # an older EmuX stamp: safe to rewrite in place
@@ -997,6 +1027,7 @@ THEME
     } > "$OBX/autostart" 2>/dev/null
     chmod +x "$OBX/autostart" 2>/dev/null
   fi
+  fi # keep-autostart marker guard (v0.2.85)
 }
 # v0.2.45: self-check the desktop, not just the X server. A streaming
 # black frame used to be "proof" the pipeline worked while the desktop

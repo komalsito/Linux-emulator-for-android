@@ -999,6 +999,33 @@ class X11Client(
 
     fun fakeMotion(x: Int, y: Int) = xtestFake(FAKE_MOTION, 0, x, y)
 
+    /**
+     * v0.2.85: one whole wheel gesture as a SINGLE buffered write - a leading
+     * motion (the wheel lands under the pointer, wherever the gesture is
+     * aimed), then [vClicks] press/release pairs on [vButton] and [hClicks]
+     * pairs on [hButton]. Mouse and trackpad scrolling arrives as multi-notch
+     * bursts; sending the notches one write at a time costs a syscall each and
+     * lets a queued drag motion interleave mid-gesture. X encodes the wheel as
+     * buttons: 4 up, 5 down, 6 left, 7 right. Pass 0 clicks to skip an axis.
+     * Proven end-to-end by the JVM wire harness (a listening window counts
+     * every notch of both axes arriving from one call).
+     */
+    fun fakeScrollBurst(x: Int, y: Int, vButton: Int, vClicks: Int,
+                        hButton: Int, hClicks: Int) {
+        beginBatch()
+        try {
+            xtestFake(FAKE_MOTION, 0, x, y)
+            repeat(vClicks.coerceIn(0, 24)) {
+                xtestFake(FAKE_BUTTON_PRESS, vButton, x, y)
+                xtestFake(FAKE_BUTTON_RELEASE, vButton, x, y)
+            }
+            repeat(hClicks.coerceIn(0, 24)) {
+                xtestFake(FAKE_BUTTON_PRESS, hButton, x, y)
+                xtestFake(FAKE_BUTTON_RELEASE, hButton, x, y)
+            }
+        } finally { endBatch() }
+    }
+
     // ============================== v0.2.78: windows, focus and the button proof
     /** Next resource id for this connection (Xlib's base+mask arithmetic). */
     private fun newResourceId(): Int {

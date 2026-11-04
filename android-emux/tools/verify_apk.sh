@@ -170,6 +170,12 @@ out(bool(re.search(r'(?m)^doctor\(\)',g)), "APK's emux-x11 has the doctor subcom
 out('-fbdir /tmp/emux_fbdir' in g and 'FBDIR_CHECKED' in g,
     "APK's emux-x11 launches Xvfb with -fbdir (v0.2.84 zero-process framebuffer mailbox)",
     "no -fbdir handling - pre-v0.2.84 guest script")
+# v0.2.85: the per-file rice opt-out. Without the marker helper in the asset,
+# a user's own tint2rc/autostart/pcmanfm config keeps getting regenerated on
+# every start no matter what they put in ~/.config/emux/.
+out('emux_keep()' in g and 'keep-tint2rc' in g and 'keep-autostart' in g and 'keep-pcmanfm' in g,
+    "APK's emux-x11 has the per-file rice opt-out markers (v0.2.85 keep-tint2rc/keep-autostart/keep-pcmanfm)",
+    "no emux_keep markers - pre-v0.2.85 guest script")
 PYEOF
 
 # ---- 4. dex carries the current host-side code ----------------------------
@@ -191,7 +197,12 @@ for sym in ('injectScroll','injectKeysymCombo','maybeShowIntro','initDamageTrack
             'pendingEvents','requestReplyFull','damageRectOf','hasQueuedEvent','postXtest',
             # v0.2.84: raw-565 grabs + the band-diff painter + the fbdir mailbox
             # reader must all be in the shipped dex.
-            'grabRegion565','diffUpload','paintRawFrame','xwdHeaderOf','fbdirAvailable'):
+            'grabRegion565','diffUpload','paintRawFrame','xwdHeaderOf','fbdirAvailable',
+            # v0.2.85: mouse/trackpad - the batched wheel burst (client), the
+            # two-axis service entry, the direct mouse gesture path and its
+            # source check, plus the natural-scroll pref key string.
+            'fakeScrollBurst','injectScrollPair','onMouseTouchEvent','isMouseInput',
+            'mouse_natural_scroll'):
     hit=any(sym.encode() in b for b in blobs)
     out(hit,f"dex contains {sym}",
         "" if hit else "not found in any classes*.dex - the APK predates v0.2.60/v0.2.61")
