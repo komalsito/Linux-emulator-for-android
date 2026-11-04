@@ -84,7 +84,15 @@ android {
             // Fall back to the auto-generated debug key when the committed
             // keystore is absent (fresh clone without debug-keystore/).
             val ks = rootProject.file("debug-keystore/emux-debug.jks")
-            if (ks.isFile) signingConfig = signingConfig.getByName("emuxDebug")
+            // v0.2.88 BUILD FIX: this read `signingConfig.getByName(...)` - the
+            // BuildType's own Property<SigningConfig?> receiver, which has no
+            // getByName. The named config lives in the signingConfigs CONTAINER
+            // (the outer android{} receiver is in scope inside buildTypes{}).
+            // The typo is pre-existing, but the v0.2.88 comment additions
+            // changed the file hash and forced a fresh Kotlin-DSL compile,
+            // which surfaced it (manual run #2: script compilation error,
+            // 1m31s, no APK).
+            if (ks.isFile) signingConfig = signingConfigs.getByName("emuxDebug")
         }
     }
 
