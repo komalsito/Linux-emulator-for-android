@@ -229,6 +229,21 @@ class DesktopView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attrs) 
     // as LIVE over a frozen photograph forever.
     private var lastFrameMs = 0L
 
+    // v0.2.88 STARTUP OVERLAY: a black-but-streaming pane is the first-boot
+    // NORM, not a failure - a fresh rootfs spends minutes inside apt/dpkg
+    // (CORE+REST) before anything paints, and the v0.2.87 field screenshots
+    // (HUAWEI MRDI-W09, fresh Ubuntu rootfs) showed exactly that: frames
+    // flowing over a black screen with a tiny badge, nothing telling the
+    // user it was working. sawContent flips once a frame actually carries
+    // pixels (probed ~1/s on a 4x6 grid); until then a card names the stage
+    // and shows the live diagnostic tail. Any touch dismisses it, like the
+    // intro card - it must never sit between the user and a desktop that
+    // just arrived.
+    private var sawContent = false
+    private var startupDismissed = false
+    private var lastContentProbeMs = 0L
+    private var contentProbeBmp: android.graphics.Bitmap? = null
+
     // v0.2.38: report the live view aspect so the next desktop start
     // sizes Xvfb to THIS pane (no letterbox bars by default).
     override fun onSizeChanged(w: Int, h: Int, oldw: Int, oldh: Int) {
@@ -357,6 +372,10 @@ class DesktopView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attrs) 
             } else {
                 histScrollable = false
             }
+            // v0.2.88: capture stopped = the desktop is restarting; re-arm
+            // the startup overlay so the next frames period is explained
+            // again (unless the user already dismissed it this session).
+            sawContent = false
             // keep repainting while frameless so late errorText appears
             postInvalidateOnAnimation()
             return
@@ -373,6 +392,16 @@ class DesktopView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attrs) 
         canvas.drawBitmap(f, srcRect, dstRect, bmpPaint)
         // v0.2.66: the synthetic pointer, above the frame and below the badges
         drawCursor(canvas)
+        // v0.2.88: frames flow but nothing painted yet (first-boot apt
+        // churn) -> explain it on the pane instead of an unexplained black
+        // screen; dismissed by any touch, gone on first non-black probe.
+        if (!sawContent && !startupDismissed) {
+            probeFrameContent(f)
+            if (!sawContent) {
+                drawStartupCard(canvas)
+                postInvalidateDelayed(1_000)
+            }
+        }
         // v0.2.33 LIVE badge (see onNewFrame)
         val fps = frameTimes.size / 2f
         if (fps > 0f) {
@@ -555,6 +584,76 @@ class DesktopView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attrs) 
         drawOverlay(canvas)
         // v0.2.61: one-shot gesture card, on top of even the overlay.
         drawIntroCard(canvas)
+    }
+
+    /**
+     * v0.2.88: is the streaming frame actually showing anything yet? The
+     * frames are HARDWARE bitmaps (getPixel would throw), so the frame is
+     * scaled into a tiny 4x6 SOFTWARE bitmap and that is probed instead -
+     * 24 samples, ~1/s, negligible next to the capture pipe. Any sample at
+     * lum >= 0.12 (the painted root #20344d is ~0.2) means the desktop has
+     * content and the startup card never shows again this session.
+     */
+    private fun probeFrameContent(f: android.graphics.Bitmap) {
+        val now = System.currentTimeMillis()
+        if (now - lastContentProbeMs < 1_000) return
+        lastContentProbeMs = now
+        runCatching {
+            val probe = contentProbeBmp ?: android.graphics.Bitmap.createBitmap(
+                4, 6, android.graphics.Bitmap.Config.ARGB_8888).also { contentProbeBmp = it }
+            val pc = Canvas(probe)
+            pc.drawBitmap(f, null, RectF(0f, 0f, 4f, 6f), null)
+            pc.setBitmap(null)
+            for (py in 0 until 6) for (px in 0 until 4) {
+                val p = probe.getPixel(px, py)
+                val lum = (0.299f * Color.red(p) + 0.587f * Color.green(p) +
+                    0.114f * Color.blue(p)) / 255f
+                if (lum >= 0.12f) { sawContent = true; return }
+            }
+        }
+    }
+
+    /**
+     * v0.2.88: the "it is working, be patient" card. Lower-center, clear of
+     * the badge stack (top-left) and the helper bar (bottom strip); carries
+     * the freshest diagnostic lines so a screenshot alone answers "what is
+     * it doing". Dismissed by any touch (see ACTION_DOWN, both paths).
+     */
+    private fun drawStartupCard(canvas: Canvas) {
+        val pad = dp(12f)
+        val lh = sp(11.5f)
+        val hist = desktop?.errorHistoryText()?.takeIf { it != "?" && it.isNotBlank() }
+        val lines = hist?.lines()?.filter { it.isNotBlank() }?.takeLast(8) ?: emptyList()
+        val cardW = (width * 0.86f).coerceAtMost(dp(440f))
+        val cardH = pad * 2 + sp(30f) + lines.size * lh
+        val bottomGuard = if (helperBarVisible) barHeight() else dp(8f)
+        val top = (height - bottomGuard) - cardH - dp(12f)
+        val left = (width - cardW) / 2f
+        val card = RectF(left, top, left + cardW, top + cardH)
+        canvas.drawRoundRect(card, dp(8f), dp(8f), Paint().apply {
+            color = Color.argb(0xE6, 0x10, 0x16, 0x1E); style = Paint.Style.FILL
+        })
+        var y = top + pad + sp(13f)
+        val tp = Paint().apply {
+            isAntiAlias = true; textSize = sp(13f); color = Color.argb(0xF0, 0x4F, 0xC3, 0xF7)
+        }
+        canvas.drawText("Linux desktop is starting…", left + pad, y, tp)
+        y += sp(9f)
+        val np = Paint().apply {
+            isAntiAlias = true; textSize = sp(10f); color = Color.argb(0xC8, 0xFF, 0xFF, 0xFF)
+        }
+        canvas.drawText(
+            "first boot installs packages (slow under proot) - live status:",
+            left + pad, y, np)
+        for (l in lines) {
+            y += lh
+            val hp = Paint().apply {
+                isAntiAlias = true; textSize = sp(9f)
+                color = if (DiagColors.healthy(l)) Color.argb(0xE0, 0x66, 0xBB, 0x6A)
+                        else Color.argb(0xE0, 0xEF, 0x53, 0x50)
+            }
+            canvas.drawText(l.take(80), left + pad, y, hp)
+        }
     }
 
     /** screen px → X px (clamped into server geometry). */
@@ -865,6 +964,7 @@ class DesktopView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attrs) 
         when (e.actionMasked) {
             MotionEvent.ACTION_DOWN -> {
                 dismissIntroCard()
+                startupDismissed = true   // v0.2.88: startup card yields to input
                 desktop?.noteTouch()
                 noteMouseActive()
                 // v0.2.86: a new DOWN is an exit for whatever the PREVIOUS
@@ -1126,6 +1226,10 @@ class DesktopView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attrs) 
         val multiTouch = event.pointerCount > 1
         when (event.actionMasked) {
             MotionEvent.ACTION_DOWN -> {
+                // v0.2.88: the startup card yields to the first touch,
+                // exactly like the intro card - never between user and
+                // desktop.
+                startupDismissed = true
                 // v0.2.85: a finger is back - the synthetic cursor is the only
                 // cursor a finger has, so un-hide it (the system draws one for
                 // mice, never for fingers).

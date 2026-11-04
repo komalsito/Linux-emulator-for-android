@@ -57,6 +57,9 @@ fi
 # that is known to restore clicks.
 [ -n "$DOCTOR_MODE" ] || rm -f /tmp/emux_btn_verdict /tmp/emux_btn_action /tmp/emux_btn_stages /tmp/emux_wm_fellback /tmp/emux_wm_mode 2>/dev/null
 [ -n "$DOCTOR_MODE" ] || rm -f /tmp/emux_wm_launched /tmp/emux_xterm_launched /tmp/emux_vis_launched /tmp/emux_obx_reconf /tmp/emux_agent_launched /tmp/emux_apt_updated 2>/dev/null
+# v0.2.88: tint2 crash strikes are per-session (a config retry in one
+# session must not brand the next one as hopeless).
+[ -n "$DOCTOR_MODE" ] || rm -f /tmp/emux_tint2_strikes 2>/dev/null
 export HOME="${HOME:-/root}"
 export DISPLAY=:$DN
 export TMPDIR=/tmp
@@ -90,6 +93,36 @@ apt_update_once() {
 running() {
   for f in /proc/[0-9]*/cmdline; do
     tr '\0' ' ' < "$f" 2>/dev/null | grep -q "$1" && return 0
+  done
+  return 1
+}
+# v0.2.88 FIELD FIX (missing taskbar + black first boot, HUAWEI MRDI-W09,
+# Ubuntu rootfs): running() matches a SUBSTRING of the WHOLE cmdline, and
+# two argv classes poisoned every furniture decision on the field session:
+#   - this launcher itself runs as `/bin/sh /usr/local/bin/emux-x11 openbox …`
+#     (WM name is $1), so `running openbox` was ALWAYS true - verify_desktop's
+#     openbox=yes/no was fiction, and the watchdog's has-scan (openbox|tint2|…)
+#     matched the launcher too, so the visibility client could never relaunch;
+#   - the governor/REST installs run `apt-get install … tint2 pcmanfm …`, so
+#     while the furniture was still DOWNLOADING, `running tint2` and
+#     `running pcmanfm` were TRUE and start_furniture launched NOTHING - the
+#     exact first-boot window in which the user watches a black pane and then
+#     finds a desktop with no taskbar.
+# running0() compares the BASENAME of argv[0] (and argv[1], for
+# `/bin/sh /path/emux-capture`-style wrappers) EXACTLY and skips zombies -
+# the same two traps doctor's livepid() was written for (see its comment).
+# Every furniture/visibility decision goes through it from v0.2.88 on.
+running0() {
+  R0T="$1"
+  for f in /proc/[0-9]*/cmdline; do
+    p=${f#/proc/}; p=${p%/cmdline}
+    [ "$p" = "$$" ] && continue
+    pst=$(sed 's/.*) //' "/proc/$p/stat" 2>/dev/null | cut -d ' ' -f1)
+    [ -n "$pst" ] && [ "$pst" != Z ] || continue
+    tr '\0' '\n' < "$f" 2>/dev/null | head -2 | while read -r a; do
+      case "$a" in */*) a=${a##*/} ;; esac
+      [ "$a" = "$R0T" ] && echo match
+    done | grep -q match && return 0
   done
   return 1
 }
@@ -379,7 +412,7 @@ btn_watch() {
           write_rc_xml
           RCX_BAD=$(rc_xml_grab_contexts)
           echo "${RCX_BAD:-none}" | tr -d ' \n' > /tmp/emux_rcxml_grabs 2>/dev/null
-          if running openbox && command -v openbox >/dev/null 2>&1; then
+          if running0 openbox && command -v openbox >/dev/null 2>&1; then
             openbox --reconfigure >/dev/null 2>&1 || true
             echo "emux-x11: openbox --reconfigure sent (grabs now: ${RCX_BAD:-none})" >&2
           fi
@@ -492,15 +525,45 @@ start_furniture() {
   #     protection on the terminal's proot silently fails while the desktop's
   #     "+100" succeeds. When the LMK reaps the terminal's proot, its tracee
   #     reports exactly the user's symptom: "proot warning: signal 11".
-  if [ -x /usr/bin/picom ] && [ -e /tmp/emux_want_picom ] && ! running picom; then
+  if [ -x /usr/bin/picom ] && [ -e /tmp/emux_want_picom ] && ! running0 picom; then
     echo "emux-x11: starting picom compositor (opt-in via /tmp/emux_want_picom)" >&2
     nohup /usr/bin/picom -b --backend xrender >/tmp/picom.log 2>&1 </dev/null &
   fi
-  if [ -x /usr/bin/tint2 ] && ! running tint2; then
+  # v0.2.88: tint2 launch is now VERIFIED one second in. On the field device
+  # the panel was absent from a working desktop with no line anywhere saying
+  # why - a tint2 that dies instantly used to leave /tmp/tint2.log that no
+  # code path ever read. Strikes: 2nd death moves the seeded tint2rc aside
+  # (a bad generated config is THE classic tint2 instant-crash cause) and
+  # drops the keep-tint2rc marker so seed_desktop_config does not recreate
+  # it on the next tick - the distro default panel config is plain but it
+  # EXISTS. Every death narrates its log tail so the pane names the killer.
+  if [ -x /usr/bin/tint2 ] && ! running0 tint2; then
     echo "emux-x11: starting tint2 panel" >&2
     nohup /usr/bin/tint2 >/tmp/tint2.log 2>&1 </dev/null &
+    T2PID=$!
+    sleep 1
+    if kill -0 "$T2PID" 2>/dev/null; then
+      echo "emux-x11: tint2 panel alive (pid $T2PID)" >&2
+    else
+      T2S=$(( $(cat /tmp/emux_tint2_strikes 2>/dev/null || echo 0) + 1 ))
+      echo "$T2S" > /tmp/emux_tint2_strikes 2>/dev/null
+      if [ "$T2S" -le 3 ]; then
+        echo "emux-x11: tint2 DIED within 1s of launch (strike $T2S) - tint2.log tail:" >&2
+        tail -4 /tmp/tint2.log >&2 2>/dev/null
+      else
+        echo "emux-x11: tint2 DIED within 1s of launch (strike $T2S, tail already shown)" >&2
+      fi
+      if [ "$T2S" = 2 ]; then
+        mkdir -p "$HOME/.config/emux" 2>/dev/null
+        if [ -e "$HOME/.config/tint2/tint2rc" ] && ! emux_keep tint2rc; then
+          mv -f "$HOME/.config/tint2/tint2rc" "$HOME/.config/tint2/tint2rc.crashed" 2>/dev/null
+          touch "$HOME/.config/emux/keep-tint2rc" 2>/dev/null
+          echo "emux-x11: seeded tint2rc moved aside (.crashed) + keep-tint2rc marker set - next launch uses the distro default panel" >&2
+        fi
+      fi
+    fi
   fi
-  if [ -x /usr/bin/pcmanfm ] && ! running pcmanfm; then
+  if [ -x /usr/bin/pcmanfm ] && ! running0 pcmanfm; then
     echo "emux-x11: starting pcmanfm desktop (icons)" >&2
     # v0.2.58 FIELD FIX: starve pcmanfm of DBUS/GIO at launch. Under proot a
     # --desktop client that reaches for a dead/hung session bus or gvfs parks
@@ -1037,7 +1100,7 @@ THEME
 verify_desktop() {
   sleep 6
   {
-    echo "emux-x11: desktop check: openbox=$(running openbox && echo yes || echo no) tint2=$(running tint2 && echo yes || echo no) pcmanfm=$(running pcmanfm && echo yes || echo no) xterm=$(running xterm && echo yes || echo no)"
+    echo "emux-x11: desktop check: openbox=$(running0 openbox && echo yes || echo no) tint2=$(running0 tint2 && echo yes || echo no) pcmanfm=$(running0 pcmanfm && echo yes || echo no) xterm=$(running0 xterm && echo yes || echo no)"
     # v0.2.61: "furniture is running" is NOT "the user can see something" -
     # pcmanfm owns the root window and happily paints it black (see the rice
     # fix in seed_desktop_config). Sample the actual pixels so the pane can
@@ -1057,7 +1120,7 @@ verify_desktop() {
       fi
       break
     done
-    if ! running tint2 && [ -e /tmp/emux_rest.log ]; then
+    if ! running0 tint2 && [ -e /tmp/emux_rest.log ]; then
       echo "emux-x11: desktop check: REST log tail (furniture missing):"
       tail -6 /tmp/emux_rest.log 2>/dev/null
     fi
@@ -2177,8 +2240,17 @@ fi
       fi
     fi
     has=0
+    # v0.2.88: argv[0]-exact has-scan. The old whole-cmdline grep
+    # 'openbox|tint2|pcmanfm|xterm|xclock|xeyes' matched THIS LAUNCHER's own
+    # argv (`/bin/sh /usr/local/bin/emux-x11 openbox …`) on every tick, so
+    # has=1 was a constant and the visibility client could never relaunch -
+    # dead code since v0.2.45, and the reason a client-less black pane never
+    # self-healed during first-boot package installs.
     for f in /proc/[0-9]*/cmdline; do
-      tr '\0' ' ' < "$f" 2>/dev/null | grep -qE 'openbox|tint2|pcmanfm|xterm|xclock|xeyes' && { has=1; break; }
+      a=$(tr '\0' '\n' < "$f" 2>/dev/null | head -1)
+      [ -n "$a" ] || continue
+      case "$a" in */*) a=${a##*/} ;; esac
+      case "$a" in openbox|tint2|pcmanfm|xterm|xclock|xeyes) has=1; break ;; esac
     done
     if [ "$has" = 0 ]; then
       for vc in /usr/bin/xterm /usr/bin/xclock /usr/bin/xeyes; do
@@ -2196,14 +2268,23 @@ fi
     # pcmanfm publishes _XROOTPMAP_ID once it paints the wallpaper; absence
     # 25 s after start = wedged: kill -9 and relaunch. 4th strike: give up
     # on the wallpaper layer and paint a solid root - never a black void.
-    if [ -x /usr/bin/pcmanfm ] && [ -e /tmp/emux_pcmanfm_started ] && running pcmanfm; then
+    if [ -x /usr/bin/pcmanfm ] && [ -e /tmp/emux_pcmanfm_started ] && running0 pcmanfm; then
       PFAGE=$(( $(date +%s) - $(stat -c %Y /tmp/emux_pcmanfm_started 2>/dev/null || echo 0) ))
       if [ "$PFAGE" -ge 25 ] && ! xprop -root _XROOTPMAP_ID >/dev/null 2>&1; then
         W=$(( $(cat /tmp/emux_pcmanfm_wedges 2>/dev/null || echo 0) + 1 ))
         echo "$W" > /tmp/emux_pcmanfm_wedges
         echo "emux-x11: pcmanfm WEDGE strike $W (no _XROOTPMAP_ID ${PFAGE}s after start) - kill -9 + relaunch" >&2
+        # v0.2.88: kill by argv[0], never by substring. The old loop grepped
+        # 'pcmanfm' over WHOLE cmdlines and could kill -9 an apt/dpkg
+        # transaction (whose argv literally lists pcmanfm) or the doctor
+        # shell - i.e. the wedge "fix" was able to abort the very install
+        # that would have fixed the wedge.
         for f in /proc/[0-9]*/cmdline; do
-          tr '\0' ' ' < "$f" 2>/dev/null | grep -q 'pcmanfm' && { p=${f#/proc/}; p=${p%/cmdline}; kill -9 "$p" 2>/dev/null; }
+          p=${f#/proc/}; p=${p%/cmdline}
+          a=$(tr '\0' '\n' < "$f" 2>/dev/null | head -1)
+          [ -n "$a" ] || continue
+          case "$a" in */*) a=${a##*/} ;; esac
+          [ "$a" = "pcmanfm" ] && kill -9 "$p" 2>/dev/null
         done
         rm -f /tmp/emux_pcmanfm_started
         if [ "$W" -ge 4 ]; then
@@ -2235,7 +2316,7 @@ fi
 # keep it as the fallback when they are not installed yet (first run,
 # while REST is still installing them).
 start_furniture
-if running tint2 || running pcmanfm; then
+if running0 tint2 || running0 pcmanfm; then
   echo "emux-x11: desktop furniture up (panel/desktop) - skipping forced terminal window" >&2
 else
   for vc in /usr/bin/xterm /usr/bin/xclock /usr/bin/xeyes; do
@@ -2316,7 +2397,7 @@ if x_up && [ "$APT_BRANCH" = 1 ]; then
       # v0.2.45: only as a last resort - if start_furniture already
       # brought the panel/desktop up, a forced terminal just hides
       # the GUI desktop again.
-      if [ ! -e /tmp/emux_xterm_launched ] && ! running tint2 && ! running pcmanfm; then
+      if [ ! -e /tmp/emux_xterm_launched ] && ! running0 tint2 && ! running0 pcmanfm; then
         for vc in /usr/bin/xterm /usr/bin/uxterm /usr/bin/rxvt /usr/bin/xclock /usr/bin/xeyes; do
           if [ -x "$vc" ]; then
             echo "emux-x11: launching visibility client $vc" >&2
@@ -2393,7 +2474,7 @@ start_wm "$WM" || {
 # desktop icons are the visible thing now; a forced terminal on top
 # of them is the bug the user reported, not the fix.
 if [ -e /tmp/emux_wm_launched ] && [ ! -e /tmp/emux_xterm_launched ] \
-   && [ -x /usr/bin/xterm ] && ! running tint2 && ! running pcmanfm; then
+   && [ -x /usr/bin/xterm ] && ! running0 tint2 && ! running0 pcmanfm; then
   /usr/bin/xterm >/tmp/xterm.log 2>&1 &
   touch /tmp/emux_xterm_launched
 fi
@@ -2427,3 +2508,4 @@ fi
 echo "emux-x11: X server (pid $XPID) exited rc=$RC - log tail:" >&2
 tail -15 /tmp/xvfb.log >&2
 exit $RC
+

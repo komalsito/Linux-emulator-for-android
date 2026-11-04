@@ -26,6 +26,13 @@ android {
         // (adb install / GitHub Releases), same distribution model as Termux
         // on F-Droid.
         targetSdk = 28
+        // v0.2.88 (vc188): (1) emux-x11 furniture detection is argv-exact
+        // now (running0) and tint2's launch is verified with a strike
+        // fallback, so a first boot no longer eats its own taskbar to an
+        // apt-install cmdline match; (2) DesktopView paints a "Linux desktop
+        // is starting" card with the live diagnostic tail while frames
+        // stream black (first-boot apt churn), dismissed by any touch.
+        // ENV_VERSION 78 re-seeds the guest script on existing installs.
         // v0.2.87 (vc187): host-side fixes only - (1) TerminalService's manifest
         // foregroundServiceType now also declares dataSync, making the fallback
         // the FOREGROUND_SERVICE_DATA_SYNC permission has always promised legal
@@ -35,8 +42,8 @@ android {
         // on the field HUAWEI ROM (click ripple, no selection UI). ENV_VERSION
         // stays 77: no guest script changed, so existing installs must not
         // re-seed.
-        versionCode = 187
-        versionName = "0.2.87"
+        versionCode = 188
+        versionName = "0.2.88"
 
         ndk {
             abiFilters += listOf("arm64-v8a", "armeabi-v7a", "x86_64")
