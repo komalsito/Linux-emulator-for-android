@@ -345,6 +345,21 @@ class DesktopService(
             while (isActive && state.value != State.IDLE && state.value != State.ERROR) {
                 var c: X11Client? = null
                 try {
+                    // v0.2.91: the capture loop follows the guest published
+                    // display ITSELF on every (re)connect instead of waiting
+                    // for the 3 s rotation watcher to update displayNum. The
+                    // v0.2.89/v0.2.90 field rounds had the capture retrying a
+                    // dead :0 for minutes while the healthy desktop sat on :1
+                    // and the marker file said so.
+                    runCatching {
+                        java.io.File(com.emux.core.FsLayout.linuxRoot(ctx), "tmp/emux_display_num")
+                            .readText().trim().toIntOrNull()
+                    }.getOrNull()?.let { dn ->
+                        if (dn != displayNum) {
+                            noteInfo("native capture: guest published :$dn (was :$displayNum) - following")
+                            displayNum = dn
+                        }
+                    }
                     c = X11Client(
                         display = displayNum,
                         unixSocketPath = java.io.File(
@@ -1605,6 +1620,28 @@ class DesktopService(
                         }
                         val cap = freshCaptureDisplay()
                         if (cap != null) captureDisplay = cap
+                        // v0.2.91: the /tmp/emux_cap_display publication can be
+                        // HOURS stale (nothing rewrites it once the legacy
+                        // capture helper is retired), which blinded the
+                        // display-mismatch check below for whole sessions
+                        // (field capage=27263s). The guest marker
+                        // /tmp/emux_display_num is what the CURRENT launcher
+                        // publishes - re-aim from it too. This duplicates the
+                        // 3 s rotation watcher ON PURPOSE: that watcher
+                        // demonstrably missed rotations in the v0.2.90 field
+                        // round (ctrl stayed :0 for minutes while the marker
+                        // said :1), while this 5 s loop demonstrably runs -
+                        // it keeps the badge capage ticking.
+                        val mk = runCatching {
+                            java.io.File(com.emux.core.FsLayout.linuxRoot(ctx), "tmp/emux_display_num")
+                                .readText().trim().toIntOrNull()
+                        }.getOrNull()
+                        if (mk != null && mk != displayNum) {
+                            noteInfo("input watchdog: guest marker says :$mk, control plane on :$displayNum - re-aiming")
+                            displayNum = mk
+                            recycleControlPlane("guest published display :$mk but the control plane is on :$displayNum")
+                            continue
+                        }
                         val c = xtest() ?: continue
                         // v0.2.90 SERVER-IDENTITY GUARD (the stale-input-server
                         // fix): display NUMBERS cannot distinguish two servers
@@ -3415,7 +3452,21 @@ class DesktopService(
             if (java.io.File(rt, "tmp/emux_agent_launched").isFile) "agent" else "down"
         inputAgentUp = inputTransport == "agent"
         scope.launch {
-            runCatching { connectControlPlane(30_000) }
+            // v0.2.91: one failed reconnect used to leave input dead FOREVER -
+            // a single connectControlPlane(30 s) that expired (server not up
+            // yet, proot churn, a dying display) was never retried, while the
+            // 5 s watchdog keepalive had no connection left to keep alive and
+            // the guest agent fallback pointed at an agent that was never
+            // started (field: proof=ignored + INPUT agent + agent=never-started
+            // for a whole session). Retry until the control plane is actually
+            // UP (or the session stops); connectControlPlane re-reads the guest
+            // marker and the capture publication on every attempt, so each
+            // retry re-aims at whatever display the guest is really on.
+            while (isActive && state.value != State.IDLE && state.value != State.ERROR) {
+                val ok = runCatching { connectControlPlane(30_000) }.getOrDefault(false)
+                if (ok) break
+                kotlinx.coroutines.delay(5_000)
+            }
             recycling = false
         }
     }

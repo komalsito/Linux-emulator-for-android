@@ -34,6 +34,19 @@ android {
         // (adb install / GitHub Releases), same distribution model as Termux
         // on F-Droid.
         targetSdk = 28
+        // v0.2.91 (vc191): SELF-AIMING PLANES. The v0.2.90 field round
+        // showed the guest can be perfectly healthy (one Xvfb on :1,
+        // openbox up, marker published) while the app sat on a dying :0
+        // attempt forever: (1) a failed control-plane reconnect was
+        // never retried, so input died for good; (2) the capture loop
+        // only re-aimed when the 3 s rotation watcher moved displayNum;
+        // (3) the 5 s display-mismatch check trusted /tmp/emux_cap_display,
+        // hours stale with the legacy helper retired. Fixes: the native
+        // capture loop re-reads /tmp/emux_display_num on EVERY reconnect;
+        // the reconnect retries until connected; the 5 s watchdog re-aims
+        // from the guest marker too (the loop proven to run - it ticks
+        // the badge capage). With v0.2.90 identity guard above them,
+        // every plane converges on the server the guest actually runs.
         // v0.2.90 (vc190): THE STALE-INPUT-SERVER FIX. Field (v0.2.89
         // tablet, force-stop + relaunch): the Xvfb attempt ladder leaked
         // live failed attempts on :0 (retire_own_xvfb "serving" keep-
@@ -81,8 +94,8 @@ android {
         // on the field HUAWEI ROM (click ripple, no selection UI). ENV_VERSION
         // stays 77: no guest script changed, so existing installs must not
         // re-seed.
-        versionCode = 190
-        versionName = "0.2.90"
+        versionCode = 191
+        versionName = "0.2.91"
 
         ndk {
             abiFilters += listOf("arm64-v8a", "armeabi-v7a", "x86_64")
