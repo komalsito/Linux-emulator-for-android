@@ -762,11 +762,39 @@ class DesktopView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attrs) 
      * behaviour exactly: move the drawn cursor, inject nothing.
      */
     override fun onHoverEvent(event: android.view.MotionEvent): Boolean {
+        noteEventShape("hover", event)   // v0.2.97: evidence - a trackpad can deliver whole gestures as hover
         val a = event.actionMasked
         if (a == android.view.MotionEvent.ACTION_HOVER_MOVE ||
             a == android.view.MotionEvent.ACTION_HOVER_ENTER) {
             if (isMouseInput(event)) {
                 noteMouseActive()
+                // v0.2.97 MERGED-STREAM SCROLL (hover shape): if the ROM sends
+                // the two-finger swipe as one moving HOVER point tagged
+                // AMBIGUOUS_GESTURE (the classifier's two-finger-swipe
+                // hint, API 29+), its delta is the wheel - same quantised
+                // accumulators and natural-scroll setting as every other
+                // wheel path.
+                if (android.os.Build.VERSION.SDK_INT >= 29 &&
+                    event.classification == MotionEvent.CLASSIFICATION_AMBIGUOUS_GESTURE) {
+                    if (!hoverWheelArmed) {
+                        hoverWheelArmed = true
+                        wheelCentroidX = event.x; wheelCentroidY = event.y
+                    }
+                    val dx = event.x - wheelCentroidX
+                    val dy = event.y - wheelCentroidY
+                    wheelCentroidX = event.x; wheelCentroidY = event.y
+                    val dir = if (mouseNaturalScroll()) -1f else 1f
+                    wheelAccumV = (wheelAccumV + (-dy / SCROLL_STEP_PX) * dir).coerceIn(-64f, 64f)
+                    wheelAccumH = (wheelAccumH + (dx / SCROLL_STEP_PX) * dir).coerceIn(-64f, 64f)
+                    val nv = wheelAccumV.toInt(); if (nv != 0) wheelAccumV -= nv
+                    val nh = wheelAccumH.toInt(); if (nh != 0) wheelAccumH -= nh
+                    if (nv != 0 || nh != 0) {
+                        val (x, y) = mapToX(event.x, event.y)
+                        desktop?.injectScrollPair(x, y, nv, nh)
+                    }
+                    return true
+                }
+                if (hoverWheelArmed) hoverWheelArmed = false
                 if (!frameless) {
                     val (x, y) = mapToX(event.x, event.y)
                     val now = System.currentTimeMillis()
@@ -977,6 +1005,53 @@ class DesktopView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attrs) 
     private var contactWheelStartMs = 0L
     private var wheelCentroidX = 0f
     private var wheelCentroidY = 0f
+    // v0.2.97: the hover shape of the merged-stream scroll (see onHoverEvent).
+    private var hoverWheelArmed = false
+
+    // --------------------- v0.2.97 EVIDENCE ROUND ---------------------
+    // "Still can't scroll" after v0.2.96 means this ROM delivers the
+    // two-finger gesture in a shape NONE of our paths recognise. Instead of
+    // another blind fix, the pane's note history now carries ONE line per
+    // DISTINCT input event shape of the session - action, source,
+    // pointerCount, the gesture classifier's verdict, button bits, device -
+    // logged at EVERY entry point (finger path, mouse path, hover, wheel),
+    // plus the input device inventory on the first frame. The next field
+    // screenshot then names exactly what the cover trackpad sends for each
+    // gesture, and the fix follows the evidence instead of the guess.
+    private val notedEventShapes = HashSet<String>()
+    private var inputDevicesNoted = false
+    private fun noteEventShape(where: String, e: MotionEvent, extra: String = "") {
+        if (!notedEventShapes.add(where + "|" + e.actionMasked + "|" + e.source +
+                "|" + e.pointerCount)) return
+        val cls = if (android.os.Build.VERSION.SDK_INT >= 29) e.classification else -1
+        desktop?.noteInfo(
+            "input ev: " + MotionEvent.actionToString(e.actionMasked).removePrefix("ACTION_") +
+                " src=0x" + Integer.toHexString(e.source) +
+                " pc=" + e.pointerCount +
+                " cls=" + cls +
+                " btn=0x" + Integer.toHexString(e.buttonState) +
+                " dev=" + (e.device?.name ?: "?") +
+                (if (extra.isEmpty()) "" else " " + extra) +
+                " [" + where + "]")
+    }
+    private fun noteInputDevices() {
+        if (inputDevicesNoted) return
+        inputDevicesNoted = true
+        runCatching {
+            val ids = android.view.InputDevice.getDeviceIds()
+            for (id in ids) {
+                val d = android.view.InputDevice.getDevice(id) ?: continue
+                if ((d.sources and android.view.InputDevice.SOURCE_CLASS_POINTER) == 0) continue
+                desktop?.noteInfo(
+                    "input dev: \"" + d.name + "\" id=" + d.id +
+                        " src=0x" + Integer.toHexString(d.sources) +
+                        (if (d.supportsSource(android.view.InputDevice.SOURCE_MOUSE)) " MOUSE" else "") +
+                        (if (d.supportsSource(android.view.InputDevice.SOURCE_TOUCHPAD)) " TOUCHPAD" else "") +
+                        (if (d.supportsSource(android.view.InputDevice.SOURCE_TOUCHSCREEN)) " TOUCHSCREEN" else "") +
+                        (if (d.supportsSource(android.view.InputDevice.SOURCE_STYLUS)) " STYLUS" else ""))
+            }
+        }
+    }
     // v0.2.95: one-shot diagnostic for a scroll event the view refuses, so
     // a future field round can tell "no scroll event arrived" from "one
     // arrived with a source this build does not accept".
@@ -1038,7 +1113,14 @@ class DesktopView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attrs) 
                 noteMouseActive()
                 val v = event.getAxisValue(MotionEvent.AXIS_VSCROLL)
                 val h = event.getAxisValue(MotionEvent.AXIS_HSCROLL)
-                if (v == 0f && h == 0f) return false
+                if (v == 0f && h == 0f) {
+                    // v0.2.97 evidence: a wheel event with no value in either
+                    // axis is indistinguishable from "no wheel event arrived" -
+                    // say so once, with the source.
+                    noteEventShape("wheel-zero", event, "v=" + v + " h=" + h)
+                    return false
+                }
+                noteEventShape("wheel", event, "v=" + v + " h=" + h)
                 val k = mouseScrollScale() * (if (mouseNaturalScroll()) -1f else 1f)
                 wheelAccumV = (wheelAccumV + v * k).coerceIn(-64f, 64f)
                 wheelAccumH = (wheelAccumH + h * k).coerceIn(-64f, 64f)
@@ -1102,6 +1184,7 @@ class DesktopView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attrs) 
      * ACTION_BUTTON_PRESS, or as a DOWN with its button set.
      */
     private fun onMouseTouchEvent(e: MotionEvent): Boolean {
+        noteEventShape("mouse", e)   // v0.2.97: evidence - what the mouse/trackpad path sees
         when (e.actionMasked) {
             MotionEvent.ACTION_DOWN -> {
                 dismissIntroCard()
@@ -1179,6 +1262,40 @@ class DesktopView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attrs) 
                     return true
                 }
                 if (mouseHeldButton == 0) {
+                    // v0.2.97 MERGED-STREAM SCROLL: many touchpad firmwares
+                    // deliver a two-finger swipe as ONE moving point (the
+                    // fingers merged - no POINTER_DOWN ever comes, so the
+                    // v0.2.96 pair synthesis never armed) tagged by the
+                    // gesture classifier AMBIGUOUS_GESTURE, its documented
+                    // two-finger-swipe hint (API 29+). That single point's
+                    // delta is the wheel - same quantised accumulators and
+                    // natural-scroll setting as every other wheel path. The
+                    // classifier changing its mind exits the mode and the
+                    // pointer resumes gliding.
+                    if (android.os.Build.VERSION.SDK_INT >= 29 && mouseContactDown &&
+                        e.classification == MotionEvent.CLASSIFICATION_AMBIGUOUS_GESTURE) {
+                        if (!contactWheel) {
+                            contactWheel = true
+                            contactWheelMoved = false
+                            contactWheelStartMs = System.currentTimeMillis()
+                            wheelCentroidX = e.x; wheelCentroidY = e.y
+                        }
+                        val dx = e.x - wheelCentroidX
+                        val dy = e.y - wheelCentroidY
+                        wheelCentroidX = e.x; wheelCentroidY = e.y
+                        if (abs(dx) > 1f || abs(dy) > 1f) contactWheelMoved = true
+                        val dir = if (mouseNaturalScroll()) -1f else 1f
+                        wheelAccumV = (wheelAccumV + (-dy / SCROLL_STEP_PX) * dir).coerceIn(-64f, 64f)
+                        wheelAccumH = (wheelAccumH + (dx / SCROLL_STEP_PX) * dir).coerceIn(-64f, 64f)
+                        val nv = wheelAccumV.toInt(); if (nv != 0) wheelAccumV -= nv
+                        val nh = wheelAccumH.toInt(); if (nh != 0) wheelAccumH -= nh
+                        if (nv != 0 || nh != 0) {
+                            val (x, y) = mapToX(e.x, e.y)
+                            desktop?.injectScrollPair(x, y, nv, nh)
+                        }
+                        return true
+                    }
+                    if (contactWheel) contactWheel = false   // classifier changed its mind
                     // v0.2.95: contact-only trackpad touch (DOWN carried no
                     // button): the pointer still follows the finger, as
                     // HOVER. Motion with no button held can never select or
@@ -1269,10 +1386,17 @@ class DesktopView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attrs) 
                     val now = System.currentTimeMillis()
                     if (!contactMoved && now - lastMouseBtnPressMs >= 250L &&
                         (dragLockPending || now - contactDownMs <= MOUSE_TAP_MS)) {
+                        // v0.2.97: a quick lift while the classifier still
+                        // said two-finger (merged stream - no POINTER_UP will
+                        // ever come) is a two-finger TAP = right click; a
+                        // plain quick lift stays a left click. The pair-armed
+                        // contactWheel can never be true here - POINTER_UP
+                        // clears it and poisons contactWheelMoved.
+                        val btn = if (contactWheel) 3 else 1
                         val (x, y) = mapToX(e.x, e.y)
-                        desktop?.injectClick(x, y, 1, press = true)
-                        desktop?.injectClick(x, y, 1, press = false)
-                        lastSynthTapMs = now
+                        desktop?.injectClick(x, y, btn, press = true)
+                        desktop?.injectClick(x, y, btn, press = false)
+                        if (btn == 1) lastSynthTapMs = now
                     }
                     dragLockPending = false
                 }
@@ -1423,6 +1547,7 @@ class DesktopView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attrs) 
     /** Runs on the first frame: shows the gesture card, once ever.
      *  v0.2.89: the helper-bar auto-open is gone with the bar itself. */
     private fun maybeShowIntro() {
+        runCatching { noteInputDevices() }   // v0.2.97: input device inventory, once per session
         val p = uiPrefs
         val seen = runCatching { p?.getBoolean(KEY_INTRO_SEEN, false) ?: false }.getOrDefault(false)
         if (seen) return
@@ -1491,6 +1616,7 @@ class DesktopView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attrs) 
         // and routing that to the finger machine fed scaleDetector instead
         // of the wheel synthesis onMouseTouchEvent owns since v0.2.96.
         if (isMouseInput(event)) return onMouseTouchEvent(event)
+        noteEventShape("touch", event)   // v0.2.97: evidence - what the finger path sees
         scaleDetector.onTouchEvent(event)
         val multiTouch = event.pointerCount > 1
         when (event.actionMasked) {

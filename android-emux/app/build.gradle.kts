@@ -196,8 +196,28 @@ android {
         //     deferrals never re-ran at all. All gates now PARK until the
         //     first pause; the ladder re-confirms a raced failure in the
         //     quiet window before mutating the desktop.
-        versionCode = 196
-        versionName = "0.2.96"
+        // v0.2.97 (vc197): SCROLL EVIDENCE ROUND + MERGED-STREAM SCROLL
+        // (DesktopView only; ENV_VERSION stays 81). Field (v0.2.96): the
+        // proof-gate liveness and speed fixes worked, but two-finger trackpad
+        // scroll STILL does not scroll - the ROM delivers the gesture in a
+        // shape no path recognises. Two-pronged:
+        //  1. EVIDENCE: the pane note history logs ONE line per DISTINCT
+        //     input event shape of the session (action, source, pointerCount,
+        //     gesture-classifier verdict, button bits, device name) at every
+        //     entry point - finger path, mouse path, hover, wheel - plus the
+        //     input device inventory on the first frame. The next screenshot
+        //     names exactly what the cover trackpad sends for each gesture.
+        //  2. CANDIDATE FIX, guarded: many touchpad firmwares merge a
+        //     two-finger swipe into ONE moving point (no second pointer, no
+        //     ACTION_SCROLL - which is why v0.2.96's pair synthesis never
+        //     armed). Android's gesture classifier tags such streams
+        //     AMBIGUOUS_GESTURE - its documented two-finger-swipe hint
+        //     (API 29+). That tagged delta is now the wheel, quantised into
+        //     the same accumulators/burst as every other wheel path, on both
+        //     the contact and the hover shape; a quick tagged lift is a
+        //     right-click (two-finger tap).
+        versionCode = 197
+        versionName = "0.2.97"
 
         ndk {
             abiFilters += listOf("arm64-v8a", "armeabi-v7a", "x86_64")
