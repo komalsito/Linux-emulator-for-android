@@ -216,8 +216,10 @@ android {
         //     the same accumulators/burst as every other wheel path, on both
         //     the contact and the hover shape; a quick tagged lift is a
         //     right-click (two-finger tap).
-        versionCode = 197
-        versionName = "0.2.97"
+                // v0.2.98 vc198: trackpad scroll synthesized from the held-button
+        // hover stream; generic BUTTON_PRESS deferred; evidence key +btn
+        versionCode = 198
+        versionName = "0.2.98"
 
         ndk {
             abiFilters += listOf("arm64-v8a", "armeabi-v7a", "x86_64")

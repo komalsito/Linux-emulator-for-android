@@ -47,7 +47,12 @@ import kotlin.math.min
  *                      turn a two-finger scroll into a drag-select; and a
  *                      wheel event is now accepted on its source alone, so
  *                      the v0.2.86 touchscreen-device veto can no longer
- *                      drop a trackpad's scroll)
+ *                      drop a trackpad's scroll; v0.2.98: this ROM sends
+ *                      no ACTION_SCROLL and never tags the gesture
+ *                      classifier, so a scroll that arrives as a
+ *                      held-button hover stream is quantised into the
+ *                      wheel and a generic BUTTON_PRESS is deferred -
+ *                      a scroll start can no longer drag-select)
  *  (v0.2.89: the "keys" toggle and its helper key bar are REMOVED - field
  *   request; the view stays fit-to-screen.)
  *
@@ -768,6 +773,43 @@ class DesktopView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attrs) 
             a == android.view.MotionEvent.ACTION_HOVER_ENTER) {
             if (isMouseInput(event)) {
                 noteMouseActive()
+                // v0.2.98 burst tracer: the scroll gesture reaches us ONLY as
+                // hover (no touch stream, no ACTION_SCROLL, no classifier
+                // tag), so each continuous hover burst is recorded: count,
+                // travelled pixels, any button bits seen, duration - one
+                // readable line per gesture instead of deduped silence.
+                val hnow = System.currentTimeMillis()
+                if (hoverBurstN == 0 || hnow - hoverBurstLastMs > 800L) {
+                    noteHoverFlush("gap")
+                    hoverBurstN = 1
+                    hoverBurstStartMs = hnow
+                    hoverBurstLastX = event.x; hoverBurstLastY = event.y
+                    hoverBurstDx = 0f; hoverBurstDy = 0f
+                } else {
+                    hoverBurstN++
+                    hoverBurstDx += event.x - hoverBurstLastX
+                    hoverBurstDy += event.y - hoverBurstLastY
+                    hoverBurstLastX = event.x; hoverBurstLastY = event.y
+                }
+                hoverBurstLastMs = hnow
+                hoverBurstBtnMask = hoverBurstBtnMask or event.buttonState
+                scheduleHoverFlush()
+                // v0.2.98: some ROMs attach wheel axes to generic motion
+                // instead of sending ACTION_SCROLL - take them from hover too.
+                val av = event.getAxisValue(MotionEvent.AXIS_VSCROLL)
+                val ah = event.getAxisValue(MotionEvent.AXIS_HSCROLL)
+                if (av != 0f || ah != 0f) {
+                    val k = mouseScrollScale() * (if (mouseNaturalScroll()) -1f else 1f)
+                    wheelAccumV = (wheelAccumV + av * k).coerceIn(-64f, 64f)
+                    wheelAccumH = (wheelAccumH + ah * k).coerceIn(-64f, 64f)
+                    val nv = wheelAccumV.toInt(); if (nv != 0) wheelAccumV -= nv
+                    val nh = wheelAccumH.toInt(); if (nh != 0) wheelAccumH -= nh
+                    if (nv != 0 || nh != 0) {
+                        val (x, y) = mapToX(event.x, event.y)
+                        desktop?.injectScrollPair(x, y, nv, nh)
+                    }
+                    return true
+                }
                 // v0.2.97 MERGED-STREAM SCROLL (hover shape): if the ROM sends
                 // the two-finger swipe as one moving HOVER point tagged
                 // AMBIGUOUS_GESTURE (the classifier's two-finger-swipe
@@ -779,6 +821,52 @@ class DesktopView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attrs) 
                     if (!hoverWheelArmed) {
                         hoverWheelArmed = true
                         wheelCentroidX = event.x; wheelCentroidY = event.y
+                    }
+                    val dx = event.x - wheelCentroidX
+                    val dy = event.y - wheelCentroidY
+                    wheelCentroidX = event.x; wheelCentroidY = event.y
+                    val dir = if (mouseNaturalScroll()) -1f else 1f
+                    wheelAccumV = (wheelAccumV + (-dy / SCROLL_STEP_PX) * dir).coerceIn(-64f, 64f)
+                    wheelAccumH = (wheelAccumH + (dx / SCROLL_STEP_PX) * dir).coerceIn(-64f, 64f)
+                    val nv = wheelAccumV.toInt(); if (nv != 0) wheelAccumV -= nv
+                    val nh = wheelAccumH.toInt(); if (nh != 0) wheelAccumH -= nh
+                    if (nv != 0 || nh != 0) {
+                        val (x, y) = mapToX(event.x, event.y)
+                        desktop?.injectScrollPair(x, y, nv, nh)
+                    }
+                    return true
+                }
+                // v0.2.98 HELD-BUTTON HOVER SCROLL. The evidence round showed
+                // this ROM sends no ACTION_SCROLL and never tags the gesture
+                // classifier (cls=0 on every event), and the user's scroll
+                // attempts left no touch-stream lines at all - the gesture can
+                // only arrive as hover motion with a button held (bits on the
+                // hover event, or a generic ACTION_BUTTON_PRESS before it).
+                // For a real mouse this state is unreachable (button-down
+                // converts the stream into touch), and real drags on this pad
+                // are touch streams, so nothing legitimate is hijacked: while
+                // any mouse button is held, hover deltas are the WHEEL.
+                val hoverHeld = event.buttonState != 0 || mouseExtraButton != 0 ||
+                    pendingPressBtn != 0
+                if (hoverHeld) {
+                    if (!hoverWheelArmed) {
+                        hoverWheelArmed = true
+                        wheelCentroidX = event.x; wheelCentroidY = event.y
+                        if (!hoverWheelNoted) {
+                            hoverWheelNoted = true
+                            desktop?.noteInfo(
+                                "trackpad scroll: held-button hover stream -> wheel (v0.2.98)")
+                        }
+                        // a deferred BUTTON_PRESS was really a scroll start:
+                        // cancel it instead of clicking
+                        cancelPendingPress()
+                        // a press that already fired (the 90 ms window closed
+                        // before the first motion) is taken back
+                        if (mouseExtraButton != 0) {
+                            val (x, y) = mapToX(event.x, event.y)
+                            desktop?.injectClick(x, y, mouseExtraButton, press = false)
+                            mouseExtraButton = 0
+                        }
                     }
                     val dx = event.x - wheelCentroidX
                     val dy = event.y - wheelCentroidY
@@ -1007,6 +1095,59 @@ class DesktopView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attrs) 
     private var wheelCentroidY = 0f
     // v0.2.97: the hover shape of the merged-stream scroll (see onHoverEvent).
     private var hoverWheelArmed = false
+    // v0.2.98: one-shot pane note the first time the held-button hover
+    // synthesis fires, so a field screenshot confirms the path ran.
+    private var hoverWheelNoted = false
+    // v0.2.98: hover-burst tracer (see onHoverEvent) - the scroll gesture on
+    // the cover trackpad is visible ONLY as hover, so each continuous burst
+    // is counted and flushed as a single evidence line.
+    private var hoverBurstN = 0
+    private var hoverBurstDx = 0f
+    private var hoverBurstDy = 0f
+    private var hoverBurstBtnMask = 0
+    private var hoverBurstStartMs = 0L
+    private var hoverBurstLastMs = 0L
+    private var hoverBurstLastX = 0f
+    private var hoverBurstLastY = 0f
+    private var hoverBurstFlushPosted = false
+    private val hoverBurstFlushRunnable = Runnable {
+        hoverBurstFlushPosted = false
+        noteHoverFlush("idle")
+    }
+    private fun scheduleHoverFlush() {
+        if (hoverBurstFlushPosted) removeCallbacks(hoverBurstFlushRunnable)
+        hoverBurstFlushPosted = true
+        postDelayed(hoverBurstFlushRunnable, 1_500L)
+    }
+    private fun noteHoverFlush(reason: String) {
+        if (hoverBurstN == 0) return
+        desktop?.noteInfo(
+            "input ev: HOVER_BURST n=" + hoverBurstN +
+                " dx=" + hoverBurstDx.toInt() + " dy=" + hoverBurstDy.toInt() +
+                " btn=0x" + Integer.toHexString(hoverBurstBtnMask) +
+                " dur=" + (hoverBurstLastMs - hoverBurstStartMs) + "ms" +
+                " end=" + reason + " [hover]")
+        hoverBurstN = 0; hoverBurstDx = 0f; hoverBurstDy = 0f; hoverBurstBtnMask = 0
+    }
+    // v0.2.98: a generic-motion BUTTON_PRESS is deferred by DEFER_PRESS_MS so
+    // a two-finger scroll that starts with a press cannot click or
+    // drag-select (see onGenericMotionEvent and onHoverEvent).
+    private var pendingPressBtn = 0
+    private var pendingPressX = 0f
+    private var pendingPressY = 0f
+    private val pendingPressRunnable = Runnable {
+        val b = pendingPressBtn
+        pendingPressBtn = 0
+        if (b != 0 && b != mouseHeldButton && mouseExtraButton == 0 && !frameless) {
+            mouseExtraButton = b
+            val (x, y) = mapToX(pendingPressX, pendingPressY)
+            desktop?.injectClick(x, y, b, press = true)
+        }
+    }
+    private fun cancelPendingPress() {
+        removeCallbacks(pendingPressRunnable)
+        pendingPressBtn = 0
+    }
 
     // --------------------- v0.2.97 EVIDENCE ROUND ---------------------
     // "Still can't scroll" after v0.2.96 means this ROM delivers the
@@ -1021,8 +1162,12 @@ class DesktopView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attrs) 
     private val notedEventShapes = HashSet<String>()
     private var inputDevicesNoted = false
     private fun noteEventShape(where: String, e: MotionEvent, extra: String = "") {
+        // v0.2.98: button bits join the dedup key. The v0.2.97 key dropped
+        // them, so a hover stream carrying BUTTON_PRIMARY (the shape the
+        // field report points at: "moves as if selecting") deduped into the
+        // buttonless hover note and the one interesting line never appeared.
         if (!notedEventShapes.add(where + "|" + e.actionMasked + "|" + e.source +
-                "|" + e.pointerCount)) return
+                "|" + e.pointerCount + "|0x" + Integer.toHexString(e.buttonState))) return
         val cls = if (android.os.Build.VERSION.SDK_INT >= 29) e.classification else -1
         desktop?.noteInfo(
             "input ev: " + MotionEvent.actionToString(e.actionMasked).removePrefix("ACTION_") +
@@ -1135,6 +1280,10 @@ class DesktopView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attrs) 
             }
             MotionEvent.ACTION_BUTTON_PRESS, MotionEvent.ACTION_BUTTON_RELEASE -> {
                 if (!isMouseInput(event) || frameless) return false
+                // v0.2.98: this branch had no shape note, so a two-finger
+                // scroll reported as press + hover motion never appeared in
+                // the evidence log at all.
+                noteEventShape("btn", event, "ab=0x" + Integer.toHexString(event.actionButton))
                 noteMouseActive()
                 val b = xButtonForBits(event.actionButton)
                 // v0.2.95: xButtonForBits now returns 0 for "no button" -
@@ -1147,20 +1296,39 @@ class DesktopView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attrs) 
                 if (press) lastMouseBtnPressMs = System.currentTimeMillis()
                 val (x, y) = mapToX(event.x, event.y)
                 if (press) {
-                    // v0.2.86: `b != mouseHeldButton` - some trackpads report a
-                    // physical click as BOTH an ACTION_DOWN (handled by
+                    // v0.2.98: DEFER the X press by DEFER_PRESS_MS. On the
+                    // cover trackpad a two-finger scroll can arrive as
+                    // ACTION_BUTTON_PRESS followed by a hover-motion stream;
+                    // injecting the press immediately turned every scroll
+                    // start into a drag-select ("moves as if selecting").
+                    // Hover motion inside the window cancels the pending
+                    // press - that was a scroll; a RELEASE before any motion
+                    // is a real quick click and is delivered whole; neither,
+                    // and the runnable presses a held button.
+                    // v0.2.86 guard kept at fire time: some trackpads report
+                    // a physical click as BOTH an ACTION_DOWN (handled by
                     // onMouseTouchEvent) and an ACTION_BUTTON_PRESS. Pressing
                     // the same X button twice turned one click into a
                     // double-click; the DOWN path's button is never re-pressed
                     // here, and releaseMouseButtons releases a shared button
                     // exactly once.
-                    if (mouseExtraButton == 0 && b != mouseHeldButton) {
-                        mouseExtraButton = b
-                        desktop?.injectClick(x, y, b, press = true)
+                    pendingPressBtn = b
+                    pendingPressX = event.x; pendingPressY = event.y
+                    removeCallbacks(pendingPressRunnable)
+                    postDelayed(pendingPressRunnable, DEFER_PRESS_MS)
+                } else {
+                    if (pendingPressBtn == b) {
+                        // quick click with no motion in between: whole click
+                        removeCallbacks(pendingPressRunnable)
+                        pendingPressBtn = 0
+                        if (b != mouseHeldButton) {
+                            desktop?.injectClick(x, y, b, press = true)
+                            desktop?.injectClick(x, y, b, press = false)
+                        }
+                    } else if (mouseExtraButton == b) {
+                        mouseExtraButton = 0
+                        desktop?.injectClick(x, y, b, press = false)
                     }
-                } else if (mouseExtraButton == b) {
-                    mouseExtraButton = 0
-                    desktop?.injectClick(x, y, b, press = false)
                 }
                 return true
             }
@@ -1418,6 +1586,7 @@ class DesktopView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attrs) 
      *  v0.2.86: when the DOWN path adopted a BUTTON_PRESS (extra == held)
      *  there is only ONE press in the server, so only ONE release is sent. */
     private fun releaseMouseButtons(e: MotionEvent) {
+        cancelPendingPress()       // v0.2.98: gesture teardown fires no deferred press
         mouseContactDown = false   // v0.2.95: the contact-only touch is over too
         contactWheel = false       // v0.2.96: a scroll gesture ends here too
         dragLockPending = false    // v0.2.96: and a drag-lock that never moved
@@ -1450,6 +1619,7 @@ class DesktopView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attrs) 
      * exits; a no-op when nothing is held.
      */
     private fun releaseMouseButtonsIfHeld() {
+        cancelPendingPress()       // v0.2.98: gesture teardown fires no deferred press
         mouseContactDown = false   // v0.2.95: a contact-only touch ends here too
         contactWheel = false       // v0.2.96: a scroll gesture ends here too
         dragLockPending = false    // v0.2.96: and a drag-lock that never moved
@@ -2060,6 +2230,10 @@ class DesktopView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attrs) 
         // a previous tap to arm the drag-lock idiom.
         const val MOUSE_TAP_MS = 250L
         const val MOUSE_DRAG_LOCK_MS = 350L
+        // v0.2.98: a generic-motion BUTTON_PRESS waits this long before it
+        // becomes a real X press - hover motion inside the window means the
+        // "press" was the start of a two-finger scroll and is cancelled.
+        const val DEFER_PRESS_MS = 90L
         // v0.2.61 intro card: long enough to read seven lines on a phone,
         // short enough that it is gone before the user wants the screen back.
         const val HINT_MS = 11_000L
