@@ -890,9 +890,24 @@ class DesktopView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attrs) 
      *  SOURCE_TOUCHPAD either, onGenericMotionEvent returned false, and
      *  the page never scrolled. The source alone decides: MOUSE or
      *  TOUCHPAD is a wheel, anything else is not. */
-    private fun isWheelInput(e: MotionEvent): Boolean =
-        e.isFromSource(InputDevice.SOURCE_MOUSE) ||
-            e.isFromSource(InputDevice.SOURCE_TOUCHPAD)
+    private fun isWheelInput(e: MotionEvent): Boolean {
+        // v0.2.96: accept ACTION_SCROLL from ANY source. The v0.2.95 source
+        // list was still too narrow for the cover trackpad, whose scroll
+        // events the ROM can tag touchscreen-class - and no touch STREAM
+        // ever arrives as ACTION_SCROLL (the v0.2.86 veto's concern), so
+        // there is no finger gesture this can misroute. Unusual sources are
+        // still noted once for the next field round.
+        if (e.isFromSource(InputDevice.SOURCE_MOUSE) ||
+            e.isFromSource(InputDevice.SOURCE_TOUCHPAD)) return true
+        if (!scrollDropNoted) {
+            scrollDropNoted = true
+            desktop?.noteInfo(
+                "scroll accepted from unusual source=0x" +
+                    Integer.toHexString(e.source) +
+                    " dev=" + (e.device?.name ?: "?") + " (v0.2.96: any ACTION_SCROLL is a wheel)")
+        }
+        return true
+    }
 
     /** Android button bits -> X button numbers. X: 1 left, 2 middle, 3 right,
      *  8 back, 9 forward. TERTIARY is the middle button on Android. */
@@ -931,6 +946,37 @@ class DesktopView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attrs) 
     // never a drag; cleared by every gesture exit (releaseMouseButtons /
     // releaseMouseButtonsIfHeld).
     private var mouseContactDown = false
+    // v0.2.96 TRACKPAD CONTACT MODEL. The MatePad keyboard-cover trackpad
+    // delivers its whole gesture vocabulary as BUTTONLESS mouse-classified
+    // streams: a glide is a contact+MOVE, a physical click reports button
+    // bits. The v0.2.95 contact change stopped the glide from drag-selecting
+    // (right) but left the stream NO vocabulary at all - a tap did nothing
+    // (no button bits on its DOWN/UP) and a two-finger scroll just glided
+    // the pointer: the reported "scrolling does not work, inputs are
+    // sloppy". These fields synthesize the standard trackpad semantics
+    // host-side (see DOWN/MOVE/POINTER_DOWN/POINTER_UP/UP):
+    //   tap (quick lift, no travel)  -> button 1 click
+    //   tap, then a new contact that MOVES (drag-lock idiom) -> button 1
+    //     press + real drag, released at lift
+    //   a second pointer joins the contact -> two-finger SCROLL (wheel
+    //     4-7, same accumulators + natural-scroll setting as ACTION_SCROLL)
+    //   two-finger tap (no travel)   -> button 3 right click (the finger
+    //     machine keeps its middle-click two-finger tap)
+    private var contactDownMs = 0L
+    private var contactDownX = 0f
+    private var contactDownY = 0f
+    private var contactMoved = false
+    private var dragLockPending = false
+    private var lastSynthTapMs = 0L
+    // a ROM that ALSO reports the tap as ACTION_BUTTON_PRESS would turn a
+    // synthesized tap into a double click - suppress ours when a real
+    // press just arrived (see onGenericMotionEvent).
+    private var lastMouseBtnPressMs = 0L
+    private var contactWheel = false
+    private var contactWheelMoved = false
+    private var contactWheelStartMs = 0L
+    private var wheelCentroidX = 0f
+    private var wheelCentroidY = 0f
     // v0.2.95: one-shot diagnostic for a scroll event the view refuses, so
     // a future field round can tell "no scroll event arrived" from "one
     // arrived with a source this build does not accept".
@@ -950,6 +996,15 @@ class DesktopView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attrs) 
 
     private fun mouseNaturalScroll(): Boolean =
         settingsPrefs?.getBoolean("mouse_natural_scroll", false) ?: false
+
+    /** v0.2.96: average position of the first pointers - the centroid a
+     *  two-finger trackpad scroll is measured from. */
+    private fun pointerCentroid(e: MotionEvent): Pair<Float, Float> {
+        val n = e.pointerCount.coerceIn(1, 3)
+        var sx = 0f; var sy = 0f
+        for (i in 0 until n) { sx += e.getX(i); sy += e.getY(i) }
+        return sx / n to sy / n
+    }
 
     /**
      * Wheel + extra mouse buttons. ACTION_SCROLL is the usual route a
@@ -1004,6 +1059,10 @@ class DesktopView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attrs) 
                 // a BUTTON_PRESS with no action button is not a press.
                 if (b == 0) return true
                 val press = event.actionMasked == MotionEvent.ACTION_BUTTON_PRESS
+                // v0.2.96: remember a REAL press so the synthesized
+                // tap-to-click never doubles a ROM that reports a tap as
+                // BOTH a buttonless contact and a BUTTON_PRESS.
+                if (press) lastMouseBtnPressMs = System.currentTimeMillis()
                 val (x, y) = mapToX(event.x, event.y)
                 if (press) {
                     // v0.2.86: `b != mouseHeldButton` - some trackpads report a
@@ -1069,7 +1128,17 @@ class DesktopView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attrs) 
                         // a two-finger scroll dragged a selection across the
                         // page. The pointer still tracks; see MOVE.
                         mouseContactDown = true
+                        // v0.2.96: start of a synthesized gesture - remember
+                        // time and place so UP can tell a TAP (click) from a
+                        // glide, and arm drag-lock when it follows a tap.
+                        contactDownMs = System.currentTimeMillis()
+                        contactDownX = e.x; contactDownY = e.y
+                        contactMoved = false
+                        contactWheel = false
+                        contactWheelMoved = false
+                        dragLockPending = contactDownMs - lastSynthTapMs <= MOUSE_DRAG_LOCK_MS
                     } else {
+                        dragLockPending = false
                         // v0.2.86: if a BUTTON_PRESS for the same button already
                         // arrived (ROMs differ on which comes first), adopt it
                         // instead of pressing twice - one physical click must be
@@ -1086,6 +1155,29 @@ class DesktopView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attrs) 
             MotionEvent.ACTION_MOVE -> {
                 noteMouseActive()
                 if (mouseOverlayDown || frameless) return true
+                if (contactWheel) {
+                    // v0.2.96: two-finger scroll synthesized from the contact
+                    // stream (this ROM never sends ACTION_SCROLL for it): the
+                    // centroid delta becomes the AXIS_VSCROLL/HSCROLL analog
+                    // (-dy up / +dx right), quantised into wheel notches with
+                    // the SAME accumulators, natural-scroll setting and one
+                    // batched burst as the ACTION_SCROLL path - 44 px of
+                    // travel per notch, like the finger machine.
+                    val (cx, cy) = pointerCentroid(e)
+                    val dx = cx - wheelCentroidX; val dy = cy - wheelCentroidY
+                    wheelCentroidX = cx; wheelCentroidY = cy
+                    if (abs(dx) > 1f || abs(dy) > 1f) contactWheelMoved = true
+                    val dir = if (mouseNaturalScroll()) -1f else 1f
+                    wheelAccumV = (wheelAccumV + (-dy / SCROLL_STEP_PX) * dir).coerceIn(-64f, 64f)
+                    wheelAccumH = (wheelAccumH + (dx / SCROLL_STEP_PX) * dir).coerceIn(-64f, 64f)
+                    val nv = wheelAccumV.toInt(); if (nv != 0) wheelAccumV -= nv
+                    val nh = wheelAccumH.toInt(); if (nh != 0) wheelAccumH -= nh
+                    if (nv != 0 || nh != 0) {
+                        val (x, y) = mapToX(cx, cy)
+                        desktop?.injectScrollPair(x, y, nv, nh)
+                    }
+                    return true
+                }
                 if (mouseHeldButton == 0) {
                     // v0.2.95: contact-only trackpad touch (DOWN carried no
                     // button): the pointer still follows the finger, as
@@ -1094,8 +1186,24 @@ class DesktopView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attrs) 
                     // touch-down point for the whole scroll gesture, so the
                     // scroll would land wherever the gesture started.
                     if (!mouseContactDown) return true
+                    if (abs(e.x - contactDownX) > TAP_SLOP ||
+                        abs(e.y - contactDownY) > TAP_SLOP) contactMoved = true
+                    // v0.2.96 drag-lock: a contact that starts right after a
+                    // synthesized tap and then MOVES is the tap-then-glide
+                    // drag idiom - press button 1 now; the release paths let
+                    // go of it at lift.
+                    if (dragLockPending && contactMoved) {
+                        dragLockPending = false
+                        mouseHeldButton = 1
+                        val (x, y) = mapToX(e.x, e.y)
+                        desktop?.injectClick(x, y, 1, press = true)
+                        return true
+                    }
                     val now = System.currentTimeMillis()
-                    if (now - lastMouseMotionTs >= 33) {   // <=30 motion events/s
+                    // v0.2.96: 60 motion events/s (was 30): the XTEST pump
+                    // coalesces pending motions to the newest anyway, so the
+                    // extra rate only sharpens the pointer.
+                    if (now - lastMouseMotionTs >= 16) {   // <=60 motion events/s
                         lastMouseMotionTs = now
                         val (x, y) = mapToX(e.x, e.y)
                         desktop?.injectMotion(x, y)
@@ -1103,16 +1211,71 @@ class DesktopView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attrs) 
                     return true
                 }
                 val now = System.currentTimeMillis()
-                if (now - lastMouseMotionTs >= 33) {   // <=30 motion events/s
+                if (now - lastMouseMotionTs >= 16) {   // v0.2.96: 60/s (was 30)
                     lastMouseMotionTs = now
                     val (x, y) = mapToX(e.x, e.y)
                     desktop?.injectMotion(x, y)
                 }
                 return true
             }
+            MotionEvent.ACTION_POINTER_DOWN -> {
+                // v0.2.96: a second pointer joining a BUTTONLESS contact is
+                // a two-finger scroll - the one trackpad gesture this ROM
+                // does not synthesize into ACTION_SCROLL. (With a button
+                // held it is a finger joining mid-drag: leave the drag.)
+                noteMouseActive()
+                if (mouseOverlayDown || frameless) return true
+                if (e.pointerCount >= 2 && mouseHeldButton == 0) {
+                    contactWheel = true
+                    contactWheelMoved = false
+                    contactWheelStartMs = System.currentTimeMillis()
+                    val (cx, cy) = pointerCentroid(e)
+                    wheelCentroidX = cx; wheelCentroidY = cy
+                }
+                return true
+            }
+            MotionEvent.ACTION_POINTER_UP -> {
+                noteMouseActive()
+                // v0.2.96: the scroll pair is dissolving (this event still
+                // counts the lifting pointer). A two-finger TAP - no travel,
+                // quick lift - is a RIGHT click, fired here at the first
+                // lift exactly like the finger machine fires its middle
+                // click. contactWheelMoved stays true so the trailing UP of
+                // the remaining finger cannot also click.
+                if (contactWheel && e.pointerCount <= 2) {
+                    if (!contactWheelMoved &&
+                        System.currentTimeMillis() - contactWheelStartMs <= TWO_FINGER_TAP_MS) {
+                        val i = e.actionIndex
+                        val (x, y) = mapToX(e.getX(i), e.getY(i))
+                        desktop?.injectClick(x, y, 3, press = true)
+                        desktop?.injectClick(x, y, 3, press = false)
+                    }
+                    contactWheel = false
+                    contactWheelMoved = true
+                }
+                return true
+            }
             MotionEvent.ACTION_UP -> {
                 noteMouseActive()
                 if (mouseOverlayDown) { mouseOverlayDown = false; return true }
+                if (!frameless && mouseContactDown && mouseHeldButton == 0 && !contactWheelMoved) {
+                    // v0.2.96 tap-to-click: a buttonless contact that lifts
+                    // fast without travel is a CLICK - the press this ROM
+                    // never reports with button bits. A second quick tap
+                    // lands as a second press/release pair, so the X client
+                    // times it as a real double click. Suppressed when a
+                    // real ACTION_BUTTON_PRESS just arrived (double-press
+                    // guard) and after a two-finger gesture.
+                    val now = System.currentTimeMillis()
+                    if (!contactMoved && now - lastMouseBtnPressMs >= 250L &&
+                        (dragLockPending || now - contactDownMs <= MOUSE_TAP_MS)) {
+                        val (x, y) = mapToX(e.x, e.y)
+                        desktop?.injectClick(x, y, 1, press = true)
+                        desktop?.injectClick(x, y, 1, press = false)
+                        lastSynthTapMs = now
+                    }
+                    dragLockPending = false
+                }
                 releaseMouseButtons(e)
                 return true
             }
@@ -1132,6 +1295,8 @@ class DesktopView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attrs) 
      *  there is only ONE press in the server, so only ONE release is sent. */
     private fun releaseMouseButtons(e: MotionEvent) {
         mouseContactDown = false   // v0.2.95: the contact-only touch is over too
+        contactWheel = false       // v0.2.96: a scroll gesture ends here too
+        dragLockPending = false    // v0.2.96: and a drag-lock that never moved
         if (!frameless && (mouseHeldButton != 0 || mouseExtraButton != 0)) {
             val (x, y) = mapToX(e.x, e.y)
             val held = mouseHeldButton; val extra = mouseExtraButton
@@ -1162,6 +1327,8 @@ class DesktopView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attrs) 
      */
     private fun releaseMouseButtonsIfHeld() {
         mouseContactDown = false   // v0.2.95: a contact-only touch ends here too
+        contactWheel = false       // v0.2.96: a scroll gesture ends here too
+        dragLockPending = false    // v0.2.96: and a drag-lock that never moved
         if (mouseHeldButton == 0 && mouseExtraButton == 0) return
         val held = mouseHeldButton; val extra = mouseExtraButton
         mouseHeldButton = 0; mouseExtraButton = 0; mouseOverlayDown = false
@@ -1319,7 +1486,11 @@ class DesktopView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attrs) 
         // v0.2.85: a real mouse/trackpad button gets the DIRECT path (press on
         // DOWN, release on UP, no finger-gesture interpretation at all). The
         // stylus deliberately does NOT take this path - it is touch by design.
-        if (event.pointerCount == 1 && isMouseInput(event)) return onMouseTouchEvent(event)
+        // v0.2.96: the pointerCount == 1 gate is gone - a trackpad's
+        // two-finger scroll arrives as a 2-POINTER MOUSE stream on this ROM,
+        // and routing that to the finger machine fed scaleDetector instead
+        // of the wheel synthesis onMouseTouchEvent owns since v0.2.96.
+        if (isMouseInput(event)) return onMouseTouchEvent(event)
         scaleDetector.onTouchEvent(event)
         val multiTouch = event.pointerCount > 1
         when (event.actionMasked) {
@@ -1736,7 +1907,11 @@ class DesktopView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attrs) 
         const val LONG_PRESS_MS = 450L
         // v0.2.85: mouse hover injection budget - at most ~30 X motions per
         // second, with a trailing flush so the final position always lands.
-        const val HOVER_MIN_INTERVAL_MS = 33L
+        // v0.2.96: 16 ms (~60/s) - was 33: over the XTEST pump pending
+        // motions coalesce to the newest anyway, so the extra rate only
+        // sharpens the pointer; the trailing flush still guarantees the
+        // final position lands.
+        const val HOVER_MIN_INTERVAL_MS = 16L
         // v0.2.86: synthetic-cursor suppression EXPIRES this long after the
         // last real mouse/trackpad event. Long enough that an active system
         // cursor is never doubled by ours (the v0.2.85 field complaint);
@@ -1754,6 +1929,11 @@ class DesktopView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attrs) 
         const val TWO_FINGER_TAP_MS = 260L
         const val TWO_FINGER_TAP_SLOP = 26f
         const val SCROLL_STEP_PX = 44f
+        // v0.2.96 trackpad contact synthesis: how long a buttonless contact
+        // may last to count as a tap, and how near a new contact must follow
+        // a previous tap to arm the drag-lock idiom.
+        const val MOUSE_TAP_MS = 250L
+        const val MOUSE_DRAG_LOCK_MS = 350L
         // v0.2.61 intro card: long enough to read seven lines on a phone,
         // short enough that it is gone before the user wants the screen back.
         const val HINT_MS = 11_000L

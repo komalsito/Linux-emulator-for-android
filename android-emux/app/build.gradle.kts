@@ -178,8 +178,26 @@ android {
         //     ACTION_SCROLL, so no finger gesture can be misrouted here.
         // A refused scroll is now noted once per session (source/tool/device)
         // instead of vanishing silently.
-        versionCode = 195
-        versionName = "0.2.95"
+        // v0.2.96 (vc196): TRACKPAD CONTACT VOCABULARY + PROOF-GATE
+        // LIVENESS (DesktopView/DesktopService; ENV_VERSION stays 81: no
+        // guest script changed, no re-seed). Field (v0.2.95): two-finger
+        // scroll did not scroll, inputs felt sloppy/slow. The cover
+        // trackpad sends its gestures as BUTTONLESS mouse streams:
+        //  1. The v0.2.95 contact fix left that stream no vocabulary - a
+        //     tap did nothing, a two-finger scroll glided the pointer. The
+        //     view now synthesizes trackpad semantics host-side: tap=click,
+        //     tap-then-glide=drag, second pointer=scroll (44px/notch, the
+        //     natural-scroll setting), two-finger tap=right click. Any
+        //     ACTION_SCROLL is a wheel now (the ROM can tag the trackpad
+        //     touchscreen-class), and mouse motion runs at 60/s not 30/s.
+        //  2. The anti-race quiet gates were one-shot ABORTS: an active
+        //     user aborted the capture proof (input rode the per-event
+        //     xdotool agent - the slowness) and the button proof/ladder
+        //     deferrals never re-ran at all. All gates now PARK until the
+        //     first pause; the ladder re-confirms a raced failure in the
+        //     quiet window before mutating the desktop.
+        versionCode = 196
+        versionName = "0.2.96"
 
         ndk {
             abiFilters += listOf("arm64-v8a", "armeabi-v7a", "x86_64")

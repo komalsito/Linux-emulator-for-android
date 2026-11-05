@@ -3772,10 +3772,21 @@ class DesktopService(
         // the user was mid-drag, and the button leg MAPPED the red probe
         // window under their taps (field: "interact too fast and input
         // breaks; sometimes the click lands on the red window"). Wait for a
-        // quiet window; a user who never pauses aborts this attempt WITHOUT
-        // counting a failure - a raced proof proves nothing either way, and
-        // the watchdog retries after the backoff.
-        if (!awaitQuiet(700, 8_000)) return
+        // quiet window; a raced proof proves nothing either way.
+        // v0.2.96 LIVENESS FIX: the one-shot ABORT meant a session whose
+        // first minutes were active (the user tests by using the desktop)
+        // kept input on the per-event xdotool agent - one guest process
+        // exec PER EVENT, the reported "sloppy and slow" - until a fresh
+        // attempt happened to START inside a >=700 ms pause. Park here
+        // instead: this daemon thread sleeps while the user glides, the
+        // proof runs at the FIRST pause, and the heartbeat below keeps the
+        // 5 s watchdog from stacking a second proof thread while this one
+        // parks (lastCapProofMs is the watchdog's own start gate).
+        while (c.connected && userActive(700)) {
+            lastCapProofMs = System.currentTimeMillis()
+            runCatching { Thread.sleep(250) }
+        }
+        if (!c.connected) return
         val p0 = runCatching { c.queryPointerRoot() }.getOrNull()
         if (p0 == null) {
             capProofFails++
@@ -3845,14 +3856,18 @@ class DesktopService(
     private fun buttonProofAndEscalate(c: X11Client) {
         // v0.2.95: the button probe MAPS A WINDOW and clicks it - never run
         // it under the user's fingers (their taps land on the probe window
-        // and their drags race the probe's own pointer work). Defer to a
-        // quiet window; the proof stays motion-ok meanwhile, never dead,
-        // and re-runs on the next proof cycle.
-        if (!awaitQuiet(1_500, 10_000)) {
-            inputProof = "motion-ok"
-            noteInfo("button proof deferred: you are interacting right now - it runs in the next quiet window")
-            return
-        }
+        // and their drags race the probe's own pointer work).
+        // v0.2.96 LIVENESS FIX: the deferral was ONE-SHOT and nothing ever
+        // re-ran the button leg (scheduleReproof returns the moment the
+        // transport is already XTEST), so a session whose first 10 s were
+        // active never measured click delivery at all - a swallow class went
+        // undetected for its whole life. Park for the quiet window on this
+        // daemon thread instead: same anti-race guarantee (never probe
+        // under live input), but the probe provably runs at the first
+        // >=1.5 s pause.
+        if (userActive(1_500)) inputProof = "motion-ok"   // parked, not dead
+        while (userActive(1_500) && c.connected) runCatching { Thread.sleep(250) }
+        if (!c.connected) return
         var r = runCatching { c.probeButtonDelivery() }.getOrNull()
         if (r == null) {
             inputProof = "btn-probe-error"
@@ -3877,13 +3892,16 @@ class DesktopService(
         // v0.2.95: the ladder MUTATES the desktop the user is looking at
         // (rc.xml rewrite, WM reconfigure, WM switch). A probe that failed
         // only because the user's own rapid input raced it must NOT
-        // escalate: defer the whole ladder to a quiet window instead - it
-        // re-runs on the next proof cycle (proof stays motion-ok, the
-        // verdict records the deferral, no failure is counted).
-        if (!awaitQuiet(1_500, 3_000)) {
-            inputProof = "motion-ok"
-            publishBtnVerdict("deferred", "user interacting - ladder re-runs in the next quiet window")
-            noteInfo("button ladder DEFERRED: you are interacting right now - rc.xml/WM changes postponed, no failure counted")
+        // escalate against a live gesture.
+        // v0.2.96 LIVENESS FIX: the one-shot deferral never re-ran (same seam
+        // as the head of this function). Park for the quiet window, then
+        // RE-CONFIRM the failure there before mutating the desktop - a
+        // probe raced by live input must not cost an rc.xml rewrite.
+        while (userActive(1_500) && c.connected) runCatching { Thread.sleep(250) }
+        if (!c.connected) return
+        val rq = runCatching { c.probeButtonDelivery() }.getOrNull()
+        if (rq != null && rq.delivered) {
+            btnRecovered(c, rq, "quiet-window re-probe: the failed probe was raced by live input")
             return
         }
         // --- stage 1: guest rewrites rc.xml + reconfigures the WM ----------
@@ -3893,7 +3911,10 @@ class DesktopService(
         while (waited < 12_000 && c.connected) { Thread.sleep(500); waited += 500
             if (!java.io.File(com.emux.core.FsLayout.linuxRoot(ctx), "tmp/emux_btn_verdict").exists()) break }
         Thread.sleep(1_500)
-        if (c.connected && awaitQuiet(1_500, 3_000)) {   // v0.2.95: re-probe only in a quiet window
+        // v0.2.96: WAIT for the quiet window - the one-shot awaitQuiet
+        // could skip this re-probe entirely, and nothing ever came back.
+        while (c.connected && userActive(1_500)) runCatching { Thread.sleep(250) }
+        if (c.connected) {   // re-probe in the quiet window
             r = runCatching { c.probeButtonDelivery() }.getOrNull() ?: r
             if (r.delivered) { btnRecovered(c, r, "stage 1: guest rewrote rc.xml + reconfigured the WM"); return }
         }
@@ -3914,7 +3935,9 @@ class DesktopService(
             while (w2 < 14_000 && c.connected) { Thread.sleep(500); w2 += 500
                 if (!java.io.File(com.emux.core.FsLayout.linuxRoot(ctx), "tmp/emux_btn_verdict").exists()) break }
             Thread.sleep(2_000)
-            if (c.connected && awaitQuiet(1_500, 3_000)) {   // v0.2.95: re-probe only in a quiet window
+            // v0.2.96: WAIT for the quiet window - see stage 1 below.
+            while (c.connected && userActive(1_500)) runCatching { Thread.sleep(250) }
+            if (c.connected) {   // re-probe in the quiet window
                 r = runCatching { c.probeButtonDelivery() }.getOrNull() ?: r
                 if (r.delivered) { btnRecovered(c, r, "stage 2: wm now ${wmMode.ifEmpty { "?" }}"); return }
             }
