@@ -56,7 +56,10 @@ import kotlin.math.min
  *                      v0.2.99: the pad tags its contact stream
  *                      TOOL_TYPE_FINGER - the DEVICE bit decides the
  *                      route, so contact and two-finger scroll reach the
- *                      mouse path instead of the finger machine)
+ *                      mouse path instead of the finger machine;
+ *                      v0.2.100: the device-first rule is toolType-blind,
+ *                      and a second finger hijacks our own drag-lock
+ *                      press back into the wheel)
  *  (v0.2.89: the "keys" toggle and its helper key bar are REMOVED - field
  *   request; the view stays fit-to-screen.)
  *
@@ -968,6 +971,15 @@ class DesktopView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attrs) 
     /** Mouse or trackpad? toolType decides; stylus/finger sources never count
      *  even when a ROM tags them SOURCE_MOUSE. */
     private fun isMouseInput(e: MotionEvent): Boolean {
+        // v0.2.100: the device-first rule is now TOOLTYPE-BLIND. The pad
+        // tags its contact stream with a NON-mouse toolType, but the notes
+        // never printed it - v0.2.99 guessed TOOL_TYPE_FINGER and may have
+        // guessed wrong (STYLUS/ERASER equally possible) or the tag may
+        // FLICKER per event within one gesture (the vc197 log shows the
+        // same gesture producing both [touch] and [mouse] lines). Any
+        // SOURCE_MOUSE event from a device without the SOURCE_TOUCHSCREEN
+        // bit is now mouse input, whatever it claims to be held by. The
+        // toolType also joins the evidence key and note text below.
         // v0.2.99: the DEVICE decides first, not the toolType. The cover
         // trackpad ("HUAWEI Glide Keyboard", SOURCE_MOUSE, no TOUCHSCREEN
         // bit) tags its buttonless contact stream - including the two-finger
@@ -983,8 +995,7 @@ class DesktopView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attrs) 
         // stream moves to the mouse path, where the v0.2.96 contact model
         // owns it (glide = pointer motion, POINTER_DOWN pc=2 = wheel,
         // quick lift = click, tap-then-glide = drag).
-        if (e.pointerCount > 0 && e.isFromSource(InputDevice.SOURCE_MOUSE) &&
-            e.getToolType(0) == MotionEvent.TOOL_TYPE_FINGER) {
+        if (e.isFromSource(InputDevice.SOURCE_MOUSE)) {
             val d = e.device
             if (d != null && (d.sources and InputDevice.SOURCE_TOUCHSCREEN) == 0) return true
         }
@@ -1107,6 +1118,9 @@ class DesktopView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attrs) 
     private var contactDownY = 0f
     private var contactMoved = false
     private var dragLockPending = false
+    // v0.2.100: button 1 currently held came from the drag-lock synthesis
+    // (not real button bits) - POINTER_DOWN can take it back for a scroll.
+    private var dragLockHeld = false
     private var lastSynthTapMs = 0L
     // a ROM that ALSO reports the tap as ACTION_BUTTON_PRESS would turn a
     // synthesized tap into a double click - suppress ours when a real
@@ -1190,13 +1204,16 @@ class DesktopView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attrs) 
         // them, so a hover stream carrying BUTTON_PRIMARY (the shape the
         // field report points at: "moves as if selecting") deduped into the
         // buttonless hover note and the one interesting line never appeared.
+        val tt = if (e.pointerCount > 0) e.getToolType(0) else -1
         if (!notedEventShapes.add(where + "|" + e.actionMasked + "|" + e.source +
-                "|" + e.pointerCount + "|0x" + Integer.toHexString(e.buttonState))) return
+                "|" + e.pointerCount + "|0x" + Integer.toHexString(e.buttonState) +
+                "|" + tt)) return
         val cls = if (android.os.Build.VERSION.SDK_INT >= 29) e.classification else -1
         desktop?.noteInfo(
             "input ev: " + MotionEvent.actionToString(e.actionMasked).removePrefix("ACTION_") +
                 " src=0x" + Integer.toHexString(e.source) +
                 " pc=" + e.pointerCount +
+                " tt=" + tt +
                 " cls=" + cls +
                 " btn=0x" + Integer.toHexString(e.buttonState) +
                 " dev=" + (e.device?.name ?: "?") +
@@ -1504,6 +1521,7 @@ class DesktopView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attrs) 
                     if (dragLockPending && contactMoved) {
                         dragLockPending = false
                         mouseHeldButton = 1
+                        dragLockHeld = true   // v0.2.100: POINTER_DOWN can give it back
                         val (x, y) = mapToX(e.x, e.y)
                         desktop?.injectClick(x, y, 1, press = true)
                         return true
@@ -1534,7 +1552,19 @@ class DesktopView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attrs) 
                 // held it is a finger joining mid-drag: leave the drag.)
                 noteMouseActive()
                 if (mouseOverlayDown || frameless) return true
-                if (e.pointerCount >= 2 && mouseHeldButton == 0) {
+                if (e.pointerCount >= 2 && (mouseHeldButton == 0 || dragLockHeld)) {
+                    // v0.2.100: a second finger joining OUR OWN drag-lock
+                    // press is not a chorded drag - on a trackpad it means
+                    // the tap-glide became a two-finger scroll: give the
+                    // synthesized press back and take the wheel. (A REAL
+                    // button press - bits or BUTTON_PRESS - still keeps the
+                    // drag: the guard is dragLockHeld, not != 0.)
+                    if (dragLockHeld) {
+                        dragLockHeld = false
+                        val (x, y) = mapToX(e.x, e.y)
+                        desktop?.injectClick(x, y, mouseHeldButton, press = false)
+                        mouseHeldButton = 0
+                    }
                     contactWheel = true
                     contactWheelMoved = false
                     contactWheelStartMs = System.currentTimeMillis()
@@ -1614,6 +1644,7 @@ class DesktopView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attrs) 
         mouseContactDown = false   // v0.2.95: the contact-only touch is over too
         contactWheel = false       // v0.2.96: a scroll gesture ends here too
         dragLockPending = false    // v0.2.96: and a drag-lock that never moved
+        dragLockHeld = false       // v0.2.100: and its button goes with it
         if (!frameless && (mouseHeldButton != 0 || mouseExtraButton != 0)) {
             val (x, y) = mapToX(e.x, e.y)
             val held = mouseHeldButton; val extra = mouseExtraButton
@@ -1647,6 +1678,7 @@ class DesktopView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attrs) 
         mouseContactDown = false   // v0.2.95: a contact-only touch ends here too
         contactWheel = false       // v0.2.96: a scroll gesture ends here too
         dragLockPending = false    // v0.2.96: and a drag-lock that never moved
+        dragLockHeld = false       // v0.2.100: and its button goes with it
         if (mouseHeldButton == 0 && mouseExtraButton == 0) return
         val held = mouseHeldButton; val extra = mouseExtraButton
         mouseHeldButton = 0; mouseExtraButton = 0; mouseOverlayDown = false

@@ -221,8 +221,11 @@ android {
                 // v0.2.99 vc199: ROUTING FIX - the pad's TOOL_TYPE_FINGER contact
         // stream is mouse-routed by DEVICE (no TOUCHSCREEN bit), not toolType;
         // the two-finger scroll reaches the v0.2.96 contact model at last
-        versionCode = 199
-        versionName = "0.2.99"
+                // v0.2.100 vc200: device-first routing is TOOLTYPE-BLIND (v0.2.99's FINGER
+        // guess was never verified by the log); toolType joins the evidence key;
+        // POINTER_DOWN takes our own drag-lock press back for the wheel
+        versionCode = 200
+        versionName = "0.2.100"
 
         ndk {
             abiFilters += listOf("arm64-v8a", "armeabi-v7a", "x86_64")
