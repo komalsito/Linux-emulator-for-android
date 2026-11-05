@@ -224,8 +224,17 @@ android {
                 // v0.2.100 vc200: device-first routing is TOOLTYPE-BLIND (v0.2.99's FINGER
         // guess was never verified by the log); toolType joins the evidence key;
         // POINTER_DOWN takes our own drag-lock press back for the wheel
-        versionCode = 200
-        versionName = "0.2.100"
+        // v0.2.101 vc201: INSTALLED-DESKTOP SUPPORT. Field: 'sudo apt install
+        // ubuntu-desktop' changed nothing - the desktop was hardcoded to the
+        // seeded openbox+tint2+pcmanfm look. DesktopService now picks the WM
+        // by what exists in the active rootfs (gnome-session > startxfce4 >
+        // openbox); emux-x11 (ENV_VERSION 82 re-seed) launches the chosen
+        // session with dbus-launch, skips the EmuX furniture when a full
+        // session owns the desktop, and falls back to openbox if the session
+        // cannot stand up under proot+Xvfb (GNOME Shell software-renders -
+        // Xfce is the realistic choice). No input changes this round.
+        versionCode = 201
+        versionName = "0.2.101"
 
         ndk {
             abiFilters += listOf("arm64-v8a", "armeabi-v7a", "x86_64")

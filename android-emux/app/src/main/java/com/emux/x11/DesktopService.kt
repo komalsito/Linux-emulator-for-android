@@ -930,7 +930,30 @@ class DesktopService(
     @Volatile private var geometryFixes = 0
     @Volatile private var lastWm = "openbox"
 
-    fun startDesktop(wmCommand: String = "openbox") {
+    /**
+     * v0.2.101: the desktop the user gets is the desktop they installed.
+     * openbox was the hardcoded default; installing a full session into the
+     * rootfs (field: 'sudo apt install ubuntu-desktop') changed nothing. The
+     * host picks the WM by what exists in the ACTIVE rootfs: GNOME
+     * (gnome-session) wins, then Xfce (startxfce4), else the seeded openbox
+     * desktop. The guest launcher (emux-x11, ENV_VERSION 82 re-seed) owns the
+     * details: a session bus via dbus-launch (no systemd under proot),
+     * furniture skip (the session brings its own panel/icons/desktop), an
+     * instant-death fallback to openbox, and the button ladder never replaces
+     * a session. Honest expectation: GNOME Shell software-renders under
+     * proot+Xvfb and may be unusably slow or die outright (then openbox
+     * returns automatically); Xfce is the realistic full-session choice.
+     */
+    private fun defaultWmCommand(): String {
+        val rootfs = com.emux.core.FsLayout.linuxRoot(ctx)
+        return when {
+            java.io.File(rootfs, "usr/bin/gnome-session").isFile -> "gnome-session"
+            java.io.File(rootfs, "usr/bin/startxfce4").isFile -> "startxfce4"
+            else -> "openbox"
+        }
+    }
+
+    fun startDesktop(wmCommand: String = defaultWmCommand()) {
         lastWm = wmCommand
         // v0.1.100: AWAITING_FRAMES is also an in-progress state —
         // a second startDesktop() here would launch a duplicate X/capture

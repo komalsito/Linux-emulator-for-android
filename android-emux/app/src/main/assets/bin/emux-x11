@@ -328,6 +328,10 @@ wm_pid() {
       case "$a" in */*) a=${a##*/} ;; esac
       case "$a" in
         openbox|openbox-session|twm|icewm|jwm|marco|metacity|fluxbox|xfwm4) echo match ;;
+        # v0.2.101: full sessions must be found by the watchdog too, or it
+        # relaunches start_wm every tick forever. head -2 covers
+        # gnome-session -> gnome-session-binary and startxfce4's chain.
+        gnome-session|gnome-session-binary|gnome-shell|startxfce4|xfce4-session|xfce4-session-binary|mutter) echo match ;;
       esac
     done | grep -q match || continue
     echo "$p"
@@ -359,6 +363,16 @@ wm_fallback() {
   }
   touch /tmp/emux_wm_fellback 2>/dev/null
   OLDM=$(cat /tmp/emux_wm_mode 2>/dev/null)
+  # v0.2.101: NEVER kill a full desktop session over a button-probe verdict.
+  # The probe reads DEAD on a healthy openbox already (passive-grab probe
+  # artifact, deprioritised in the field), and a session manager owns grabs
+  # its own way - swapping the user's installed desktop for twm behind their
+  # back is the worse failure by far.
+  case "$OLDM" in
+    gnome-session|gnome-session-binary|gnome-shell|startxfce4|xfce4-session)
+      echo "emux-x11: WM mode '$OLDM' is a full session - ladder will not replace it (probe artifacts ignored)" >&2
+      return 0 ;;
+  esac
   for p in $(wm_pid); do
     echo "emux-x11: terminating WM pid $p ($OLDM) - $1" >&2
     kill "$p" 2>/dev/null
@@ -476,6 +490,18 @@ start_wm() {
         echo "emux-x11: launching $WM_BIN --sm-disable (no autostart file to run)" >&2
         nohup "$WM_BIN" --sm-disable >/tmp/wm.log 2>&1 </dev/null &
       fi ;;
+    gnome-session|startxfce4|xfce4-session)
+      # v0.2.101: FULL-DESKTOP SESSIONS (field: 'apt install ubuntu-desktop'
+      # must change what the user sees, not just sit on disk). A session
+      # manager brings its own panel, icons, WM and autostart; stacking the
+      # seeded tint2/pcmanfm furniture on top fights it for the root window,
+      # and without systemd there is no session bus - dbus-launch one. The
+      # environment scripts sourced above are openbox's; harmless here.
+      if command -v dbus-launch >/dev/null 2>&1; then
+        eval "$(dbus-launch --sh-syntax 2>/dev/null)" 2>/dev/null || true
+      fi
+      echo "emux-x11: launching full session $WM_BIN (bus: ${DBUS_SESSION_BUS_ADDRESS:-none})" >&2
+      nohup "$WM_BIN" >/tmp/wm.log 2>&1 </dev/null & ;;
     *)
       echo "emux-x11: launching fallback WM $WM_BIN" >&2
       nohup "$WM_BIN" >/tmp/wm.log 2>&1 </dev/null & ;;
@@ -492,6 +518,14 @@ start_wm() {
   fi
   echo "emux-x11: WM DIED within 1 s of launch ($WM_BIN) - wm.log tail:" >&2
   tail -5 /tmp/wm.log >&2 2>/dev/null
+  # v0.2.101: a full session that cannot stand up (GNOME Shell wants real GL
+  # and gets software rendering under proot+Xvfb; Xfce needs less but can
+  # still die on a missing bus) must not leave the user a bare root window -
+  # fall straight back to the seeded openbox desktop this once.
+  if [ "$1" != "openbox" ]; then
+    echo "emux-x11: session $1 could not start - falling back to openbox (this session)" >&2
+    start_wm openbox && return 0
+  fi
   return 1
 }
 # v0.2.59: guarantee a visible root window BEFORE any client starts. The old
@@ -510,8 +544,19 @@ paint_root() {
 # the REST pass right after install AND from the visibility watchdog, so
 # panel/icons/menu appear live without waiting for a session restart.
 start_furniture() {
-  seed_desktop_config
+  # v0.2.101: paint the root FIRST so a black pane stays unambiguous even
+  # while a full session is taking over, then keep the EmuX furniture OFF the
+  # session's desktop - a session manager (gnome-session / startxfce4 via
+  # start_wm) brings its own panel, icons and background, and seeded tint2 +
+  # pcmanfm --desktop stacked on top fight it for the root window. The mode
+  # file is written by start_wm, which always runs before this.
   paint_root
+  case "$(cat /tmp/emux_wm_mode 2>/dev/null || echo openbox)" in
+    gnome-session|gnome-session-binary|gnome-shell|startxfce4|xfce4-session)
+      echo "emux-x11: full-session desktop owns the furniture - EmuX panel/icons skipped" >&2
+      return 0 ;;
+  esac
+  seed_desktop_config
   # v0.2.59: picom is now OPT-IN (touch /tmp/emux_want_picom). Two reasons,
   # both measured rather than guessed:
   #  1. The video path is a full-screen `xwd -root` grab at ~10 fps. A
