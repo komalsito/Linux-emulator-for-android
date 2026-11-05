@@ -279,6 +279,8 @@ class VtTerminalView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attr
         synchronized(modelLock) {
             screen = buildScreen(rows, cols); curX = 0; curY = 0; pen = Style(); penIdx = 0
             history.clear(); scrollOffset = 0   // v0.1.54: fresh session = fresh scrollback
+            synchronized(echoLock) { echoSent.clear(); echoSuspect = false }   // v0.2.93: re-probe per session
+            remoteEcho = false
             markAllDirty()
         }
         invalidate()
@@ -333,7 +335,47 @@ class VtTerminalView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attr
     }
 
     fun feed(bytes: ByteArray) {
-        fedBytes += bytes.size          // v0.1.45 diag counter
+        // v0.2.93: session bytes run through the remote-echo probe first - a
+        // chunk that is just the tty echoing our own locally-displayed
+        // keystrokes is consumed here and never rendered (see remoteEcho).
+        var b = bytes
+        if (!remoteEcho) b = stripRemoteEcho(b)
+        fedBytes += b.size          // v0.1.45 diag counter
+        feedQueue.add(b)
+    }
+
+    /** v0.2.93: consume the prefix of [bytes] that is the session echoing back
+     *  what localEcho() already displayed; two consecutive full matches PROVE
+     *  remote echo (one alone could be program output starting with the same
+     *  byte). Returns the chunk with the echoed prefix removed (possibly empty). */
+    private fun stripRemoteEcho(bytes: ByteArray): ByteArray {
+        synchronized(echoLock) {
+            if (echoSent.isEmpty()) return bytes
+            if (System.currentTimeMillis() - echoSentAt > 800) {
+                echoSent.clear(); echoSuspect = false; return bytes
+            }
+            var i = 0
+            while (i < bytes.size && echoSent.isNotEmpty() &&
+                bytes[i] == echoSent.peekFirst()) {
+                echoSent.removeFirst(); i++
+            }
+            if (i == 0) {   // program output, not our echo
+                echoSent.clear(); echoSuspect = false; return bytes
+            }
+            if (echoSent.isEmpty()) {
+                if (echoSuspect) {
+                    remoteEcho = true
+                    com.emux.EmuXLog.i("vt: remote echo PROVEN - local echo off (the tty echoes by itself)")
+                } else echoSuspect = true
+            }
+            return if (i >= bytes.size) ByteArray(0) else bytes.copyOfRange(i, bytes.size)
+        }
+    }
+
+    /** v0.2.93: local display bytes bypass the probe - they are the copy
+     *  localEcho() is about to paint, not session output. */
+    private fun feedLocal(bytes: ByteArray) {
+        fedBytes += bytes.size
         feedQueue.add(bytes)
     }
 
@@ -1102,29 +1144,57 @@ class VtTerminalView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attr
     // prompt), so PTY sessions keep their native behaviour.
     private var localLineLen = 0
 
+    // v0.2.93 REMOTE-ECHO PROBE (field: "terminal types double - one keystroke
+    // shows 2 chars but the shell reads 1"). localEcho exists for sessions with
+    // no line discipline to echo for us, but the v0.2.80 bare-LF detector can
+    // flip noLineDiscipline (and clear ptyWrapped) on a session whose tty
+    // ECHOES fine - local echo then paints each keystroke NEXT TO the tty's own
+    // echo: 2 glyphs on screen, 1 byte in the shell. The probe settles it
+    // empirically instead of trusting flags: the printable bytes localEcho
+    // displays are remembered; if the session feeds the SAME bytes back (the
+    // tty echoing), TWO consecutive full matches PROVE the remote side echoes -
+    // the matched copy is consumed (never rendered) and local echo turns off
+    // for the rest of the session. Genuinely echo-less raw-pipe sessions never
+    // match and keep the degraded-mode behaviour exactly as before.
+    @Volatile private var remoteEcho = false
+    private val echoLock = Any()
+    private val echoSent = java.util.ArrayDeque<Byte>()
+    private var echoSentAt = 0L
+    private var echoSuspect = false
+
     private fun localEcho(bytes: ByteArray) {
+        // v0.2.93: PROVEN remote echo outranks every heuristic - the tty echoes
+        // by itself, painting these bytes here too would double every keystroke.
+        if (remoteEcho) return
         // v0.2.80: local echo belongs to raw-pipe sessions; a session whose PTY
         // flag lied (dead guest wrapper) is a raw-pipe session in fact.
         if (session?.ptyWrapped != false && !noLineDiscipline) return
         val out = ByteArray(bytes.size * 3)
         var n = 0
+        var plain = true   // v0.2.93: probe only when display == written bytes
         for (b in bytes) {
             val v = b.toInt() and 0xFF
             when {
                 // v0.1.44: visual erase (back-space, space, back-space) — a bare
                 // cursor-left left the deleted glyph on screen ("cannot delete
                 // the text I typed" in degraded mode).
-                v == 0x7F -> {
+                v == 0x7F -> { plain = false
                     if (localLineLen > 0) {
                         localLineLen--
                         out[n++] = 0x08; out[n++] = 0x20; out[n++] = 0x08
                     }
                 }
-                v == '\r'.code -> { out[n++] = '\n'.code.toByte(); localLineLen = 0 }
+                v == '\r'.code -> { plain = false; out[n++] = '\n'.code.toByte(); localLineLen = 0 }
                 v >= 0x20 -> { out[n++] = v.toByte(); localLineLen++ }
             }
         }
-        if (n > 0) feed(out.copyOf(n))
+        if (n > 0) {
+            if (plain) synchronized(echoLock) {   // v0.2.93: arm the echo probe
+                for (i in 0 until n) echoSent.addLast(out[i])
+                echoSentAt = System.currentTimeMillis()
+            }
+            feedLocal(out.copyOf(n))
+        }
     }
 
     override fun onCreateInputConnection(outAttrs: EditorInfo): InputConnection {

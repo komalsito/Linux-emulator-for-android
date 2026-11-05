@@ -313,6 +313,18 @@ class X11Client(
     private var order: ByteOrder = ByteOrder.LITTLE_ENDIAN
     private val writeLock = Any()
     private val readLock = Any()
+    // v0.2.93: ROUND-TRIP SERIALIZATION. requestReplyFull reads packets off
+    // the wire until ITS reply's sequence matches and QUEUES everything else
+    // (including another thread's REPLY - it cannot know it belongs to someone
+    // else). Two concurrent round-trips on ONE connection therefore STEAL
+    // each other's replies: the v0.2.92 capture-plane proof (queryPointerRoot
+    // on the CAPTURE client) racing the capture loop's ~10/s GetImage
+    // round-trips lost every race - the proof silently failed, capInputOk was
+    // never set (proof=pending yellow, input stuck on the per-event xdotool
+    // agent = the field 'slower' report), and each collision dropped a grab.
+    // Every socket-reading path now holds this lock, so only one round-trip
+    // is ever in flight and replies can never be cross-consumed.
+    private val roundTripLock = Any()
     private var sequence = 0
     // Pending write buffer: FakeInput requests have no reply, so a click or a
     // word of text can be flushed as one write instead of one syscall each.
@@ -629,7 +641,7 @@ class X11Client(
     private fun requestReplyFull(
         opcode: Int, minor: Int, body: ByteArray, timeoutMs: Int = 3_000,
         tailBuf: ByteArray? = null,
-    ): Reply? {
+    ): Reply? = synchronized(roundTripLock) {
         // v0.2.92: same atomic reservation as sendNoReply() - see its comment.
         val req = buildRequest(opcode, minor, body)
         val mySeq = synchronized(writeLock) {
@@ -660,7 +672,7 @@ class X11Client(
             // gets repainted (see pendingEvents).
             if (kind != PKT_ERROR) queueEvent(pkt)
         }
-        return null
+        null
     }
 
     private fun sendNoReply(opcode: Int, minor: Int, body: ByteArray) {
@@ -826,9 +838,11 @@ class X11Client(
         }
         // Nothing parked. Block for the first notify (this is the idle path —
         // parked on a socket read, no polling), then coalesce briefly.
-        val first = readPacket(waitMs.toInt().coerceIn(1, 60_000))
+        val first = synchronized(roundTripLock) { readPacket(waitMs.toInt().coerceIn(1, 60_000)) }
         if (first == null) return out
-        damageRectOf(first)?.let { out.add(it) }
+        // v0.2.93: a non-damage packet read here (a button probe's ButtonPress,
+        // a key event) used to be DROPPED - queue it so readEvent can serve it.
+        damageRectOf(first)?.let { out.add(it) } ?: queueEvent(first)
         collectDamage(out, coalesceMs)
         return out
     }
@@ -844,8 +858,8 @@ class X11Client(
             if (out.size >= MAX_RECTS_PER_DRAIN) return
             val left = deadline - System.currentTimeMillis()
             if (left <= 0) return
-            val pkt = readPacket(left.toInt().coerceIn(1, 50)) ?: return
-            damageRectOf(pkt)?.let { out.add(it) }
+            val pkt = synchronized(roundTripLock) { readPacket(left.toInt().coerceIn(1, 50)) } ?: return
+            damageRectOf(pkt)?.let { out.add(it) } ?: queueEvent(pkt)
         }
     }
 
@@ -1348,7 +1362,7 @@ class X11Client(
                 return ByteBuffer.wrap(pendingEvents.removeFirst()).order(order)
             }
         }
-        val pkt = readPacket(timeoutMs) ?: return null
+        val pkt = synchronized(roundTripLock) { readPacket(timeoutMs) } ?: return null
         return ByteBuffer.wrap(pkt).order(order)
     }
 

@@ -34,6 +34,31 @@ android {
         // (adb install / GitHub Releases), same distribution model as Termux
         // on F-Droid.
         targetSdk = 28
+        // v0.2.93 (vc193): ROUND-TRIP SERIALIZATION + REMOTE-ECHO PROBE.
+        // Field (v0.2.92): proof stayed yellow, input felt SLOWER than the
+        // previously fixed version, terminal typed double (2 glyphs visible,
+        // 1 byte read by the shell).
+        //  1. X11Client: requestReplyFull read packets until ITS sequence
+        //     matched and queued everything else as events - two concurrent
+        //     round-trips on ONE connection stole each other's replies. The
+        //     capture-plane proof's QueryPointer raced the capture loop's
+        //     ~10/s GetImage grabs on the native client and lost every time,
+        //     so capInputOk was never set (proof=pending, input stuck on the
+        //     per-event xdotool agent = the slowness). roundTripLock now
+        //     serializes every socket read: one round-trip in flight, no
+        //     cross-consumption. drain/collectDamage QUEUE non-damage packets
+        //     instead of dropping them, so a probe's ButtonPress survives the
+        //     capture drain.
+        //  2. DesktopService: failed capture-plane proofs narrate themselves
+        //     (read=... in the note history) and retry with exponential
+        //     backoff (15 s .. 2 min) instead of every 15 s.
+        //  3. VtTerminalView: the v0.2.80 bare-LF detector can flip
+        //     noLineDiscipline on a REAL pty (local echo ON next to the tty's
+        //     own echo = the double). New remote-echo probe: locally-echoed
+        //     printable bytes are matched against incoming session bytes; two
+        //     consecutive full matches prove the tty echoes, the matched copy
+        //     is consumed and local echo turns off for the session.
+        // No guest script change: ENV_VERSION stays 80, no re-seed needed.
         // v0.2.92 (vc192): CAPTURE-PLANE INPUT + RECONNECT VISIBILITY.
         // Field (18:15, v0.2.91): interaction worked for the first
         // seconds, then died - cursor moved (agent motion landed) but
@@ -115,8 +140,8 @@ android {
         // on the field HUAWEI ROM (click ripple, no selection UI). ENV_VERSION
         // stays 77: no guest script changed, so existing installs must not
         // re-seed.
-        versionCode = 192
-        versionName = "0.2.92"
+        versionCode = 193
+        versionName = "0.2.93"
 
         ndk {
             abiFilters += listOf("arm64-v8a", "armeabi-v7a", "x86_64")

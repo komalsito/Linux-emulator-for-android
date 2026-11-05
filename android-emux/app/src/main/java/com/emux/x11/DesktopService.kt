@@ -1667,8 +1667,13 @@ class DesktopService(
                             // through it, instead of stranding input on the
                             // per-event xdotool agent with no button proof.
                             val ncap = nativeClient?.takeIf { it.connected && it.xtestOpcode > 127 }
+                            // v0.2.93: exponential backoff after failures (15 s x
+                            // 2^fails, capped at 2 min) - a failing proof serializes
+                            // against the capture loop's grabs and must not keep
+                            // stealing its round-trips every 15 s.
+                            val capBackoffMs = (15_000L shl capProofFails.coerceAtMost(3)).coerceAtMost(120_000L)
                             if (ncap != null && !capInputOk && frameId > 0 &&
-                                System.currentTimeMillis() - lastCapProofMs > 15_000) {
+                                System.currentTimeMillis() - lastCapProofMs > capBackoffMs) {
                                 lastCapProofMs = System.currentTimeMillis()
                                 Thread({ runCatching { runCaptureInputProof(ncap) } }, "emux-cap-input-proof")
                                     .apply { isDaemon = true }.start()
@@ -3465,6 +3470,8 @@ class DesktopService(
     // lastCapProofMs throttles proof attempts to one per 15 s.
     @Volatile private var capInputOk = false
     @Volatile private var lastCapProofMs = 0L
+    /** v0.2.93: consecutive failed capture-plane proofs - drives the retry backoff. */
+    @Volatile private var capProofFails = 0
     @Volatile var injectFail: Long = 0L; private set
     @Volatile private var recycling = false
 
@@ -3720,7 +3727,23 @@ class DesktopService(
      * loop already uses.
      */
     private fun runCaptureInputProof(c: X11Client) {
-        val p0 = runCatching { c.queryPointerRoot() }.getOrNull() ?: return
+        // v0.2.93: the v0.2.92 silent '?: return' made every failed proof look
+        // like nothing happened - on the field device the QueryPointer
+        // round-trip was racing the capture loop's ~10/s GetImage grabs on the
+        // SAME connection and losing (replies cross-consumed - see
+        // X11Client.roundTripLock), so the proof retried every 15 s forever
+        // and the badge stayed yellow. Name the failure in the note history
+        // and back off exponentially instead of hammering the capture loop.
+        val p0 = runCatching { c.queryPointerRoot() }.getOrNull()
+        if (p0 == null) {
+            capProofFails++
+            noteInfo(
+                "capture-plane input proof: QueryPointer over the capture connection " +
+                    "got no reply (read=${c.lastReadErr.ifBlank { "?" }}) - retry " +
+                    "with backoff (${15_000L shl capProofFails.coerceAtMost(3)} ms); input " +
+                    "stays on the guest agent meanwhile")
+            return
+        }
         val dxp = if (p0.first + 48 <= c.screenWidth - 4) 48 else -48
         val dyp = if (p0.second + 48 <= c.screenHeight - 4) 48 else -48
         val txp = (p0.first + dxp).coerceIn(4, (c.screenWidth - 4).coerceAtLeast(8))
@@ -3732,6 +3755,7 @@ class DesktopService(
             kotlin.math.abs(p1.second - typ) <= 4
         ) {
             capInputOk = true
+            capProofFails = 0
             inputTransport = "capture"
             noteInfo(
                 "capture-plane input proof PASSED (pointer followed to $txp,$typ on " +
