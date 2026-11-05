@@ -1670,7 +1670,7 @@ class DesktopService(
                             if (ncap != null && !capInputOk && frameId > 0 &&
                                 System.currentTimeMillis() - lastCapProofMs > 15_000) {
                                 lastCapProofMs = System.currentTimeMillis()
-                                Thread({ runCatching { runCaptureInputProof(ncap) } }, 'emux-cap-input-proof')
+                                Thread({ runCatching { runCaptureInputProof(ncap) } }, "emux-cap-input-proof")
                                     .apply { isDaemon = true }.start()
                             }
                             continue
