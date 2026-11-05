@@ -161,8 +161,25 @@ android {
         // on the field HUAWEI ROM (click ripple, no selection UI). ENV_VERSION
         // stays 77: no guest script changed, so existing installs must not
         // re-seed.
-        versionCode = 194
-        versionName = "0.2.94"
+        // v0.2.95 (vc195): TRACKPAD TWO-FINGER SCROLL FIX (DesktopView only;
+        // ENV_VERSION stays 81: no guest script changed, no re-seed).
+        // Field (v0.2.94, MatePad trackpad, scroll options on): a two-finger
+        // scroll moved the pointer and SELECTED everything under it instead
+        // of scrolling. Two stacked defects, both in the view:
+        //  1. xButtonForBits defaulted "no button bits" to X button 1, so a
+        //     trackpad DOWN with buttonState 0 (finger contact, not a click)
+        //     pressed button 1 and the MOVE that followed drag-selected.
+        //     A button-less DOWN now presses nothing; its MOVE is hover.
+        //  2. isWheelInput routed ACTION_SCROLL through isMouseInput's v0.2.86
+        //     touchscreen-device veto, so a trackpad whose InputDevice also
+        //     reports SOURCE_TOUCHSCREEN had every scroll event dropped.
+        //     Wheel events are now accepted on source alone (MOUSE or
+        //     TOUCHPAD): a touchscreen two-finger drag never arrives as
+        //     ACTION_SCROLL, so no finger gesture can be misrouted here.
+        // A refused scroll is now noted once per session (source/tool/device)
+        // instead of vanishing silently.
+        versionCode = 195
+        versionName = "0.2.95"
 
         ndk {
             abiFilters += listOf("arm64-v8a", "armeabi-v7a", "x86_64")

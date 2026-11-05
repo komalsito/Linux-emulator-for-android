@@ -42,6 +42,12 @@ import kotlin.math.min
  *                      scroll quantises into X buttons 4-7 with per-axis
  *                      remainder accumulation; fingers keep everything above
  *                      untouched, and a stylus IS a finger here
+ *                      (v0.2.95: a DOWN with no button bits is trackpad
+ *                      contact, not a click - it used to press button 1 and
+ *                      turn a two-finger scroll into a drag-select; and a
+ *                      wheel event is now accepted on its source alone, so
+ *                      the v0.2.86 touchscreen-device veto can no longer
+ *                      drop a trackpad's scroll)
  *  (v0.2.89: the "keys" toggle and its helper key bar are REMOVED - field
  *   request; the view stays fit-to-screen.)
  *
@@ -807,11 +813,16 @@ class DesktopView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attrs) 
         }
     }
 
-    // ------------------------- mouse / trackpad (v0.2.85) -------------------------
-    // External pointers get the DIRECT path: real buttons (press on DOWN, no
-    // tap delay, no long-press-to-right-click), real wheel events
+    // ------------------------- mouse / trackpad (v0.2.85, v0.2.95) -------------------------
+    // External pointers get the DIRECT path: real buttons (press on a DOWN
+    // that CARRIES a button - v0.2.95: a button-less DOWN is trackpad
+    // contact, not a click, and pressing button 1 for it turned a
+    // two-finger scroll into a drag-select; no tap delay,
+    // no long-press-to-right-click), real wheel events
     // (ACTION_SCROLL with fractional trackpad deltas and per-axis remainder
-    // accumulation), and hover that moves the X pointer. Fingers and styli
+    // accumulation - v0.2.95: accepted on source alone, so the v0.2.86
+    // touchscreen-device veto can no longer drop a trackpad's scroll),
+    // and hover that moves the X pointer. Fingers and styli
     // keep the touch gesture machine untouched - a stylus is touch here by
     // design (M-Pencil users get the same tap/long-press/two-finger model).
 
@@ -863,10 +874,25 @@ class DesktopView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attrs) 
         return dev.sources and InputDevice.SOURCE_TOUCHSCREEN == 0
     }
 
-    /** ACTION_SCROLL also accepts raw touchpad sources: some kernels report
-     *  two-finger flicks as SOURCE_TOUCHPAD rather than SOURCE_MOUSE. */
+    /** ACTION_SCROLL is a WHEEL event, not a finger gesture, so it must NOT
+     *  go through [isMouseInput]'s v0.2.86 touchscreen-device veto.
+     *
+     *  v0.2.95 REGRESSION (trackpad two-finger scroll silently dropped):
+     *  that veto exists to stop *touch* streams being misclassified as
+     *  mouse (Huawei-class PC-mode ROMs re-tag plain finger touches as
+     *  SOURCE_MOUSE with toolType UNKNOWN, on a device that also carries
+     *  SOURCE_TOUCHSCREEN). But a wheel event carries no fingers at all -
+     *  a touchscreen two-finger drag NEVER arrives as ACTION_SCROLL, it
+     *  arrives as a touch stream - so no finger gesture can be misrouted
+     *  here, while a trackpad whose InputDevice reports SOURCE_TOUCHSCREEN
+     *  (the MatePad keyboard-cover trackpad does) had every one of its
+     *  scroll events rejected: isMouseInput said false, the event was not
+     *  SOURCE_TOUCHPAD either, onGenericMotionEvent returned false, and
+     *  the page never scrolled. The source alone decides: MOUSE or
+     *  TOUCHPAD is a wheel, anything else is not. */
     private fun isWheelInput(e: MotionEvent): Boolean =
-        isMouseInput(e) || e.isFromSource(InputDevice.SOURCE_TOUCHPAD)
+        e.isFromSource(InputDevice.SOURCE_MOUSE) ||
+            e.isFromSource(InputDevice.SOURCE_TOUCHPAD)
 
     /** Android button bits -> X button numbers. X: 1 left, 2 middle, 3 right,
      *  8 back, 9 forward. TERTIARY is the middle button on Android. */
@@ -876,7 +902,13 @@ class DesktopView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attrs) 
         bits and MotionEvent.BUTTON_TERTIARY != 0 -> 2
         bits and MotionEvent.BUTTON_BACK != 0 -> 8
         bits and MotionEvent.BUTTON_FORWARD != 0 -> 9
-        else -> 1
+        // v0.2.95: NO bits = NO button (was: default 1). A trackpad finger
+        // touching the pad reports ACTION_DOWN with buttonState 0 - that is
+        // contact, not a click - and the old default pressed X button 1 for
+        // it, so a two-finger scroll that arrives as a touch stream dragged
+        // a selection across the page instead of scrolling. Callers must
+        // treat 0 as "nothing pressed" (onMouseTouchEvent does).
+        else -> 0
     }
 
     // Wheel accumulators. Trackpads send small FRACTIONAL values (0.1-notch
@@ -894,6 +926,15 @@ class DesktopView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attrs) 
     private var mouseExtraButton = 0
     private var mouseOverlayDown = false
     private var lastMouseMotionTs = 0L
+    // v0.2.95: a mouse DOWN that carried NO button bits (trackpad finger
+    // contact, not a click - see xButtonForBits). While set, MOVE is hover,
+    // never a drag; cleared by every gesture exit (releaseMouseButtons /
+    // releaseMouseButtonsIfHeld).
+    private var mouseContactDown = false
+    // v0.2.95: one-shot diagnostic for a scroll event the view refuses, so
+    // a future field round can tell "no scroll event arrived" from "one
+    // arrived with a source this build does not accept".
+    private var scrollDropNoted = false
 
     /** Settings live in the DEFAULT shared prefs (SettingsActivity's file),
      *  and getSharedPreferences can throw on some OEM ROMs - guarded, with
@@ -911,15 +952,34 @@ class DesktopView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attrs) 
         settingsPrefs?.getBoolean("mouse_natural_scroll", false) ?: false
 
     /**
-     * Wheel + extra mouse buttons. ACTION_SCROLL is the ONLY route a trackpad
-     * two-finger scroll arrives by; ACTION_BUTTON_PRESS/RELEASE carry any
-     * button pressed or released while another is already down (the first
-     * press of a gesture comes through onTouchEvent as ACTION_DOWN instead).
+     * Wheel + extra mouse buttons. ACTION_SCROLL is the usual route a
+     * trackpad two-finger scroll arrives by - but not the only shape it
+     * takes: some trackpads/ROMs deliver the same gesture as a touch
+     * stream (DOWN with no button bits, then MOVE), which the mouse path
+     * below must treat as contact, not a click (v0.2.95).
+     * ACTION_BUTTON_PRESS/RELEASE carry any button pressed or released
+     * while another is already down (the first press of a gesture comes
+     * through onTouchEvent as ACTION_DOWN instead).
      */
     override fun onGenericMotionEvent(event: MotionEvent): Boolean {
         when (event.actionMasked) {
             MotionEvent.ACTION_SCROLL -> {
-                if (!isWheelInput(event) || frameless) return false
+                if (!isWheelInput(event)) {
+                    // v0.2.95: say so once, with the source, instead of
+                    // dropping it silently - the pre-fix behaviour was a
+                    // trackpad that "does not scroll anywhere" with no
+                    // evidence at all about which event arrived.
+                    if (!scrollDropNoted) {
+                        scrollDropNoted = true
+                        desktop?.noteInfo(
+                            "trackpad scroll ignored: source=0x" +
+                                Integer.toHexString(event.source) +
+                                " tool=" + (if (event.pointerCount > 0) event.getToolType(0) else -1) +
+                                " dev=" + (event.device?.name ?: "?"))
+                    }
+                    return false
+                }
+                if (frameless) return false
                 noteMouseActive()
                 val v = event.getAxisValue(MotionEvent.AXIS_VSCROLL)
                 val h = event.getAxisValue(MotionEvent.AXIS_HSCROLL)
@@ -940,6 +1000,9 @@ class DesktopView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attrs) 
                 if (!isMouseInput(event) || frameless) return false
                 noteMouseActive()
                 val b = xButtonForBits(event.actionButton)
+                // v0.2.95: xButtonForBits now returns 0 for "no button" -
+                // a BUTTON_PRESS with no action button is not a press.
+                if (b == 0) return true
                 val press = event.actionMasked == MotionEvent.ACTION_BUTTON_PRESS
                 val (x, y) = mapToX(event.x, event.y)
                 if (press) {
@@ -972,6 +1035,12 @@ class DesktopView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attrs) 
      * no long-press runnable, no two-finger anything - a physical mouse
      * reports its own buttons and its own timing, and double-clicks arrive as
      * two real DOWN/UP pairs the X client times for itself.
+     * v0.2.95: "presses on DOWN" means a DOWN that CARRIES a button. A
+     * trackpad finger touching the pad reports DOWN with buttonState 0 -
+     * contact, not a click - and pressing button 1 for it turned a
+     * two-finger scroll into a drag-select. Such a DOWN only tracks the
+     * pointer (MOVE becomes hover); a real click still arrives as
+     * ACTION_BUTTON_PRESS, or as a DOWN with its button set.
      */
     private fun onMouseTouchEvent(e: MotionEvent): Boolean {
         when (e.actionMasked) {
@@ -992,12 +1061,22 @@ class DesktopView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attrs) 
                 if (!frameless) {
                     val (x, y) = mapToX(e.x, e.y)
                     mouseHeldButton = xButtonForBits(e.buttonState)
-                    // v0.2.86: if a BUTTON_PRESS for the same button already
-                    // arrived (ROMs differ on which comes first), adopt it
-                    // instead of pressing twice - one physical click must be
-                    // ONE X press.
-                    if (mouseExtraButton == mouseHeldButton) mouseExtraButton = 0
-                    else desktop?.injectClick(x, y, mouseHeldButton, press = true)
+                    if (mouseHeldButton == 0) {
+                        // v0.2.95: button-less DOWN (trackpad finger contact,
+                        // or a tap-to-click whose press arrives separately as
+                        // ACTION_BUTTON_PRESS). Press NOTHING - the old code
+                        // pressed X button 1 here, so the MOVE that followed
+                        // a two-finger scroll dragged a selection across the
+                        // page. The pointer still tracks; see MOVE.
+                        mouseContactDown = true
+                    } else {
+                        // v0.2.86: if a BUTTON_PRESS for the same button already
+                        // arrived (ROMs differ on which comes first), adopt it
+                        // instead of pressing twice - one physical click must be
+                        // ONE X press.
+                        if (mouseExtraButton == mouseHeldButton) mouseExtraButton = 0
+                        else desktop?.injectClick(x, y, mouseHeldButton, press = true)
+                    }
                     val imm = context.getSystemService(
                         android.view.inputmethod.InputMethodManager::class.java)
                     imm?.showSoftInput(this, android.view.inputmethod.InputMethodManager.SHOW_IMPLICIT)
@@ -1006,7 +1085,23 @@ class DesktopView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attrs) 
             }
             MotionEvent.ACTION_MOVE -> {
                 noteMouseActive()
-                if (mouseOverlayDown || frameless || mouseHeldButton == 0) return true
+                if (mouseOverlayDown || frameless) return true
+                if (mouseHeldButton == 0) {
+                    // v0.2.95: contact-only trackpad touch (DOWN carried no
+                    // button): the pointer still follows the finger, as
+                    // HOVER. Motion with no button held can never select or
+                    // drag - and without it the pointer freezes at the
+                    // touch-down point for the whole scroll gesture, so the
+                    // scroll would land wherever the gesture started.
+                    if (!mouseContactDown) return true
+                    val now = System.currentTimeMillis()
+                    if (now - lastMouseMotionTs >= 33) {   // <=30 motion events/s
+                        lastMouseMotionTs = now
+                        val (x, y) = mapToX(e.x, e.y)
+                        desktop?.injectMotion(x, y)
+                    }
+                    return true
+                }
                 val now = System.currentTimeMillis()
                 if (now - lastMouseMotionTs >= 33) {   // <=30 motion events/s
                     lastMouseMotionTs = now
@@ -1036,6 +1131,7 @@ class DesktopView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attrs) 
      *  v0.2.86: when the DOWN path adopted a BUTTON_PRESS (extra == held)
      *  there is only ONE press in the server, so only ONE release is sent. */
     private fun releaseMouseButtons(e: MotionEvent) {
+        mouseContactDown = false   // v0.2.95: the contact-only touch is over too
         if (!frameless && (mouseHeldButton != 0 || mouseExtraButton != 0)) {
             val (x, y) = mapToX(e.x, e.y)
             val held = mouseHeldButton; val extra = mouseExtraButton
@@ -1065,6 +1161,7 @@ class DesktopView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attrs) 
      * exits; a no-op when nothing is held.
      */
     private fun releaseMouseButtonsIfHeld() {
+        mouseContactDown = false   // v0.2.95: a contact-only touch ends here too
         if (mouseHeldButton == 0 && mouseExtraButton == 0) return
         val held = mouseHeldButton; val extra = mouseExtraButton
         mouseHeldButton = 0; mouseExtraButton = 0; mouseOverlayDown = false
