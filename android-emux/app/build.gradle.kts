@@ -47,7 +47,14 @@ android {
         //     seccomp sandbox cannot work under proot); the seeded menu
         //     and launcher now both pass it.
         // The launcher is now named after the browser that runs (Firefox
-        // ESR, real firefox-esr icon). No other app code changed.
+        // ESR, real firefox-esr icon).
+        // LATE ADDITION (same vc194 - INPUT ANTI-RACE): proofs that warp
+        // the pointer or map the red probe window now wait for a
+        // user-quiet window, and the rc.xml/WM ladder never escalates
+        // mid-gesture. Field: rapid interaction made the button proof
+        // fail spuriously (input then stayed broken; clicks sometimes
+        // landed on the red probe window). DesktopService only;
+        // ENV_VERSION stays 81.
         // v0.2.93 (vc193): ROUND-TRIP SERIALIZATION + REMOTE-ECHO PROBE.
         // Field (v0.2.92): proof stayed yellow, input felt SLOWER than the
         // previously fixed version, terminal typed double (2 glyphs visible,

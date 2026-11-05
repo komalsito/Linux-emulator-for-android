@@ -3197,6 +3197,7 @@ class DesktopService(
     @Volatile private var ptrAtMs = 0L
     private fun notePointer(x: Int, y: Int, down: Boolean?) {
         ptrX = x; ptrY = y; ptrAtMs = System.currentTimeMillis()
+        lastUserInputMs = ptrAtMs   // v0.2.95: proof anti-race stamp (every pointer injection)
         if (down != null) ptrDown = down
     }
 
@@ -3403,6 +3404,7 @@ class DesktopService(
 
     /** Queue one XTEST write. [motion] tasks coalesce with a pending tail motion. */
     private fun postXtest(motion: Boolean, body: (X11Client) -> Unit) {
+        lastUserInputMs = System.currentTimeMillis()   // v0.2.95: proof anti-race stamp
         ensureXtestPump()
         synchronized(xtestLock) {
             if (motion) {
@@ -3472,6 +3474,32 @@ class DesktopService(
     @Volatile private var lastCapProofMs = 0L
     /** v0.2.93: consecutive failed capture-plane proofs - drives the retry backoff. */
     @Volatile private var capProofFails = 0
+
+    /** v0.2.95: last USER input (pointer/key/text injection). Proofs that
+     *  warp the pointer, or map the red probe window, must not run against a
+     *  live gesture: a proof raced by the user's own rapid input fails
+     *  SPURIOUSLY, and the button ladder then escalates (rc.xml rewrite /
+     *  WM reconfigure / WM switch) against a desktop the user is actively
+     *  using - the field report: "interact too fast and the input breaks;
+     *  sometimes the click lands on the red probe window". Stamped from
+     *  notePointer() (every pointer injection, any transport) and
+     *  postXtest() (every queued XTEST write: keys, text, combos). */
+    @Volatile private var lastUserInputMs = 0L
+
+    /** True when the user injected something within the last [ms]. */
+    private fun userActive(ms: Long = 3_000) =
+        System.currentTimeMillis() - lastUserInputMs < ms
+
+    /** Wait for a user-quiet window (proofs run in the pause between
+     *  gestures). Returns false if the user is still active after [budgetMs]. */
+    private fun awaitQuiet(quietMs: Long, budgetMs: Long): Boolean {
+        val deadline = System.currentTimeMillis() + budgetMs
+        while (System.currentTimeMillis() < deadline) {
+            if (!userActive(quietMs)) return true
+            runCatching { Thread.sleep(200) }
+        }
+        return !userActive(quietMs)
+    }
     @Volatile var injectFail: Long = 0L; private set
     @Volatile private var recycling = false
 
@@ -3602,6 +3630,12 @@ class DesktopService(
      */
     private fun runInputProof(c: X11Client) {
         runCatching {
+            // v0.2.95 anti-race gate (see runCaptureInputProof): a fresh
+            // control plane usually reconnects BECAUSE the user was tapping
+            // fast - prove into a quiet window, never against a live
+            // gesture. Daemon thread, so the wait is free; runCatching
+            // keeps a recycled plane from becoming an exception fountain.
+            while (userActive(700)) runCatching { Thread.sleep(250) }
             val p0 = c.queryPointerRoot()
             if (p0 == null) { inputProof = "no-ptr-reply"; return }
             // v0.2.66 FIX (input-dead audit): aim AWAY from the nearest edge.
@@ -3734,6 +3768,14 @@ class DesktopService(
         // X11Client.roundTripLock), so the proof retried every 15 s forever
         // and the badge stayed yellow. Name the failure in the note history
         // and back off exponentially instead of hammering the capture loop.
+        // v0.2.95 ANTI-RACE GATE: the motion proof WARPED the pointer while
+        // the user was mid-drag, and the button leg MAPPED the red probe
+        // window under their taps (field: "interact too fast and input
+        // breaks; sometimes the click lands on the red window"). Wait for a
+        // quiet window; a user who never pauses aborts this attempt WITHOUT
+        // counting a failure - a raced proof proves nothing either way, and
+        // the watchdog retries after the backoff.
+        if (!awaitQuiet(700, 8_000)) return
         val p0 = runCatching { c.queryPointerRoot() }.getOrNull()
         if (p0 == null) {
             capProofFails++
@@ -3801,6 +3843,16 @@ class DesktopService(
      * the agent" (that fallback is for servers that ignore FakeInput entirely).
      */
     private fun buttonProofAndEscalate(c: X11Client) {
+        // v0.2.95: the button probe MAPS A WINDOW and clicks it - never run
+        // it under the user's fingers (their taps land on the probe window
+        // and their drags race the probe's own pointer work). Defer to a
+        // quiet window; the proof stays motion-ok meanwhile, never dead,
+        // and re-runs on the next proof cycle.
+        if (!awaitQuiet(1_500, 10_000)) {
+            inputProof = "motion-ok"
+            noteInfo("button proof deferred: you are interacting right now - it runs in the next quiet window")
+            return
+        }
         var r = runCatching { c.probeButtonDelivery() }.getOrNull()
         if (r == null) {
             inputProof = "btn-probe-error"
@@ -3822,6 +3874,18 @@ class DesktopService(
             "BUTTONS ARE SWALLOWED (motion works): ${r.detail} - a window manager is " +
                 "holding a passive button grab. rc.xml binds: ${rcGrabs.ifEmpty { "?" }}, wm=${wmMode.ifEmpty { "?" }}")
 
+        // v0.2.95: the ladder MUTATES the desktop the user is looking at
+        // (rc.xml rewrite, WM reconfigure, WM switch). A probe that failed
+        // only because the user's own rapid input raced it must NOT
+        // escalate: defer the whole ladder to a quiet window instead - it
+        // re-runs on the next proof cycle (proof stays motion-ok, the
+        // verdict records the deferral, no failure is counted).
+        if (!awaitQuiet(1_500, 3_000)) {
+            inputProof = "motion-ok"
+            publishBtnVerdict("deferred", "user interacting - ladder re-runs in the next quiet window")
+            noteInfo("button ladder DEFERRED: you are interacting right now - rc.xml/WM changes postponed, no failure counted")
+            return
+        }
         // --- stage 1: guest rewrites rc.xml + reconfigures the WM ----------
         publishBtnVerdict("dead", "stage1 ${r.detail}")
         com.emux.EmuXLog.i("button ladder: stage 1 requested (guest rc.xml rewrite + reconfigure)")
@@ -3829,7 +3893,7 @@ class DesktopService(
         while (waited < 12_000 && c.connected) { Thread.sleep(500); waited += 500
             if (!java.io.File(com.emux.core.FsLayout.linuxRoot(ctx), "tmp/emux_btn_verdict").exists()) break }
         Thread.sleep(1_500)
-        if (c.connected) {
+        if (c.connected && awaitQuiet(1_500, 3_000)) {   // v0.2.95: re-probe only in a quiet window
             r = runCatching { c.probeButtonDelivery() }.getOrNull() ?: r
             if (r.delivered) { btnRecovered(c, r, "stage 1: guest rewrote rc.xml + reconfigured the WM"); return }
         }
@@ -3850,7 +3914,7 @@ class DesktopService(
             while (w2 < 14_000 && c.connected) { Thread.sleep(500); w2 += 500
                 if (!java.io.File(com.emux.core.FsLayout.linuxRoot(ctx), "tmp/emux_btn_verdict").exists()) break }
             Thread.sleep(2_000)
-            if (c.connected) {
+            if (c.connected && awaitQuiet(1_500, 3_000)) {   // v0.2.95: re-probe only in a quiet window
                 r = runCatching { c.probeButtonDelivery() }.getOrNull() ?: r
                 if (r.delivered) { btnRecovered(c, r, "stage 2: wm now ${wmMode.ifEmpty { "?" }}"); return }
             }
