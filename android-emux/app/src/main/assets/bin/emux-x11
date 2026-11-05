@@ -692,16 +692,30 @@ EOF
     APPS="$APPS calculator"
   fi
   BROWSER=""
-  for b in firefox chromium chromium-browser google-chrome; do
+  # v0.2.94 FIELD FIX (browser icon never opened / never appeared):
+  # (1) firefox-esr was missing from the scan, so a rootfs with ONLY
+  #     firefox-esr installed seeded no browser icon at all;
+  # (2) on Ubuntu noble the plain `firefox` deb is a snap-transition
+  #     stub - it can never start inside proot (no snapd), so the seeded
+  #     icon silently did nothing when tapped. Scan firefox-esr FIRST,
+  #     name the launcher after the browser that actually runs, and
+  #     launch via env MOZ_DISABLE_CONTENT_SANDBOX=1: proot cannot host
+  #     Firefox's seccomp sandbox, and without this Firefox dies right
+  #     after launch. The env var is harmless to non-Mozilla browsers.
+  for b in firefox-esr firefox chromium chromium-browser google-chrome; do
     if command -v "$b" >/dev/null 2>&1; then BROWSER="$b"; break; fi
   done
   if [ -n "$BROWSER" ]; then
+    BNAME="Web Browser"; BICON=web-browser
+    case "$BROWSER" in
+      firefox-esr) BNAME="Firefox ESR"; BICON=firefox-esr ;;
+    esac
     cat > "$HOME/.local/share/applications/emux-browser.desktop" <<EOF
 [Desktop Entry]
 Type=Application
-Name=Web Browser
-Exec=$BROWSER
-Icon=web-browser
+Name=$BNAME
+Exec=env MOZ_DISABLE_CONTENT_SANDBOX=1 $BROWSER %u
+Icon=$BICON
 Categories=Network;WebBrowser;
 EOF
     APPS="$APPS browser"
@@ -799,14 +813,14 @@ EOF
     echo "$APPS" > "$STAMP" 2>/dev/null
   fi
   # --- Openbox right-click menu (same apps, plus WM controls) ---
-  if [ ! -e "$HOME/.config/openbox/menu.xml" ] || ! grep -q "EmuX v0.2.54" "$HOME/.config/openbox/menu.xml" 2>/dev/null; then
+  if [ ! -e "$HOME/.config/openbox/menu.xml" ] || ! grep -q "EmuX v0.2.94" "$HOME/.config/openbox/menu.xml" 2>/dev/null; then
     {
       echo '<?xml version="1.0" encoding="UTF-8"?>'
       echo '<openbox_menu xmlns="http://openbox.org/3.4/menu">'
-      echo '<menu id="root-menu" label="EmuX v0.2.54">'
+      echo '<menu id="root-menu" label="EmuX v0.2.94">'
       echo '  <menu id="cat-apps" label="Applications">'
       echo '    <menu id="cat-net" label="Internet">'
-      [ -n "$BROWSER" ] && echo "      <item label=\"Web Browser\"><action name=\"Execute\"><command>$BROWSER</command></action></item>"
+      [ -n "$BROWSER" ] && echo "      <item label=\"Web Browser\"><action name=\"Execute\"><command>env MOZ_DISABLE_CONTENT_SANDBOX=1 $BROWSER</command></action></item>"
       echo '    </menu>'
       echo '    <menu id="cat-office" label="Office">'
       [ -x /usr/bin/mousepad ] && echo '      <item label="Text Editor"><action name="Execute"><command>mousepad</command></action></item>'
@@ -837,7 +851,7 @@ EOF
       [ -x /usr/bin/pcmanfm ] && echo '  <item label="Files"><action name="Execute"><command>pcmanfm</command></action></item>'
       [ -x /usr/bin/mousepad ] && echo '  <item label="Text Editor"><action name="Execute"><command>mousepad</command></action></item>'
       [ -x /usr/bin/galculator ] && echo '  <item label="Calculator"><action name="Execute"><command>galculator</command></action></item>'
-      [ -n "$BROWSER" ] && echo "  <item label=\"Web Browser\"><action name=\"Execute\"><command>$BROWSER</command></action></item>"
+      [ -n "$BROWSER" ] && echo "  <item label=\"Web Browser\"><action name=\"Execute\"><command>env MOZ_DISABLE_CONTENT_SANDBOX=1 $BROWSER</command></action></item>"
       echo '  <separator/>'
       echo '  <item label="Restart Openbox"><action name="Restart"/></item>'
       echo '</menu>'

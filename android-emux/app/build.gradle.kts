@@ -34,6 +34,20 @@ android {
         // (adb install / GitHub Releases), same distribution model as Termux
         // on F-Droid.
         targetSdk = 28
+        // v0.2.94 (vc194): BROWSER ICON FIX (re-seed, ENV_VERSION 80 -> 81).
+        // Field: firefox-esr installed via the Mozilla Team PPA (the only
+        // way on Ubuntu noble arm64 - no ESR in Ubuntu, no arm64 tarballs
+        // from Mozilla, snap impossible in proot), but the desktop browser
+        // icon either did not exist or silently did nothing.
+        //  1. emux-x11's launcher scan did not know `firefox-esr` - an
+        //     ESR-only rootfs seeded no browser icon at all.
+        //  2. Where a `firefox` (Ubuntu snap-stub) existed, the seeded
+        //     Exec pointed at a stub that can never start in proot.
+        //  3. Firefox in proot needs MOZ_DISABLE_CONTENT_SANDBOX=1 (its
+        //     seccomp sandbox cannot work under proot); the seeded menu
+        //     and launcher now both pass it.
+        // The launcher is now named after the browser that runs (Firefox
+        // ESR, real firefox-esr icon). No other app code changed.
         // v0.2.93 (vc193): ROUND-TRIP SERIALIZATION + REMOTE-ECHO PROBE.
         // Field (v0.2.92): proof stayed yellow, input felt SLOWER than the
         // previously fixed version, terminal typed double (2 glyphs visible,
@@ -140,8 +154,8 @@ android {
         // on the field HUAWEI ROM (click ripple, no selection UI). ENV_VERSION
         // stays 77: no guest script changed, so existing installs must not
         // re-seed.
-        versionCode = 193
-        versionName = "0.2.93"
+        versionCode = 194
+        versionName = "0.2.94"
 
         ndk {
             abiFilters += listOf("arm64-v8a", "armeabi-v7a", "x86_64")
