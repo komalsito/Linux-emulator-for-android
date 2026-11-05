@@ -34,6 +34,27 @@ android {
         // (adb install / GitHub Releases), same distribution model as Termux
         // on F-Droid.
         targetSdk = 28
+        // v0.2.92 (vc192): CAPTURE-PLANE INPUT + RECONNECT VISIBILITY.
+        // Field (18:15, v0.2.91): interaction worked for the first
+        // seconds, then died - cursor moved (agent motion landed) but
+        // no click reacted, while the badge read proof=pending
+        // (yellow) forever: the control-plane reconnect kept failing
+        // INVISIBLY, input rode the guest xdotool agent, and the
+        // button-delivery proof + its rc.xml/WM-switch escalation
+        // ladder (the proven click-swallow remedy) NEVER RAN - it only
+        // ever ran over a control-plane connection. (1) X11Client now
+        // reserves the reply sequence number and the write atomically
+        // (a concurrent fake-input write could slip between
+        // reservation and send and desync reply matching); (2) when
+        // the control plane is down and frames flow, the app proves
+        // XTEST over the CAPTURE client (the identity-guaranteed
+        // server) and injects through it - and runs the button proof
+        // + ladder there too; (3) every failed reconnect is counted
+        // and named on the badge (rxfail=/ctrlErr=), proof=motion-ok
+        // paints yellow (measuring) not red, and the INPUT line names
+        // the capture plane when it carries input. No guest script
+        // changed - ENV_VERSION stays 80; existing installs do not
+        // re-seed.
         // v0.2.91 (vc191): SELF-AIMING PLANES. The v0.2.90 field round
         // showed the guest can be perfectly healthy (one Xvfb on :1,
         // openbox up, marker published) while the app sat on a dying :0
@@ -94,8 +115,8 @@ android {
         // on the field HUAWEI ROM (click ripple, no selection UI). ENV_VERSION
         // stays 77: no guest script changed, so existing installs must not
         // re-seed.
-        versionCode = 191
-        versionName = "0.2.91"
+        versionCode = 192
+        versionName = "0.2.92"
 
         ndk {
             abiFilters += listOf("arm64-v8a", "armeabi-v7a", "x86_64")

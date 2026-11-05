@@ -178,6 +178,8 @@ class DesktopService(
     // v0.2.30: last connectControlPlane failure, for the expiry note -
     // it used to die silently in logcat while the pane guessed.
     @Volatile private var lastCtrlError: String? = null
+    /** v0.2.92: badge-readable form of the last control-plane reconnect failure. */
+    val ctrlErrorText: String? get() = lastCtrlError
     // v0.2.5 FIELD FIX: this session's X display number (see startDesktop).
     @Volatile private var displayNum = 0
     // v0.2.38: the DesktopView's live aspect (w/h), reported from
@@ -367,6 +369,7 @@ class DesktopService(
                             "tmp/.X11-unix/X$displayNum").absolutePath,
                     ).also { it.connect(10_000) }
                     nativeClient = c
+                    capInputOk = false   // v0.2.92: per-connection fact - re-prove
                     backoff = 500L
                     if (captureMode != "native") {
                         captureMode = "native"
@@ -805,7 +808,17 @@ class DesktopService(
                     captureMode = if (nativeFrames > 0) "native-retry" else captureMode
                 } finally {
                     runCatching { c?.close() }
-                    if (nativeClient === c) nativeClient = null
+                    if (nativeClient === c) {
+                        nativeClient = null
+                        // v0.2.92: the connection that carried capture-plane
+                        // input is gone - demote the transport honestly.
+                        if (capInputOk) {
+                            capInputOk = false
+                            inputTransport =
+                                if (java.io.File(com.emux.core.FsLayout.linuxRoot(ctx), "tmp/emux_agent_launched").isFile) "agent" else "down"
+                            noteInfo("capture-plane input went down with the capture connection - input now $inputTransport")
+                        }
+                    }
                 }
                 if (!isActive || state.value == State.IDLE || state.value == State.ERROR) break
                 kotlinx.coroutines.delay(backoff)
@@ -933,6 +946,7 @@ class DesktopService(
         // running one by the gate's `nativeJob?.isActive` check.
         runCatching { nativeJob?.cancel() }; nativeJob = null
         runCatching { nativeClient?.close() }; nativeClient = null
+        capInputOk = false   // v0.2.92: capture-plane input dies with the session
         nativeFrames = 0L; nativeFrameAtMs = 0L; captureMode = "-"
         nativeGrabMs = -1L; nativeErr = ""; lastAnyFrameAtMs = 0L
         nativeKbPerS = -1L; nativeBandRows = 0
@@ -1642,7 +1656,25 @@ class DesktopService(
                             recycleControlPlane("guest published display :$mk but the control plane is on :$displayNum")
                             continue
                         }
-                        val c = xtest() ?: continue
+                        val c = xtest()
+                        if (c == null) {
+                            // v0.2.92 CAPTURE-PLANE INPUT: the control plane can
+                            // stay down for many minutes (proof=pending, the
+                            // v0.2.91 retry loop) while frames flow and the user
+                            // keeps tapping. The capture client IS a proven,
+                            // identity-guaranteed connection to the server the
+                            // user watches - prove XTEST over IT and inject
+                            // through it, instead of stranding input on the
+                            // per-event xdotool agent with no button proof.
+                            val ncap = nativeClient?.takeIf { it.connected && it.xtestOpcode > 127 }
+                            if (ncap != null && !capInputOk && frameId > 0 &&
+                                System.currentTimeMillis() - lastCapProofMs > 15_000) {
+                                lastCapProofMs = System.currentTimeMillis()
+                                Thread({ runCatching { runCaptureInputProof(ncap) } }, 'emux-cap-input-proof')
+                                    .apply { isDaemon = true }.start()
+                            }
+                            continue
+                        }
                         // v0.2.90 SERVER-IDENTITY GUARD (the stale-input-server
                         // fix): display NUMBERS cannot distinguish two servers
                         // claiming the same number. The v0.2.89 field state was a
@@ -2426,6 +2458,10 @@ class DesktopService(
                 // the server ignores us, hand input to the guest agent instead.
                 inputProof = "pending"
                 xtestIgnored = false
+                // v0.2.92: the retry telemetry (rxfail=/ctrlErr=) belongs to
+                // the outage that just ended - clear it on success.
+                reconnectFails = 0
+                lastCtrlError = null
                 // v0.2.78: both are per-CONNECTION facts (XTEST GrabControl is
                 // per-client too), so a fresh connection must re-measure.
                 buttonDelivered = null
@@ -3313,6 +3349,11 @@ class DesktopService(
     /** True when the XTEST control plane is live and owning input. */
     private fun xtest(): X11Client? =
         x11?.takeIf { it.connected && it.xtestOpcode > 127 && !xtestIgnored }
+            // v0.2.92: control plane down does NOT mean input must fall back
+            // to the per-event xdotool agent. When the capture client's own
+            // motion proof has passed, the capture connection carries XTEST
+            // injection until the control plane reconnects.
+            ?: nativeClient?.takeIf { capInputOk && it.connected && it.xtestOpcode > 127 }
 
     // ------------------------------------------------------------------
     // v0.2.83 XTEST PUMP: input writes happen on a dedicated thread, never on
@@ -3415,6 +3456,15 @@ class DesktopService(
     // inputLine gate opens), and reconnect + re-proof in the background.
     @Volatile private var ctrlWriteFails = 0
     @Volatile private var keepaliveMiss = 0
+    /** v0.2.92: failed control-plane reconnects since the last success (badge: rxfail=). */
+    @Volatile private var reconnectFails = 0
+    fun reconnectFailCount(): Int = reconnectFails
+    // v0.2.92 CAPTURE-PLANE INPUT: set when the capture client's own motion
+    // proof passed - XTEST injection then rides the capture connection
+    // while the control plane is down (see runCaptureInputProof).
+    // lastCapProofMs throttles proof attempts to one per 15 s.
+    @Volatile private var capInputOk = false
+    @Volatile private var lastCapProofMs = 0L
     @Volatile var injectFail: Long = 0L; private set
     @Volatile private var recycling = false
 
@@ -3451,6 +3501,9 @@ class DesktopService(
         inputTransport =
             if (java.io.File(rt, "tmp/emux_agent_launched").isFile) "agent" else "down"
         inputAgentUp = inputTransport == "agent"
+        // v0.2.92: do not demote the badge to "agent" when the capture plane
+        // is already carrying XTEST input - it stays the active transport.
+        if (capInputOk && nativeClient?.connected == true) inputTransport = "capture"
         scope.launch {
             // v0.2.91: one failed reconnect used to leave input dead FOREVER -
             // a single connectControlPlane(30 s) that expired (server not up
@@ -3465,6 +3518,17 @@ class DesktopService(
             while (isActive && state.value != State.IDLE && state.value != State.ERROR) {
                 val ok = runCatching { connectControlPlane(30_000) }.getOrDefault(false)
                 if (ok) break
+                // v0.2.92: a reconnect that never completes used to be
+                // INVISIBLE - proof=pending (yellow) with no reason anywhere,
+                // for a whole field session while the user tapped a desktop
+                // that ignored every click. Name every failed attempt, count
+                // them for the badge (rxfail=), and paint the last error
+                // (ctrlErr=) - a screenshot must say WHY input is on the
+                // fallback and what keeps the control plane out.
+                reconnectFails++
+                noteInfo(
+                    "control plane reconnect #$reconnectFails FAILED after 30s " +
+                        "(${lastCtrlError ?: "unspecified"}) - frames still flow; retrying in 5s")
                 kotlinx.coroutines.delay(5_000)
             }
             recycling = false
@@ -3628,6 +3692,60 @@ class DesktopService(
                     return@launch
                 }
             }
+        }
+    }
+
+    /**
+     * v0.2.92: CAPTURE-PLANE INPUT. The 18:15 field round proved a session
+     * can outlive its control plane for many minutes: after a recycle the
+     * reconnect can keep failing (proof=pending, yellow, forever - the
+     * v0.2.91 retry loop never gives up but also never succeeds) while the
+     * CAPTURE connection streams the desktop happily and the guest agent
+     * carries motion (the cursor follows the finger). But the agent is one
+     * xdotool process per event, and worse: the BUTTON proof and its whole
+     * escalation ladder (rc.xml rewrite -> reconfigure -> WM switch - the
+     * proven click-swallow remedy) only ever ran over a control-plane
+     * connection, so a mid-session button swallow went unmeasured and
+     * unfixed while the user tapped a desktop that ignored every click.
+     *
+     * The capture client is a fully working X11Client to the server the
+     * user is actually watching (its identity is what the v0.2.90 guard
+     * compares AGAINST), so when the control plane is down we prove XTEST
+     * over the capture connection and inject through it until the control
+     * plane returns. Same server, same wire, same pump - a different socket.
+     *
+     * Runs on its own daemon thread, never the capture loop thread: the
+     * proof's QueryPointer round trips and the probe window's event reads
+     * interleave with GetImage grabs through the same locks the capture
+     * loop already uses.
+     */
+    private fun runCaptureInputProof(c: X11Client) {
+        val p0 = runCatching { c.queryPointerRoot() }.getOrNull() ?: return
+        val dxp = if (p0.first + 48 <= c.screenWidth - 4) 48 else -48
+        val dyp = if (p0.second + 48 <= c.screenHeight - 4) 48 else -48
+        val txp = (p0.first + dxp).coerceIn(4, (c.screenWidth - 4).coerceAtLeast(8))
+        val typ = (p0.second + dyp).coerceIn(4, (c.screenHeight - 4).coerceAtLeast(8))
+        runCatching { c.fakeMotion(txp, typ) }
+        Thread.sleep(250)
+        val p1 = runCatching { c.queryPointerRoot() }.getOrNull()
+        if (p1 != null && kotlin.math.abs(p1.first - txp) <= 4 &&
+            kotlin.math.abs(p1.second - typ) <= 4
+        ) {
+            capInputOk = true
+            inputTransport = "capture"
+            noteInfo(
+                "capture-plane input proof PASSED (pointer followed to $txp,$typ on " +
+                    "the capture connection) - XTEST rides the capture plane until " +
+                    "the control plane reconnects; the button proof runs there too")
+            // v0.2.92: the button leg is the one that detects the
+            // motion-works-clicks-don't swallow class - run it over the
+            // capture connection too, so the ladder can fire even while
+            // the control plane is down.
+            buttonProofAndEscalate(c)
+        } else {
+            noteInfo(
+                "capture-plane input proof FAILED (ptr=$p1 wanted=$txp,$typ) - the " +
+                    "server ignores FakeInput right now; input stays on the guest agent")
         }
     }
 

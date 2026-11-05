@@ -539,8 +539,11 @@ class DesktopView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attrs) 
             }
             canvas.drawText(
                 (when {
-                    btnDead && tr == "xtest" -> "INPUT: buttons SWALLOWED (motion ok)"
+                    btnDead && (tr == "xtest" || tr == "capture") -> "INPUT: buttons SWALLOWED (motion ok)"
                     tr == "xtest" -> "INPUT: XTEST (control plane)"
+                    // v0.2.92: XTEST over the capture connection - shown when
+                    // the control plane is down but its motion proof passed.
+                    tr == "capture" -> "INPUT: XTEST (capture plane)"
                     tr == "agent" -> "INPUT: guest xdotool agent (slow fallback)"
                     else -> "INPUT: down - no XTEST, no agent"
                 }) + "  $btnTxt $wmTxt", 16f, sp(28f), ib)
@@ -556,6 +559,10 @@ class DesktopView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attrs) 
                 color = when {
                     proof == "ok" -> Color.argb(0xC0, 0x66, 0xBB, 0x6A)
                     proof == "pending" -> Color.argb(0xC0, 0xFF, 0xCA, 0x63)
+                    // v0.2.92: motion verified but the button leg has not
+                    // reported yet is MEASURING, not failing - it used to
+                    // paint red and read as 'input dead' in field shots.
+                    proof == "motion-ok" -> Color.argb(0xC0, 0xFF, 0xCA, 0x63)
                     else -> Color.argb(0xC0, 0xEF, 0x53, 0x50)
                 }
                 textSize = sp(10f)
@@ -574,7 +581,15 @@ class DesktopView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attrs) 
                     // must show whether pixels come from the in-app XGetImage
                     // loop (src=native) or the parked guest pipeline (src=-).
                     "src=${desktop?.captureMode ?: "-"} " +
-                    (desktop?.agentEvidence() ?: ""), 16f, sp(40f), pb)
+                    (desktop?.agentEvidence() ?: "") +
+                    // v0.2.92: while the control plane cannot reconnect, say
+                    // HOW MANY attempts failed and the last error - a yellow
+                    // proof=pending with no reason was undiagnosable in the
+                    // field (the 18:15 round: clicks dead a whole session).
+                    (if (proof == "pending")
+                        " rxfail=${desktop?.reconnectFailCount() ?: 0}" +
+                            (desktop?.ctrlErrorText?.let { " ctrlErr=" + it.take(46) } ?: "")
+                    else ""), 16f, sp(40f), pb)
             drawGestureHint(canvas)
         }
         // v0.2.60: on-screen Esc/Tab/Ctrl/Alt/Super + wheel, drawn last so it

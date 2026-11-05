@@ -630,8 +630,14 @@ class X11Client(
         opcode: Int, minor: Int, body: ByteArray, timeoutMs: Int = 3_000,
         tailBuf: ByteArray? = null,
     ): Reply? {
-        val mySeq = synchronized(writeLock) { sequence = (sequence + 1) and 0xFFFF; sequence }
-        send(buildRequest(opcode, minor, body))
+        // v0.2.92: same atomic reservation as sendNoReply() - see its comment.
+        val req = buildRequest(opcode, minor, body)
+        val mySeq = synchronized(writeLock) {
+            sequence = (sequence + 1) and 0xFFFF
+            val s = sequence
+            send(req)
+            s
+        }
         val deadline = System.currentTimeMillis() + timeoutMs
         while (System.currentTimeMillis() < deadline) {
             val pkt = readPacket(
@@ -658,8 +664,16 @@ class X11Client(
     }
 
     private fun sendNoReply(opcode: Int, minor: Int, body: ByteArray) {
-        synchronized(writeLock) { sequence = (sequence + 1) and 0xFFFF }
-        send(buildRequest(opcode, minor, body))
+        // v0.2.92: reserve the sequence number AND put the request on the
+        // wire inside ONE lock. The old form let a concurrent requestReply()
+        // send its own request between our reservation and our write, so the
+        // wire order diverged from the local counter and the server's reply
+        // carried a sequence number requestReply() was not waiting for (a
+        // dropped round trip per interleave - the 'proot load?' keepalive
+        // misses). With input also riding the CAPTURE connection now (see
+        // DesktopService v0.2.92) this lock discipline is load-bearing.
+        val req = buildRequest(opcode, minor, body)
+        synchronized(writeLock) { sequence = (sequence + 1) and 0xFFFF; send(req) }
     }
 
     /**
