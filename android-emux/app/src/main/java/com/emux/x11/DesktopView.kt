@@ -52,7 +52,11 @@ import kotlin.math.min
  *                      classifier, so a scroll that arrives as a
  *                      held-button hover stream is quantised into the
  *                      wheel and a generic BUTTON_PRESS is deferred -
- *                      a scroll start can no longer drag-select)
+ *                      a scroll start can no longer drag-select;
+ *                      v0.2.99: the pad tags its contact stream
+ *                      TOOL_TYPE_FINGER - the DEVICE bit decides the
+ *                      route, so contact and two-finger scroll reach the
+ *                      mouse path instead of the finger machine)
  *  (v0.2.89: the "keys" toggle and its helper key bar are REMOVED - field
  *   request; the view stays fit-to-screen.)
  *
@@ -964,6 +968,26 @@ class DesktopView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attrs) 
     /** Mouse or trackpad? toolType decides; stylus/finger sources never count
      *  even when a ROM tags them SOURCE_MOUSE. */
     private fun isMouseInput(e: MotionEvent): Boolean {
+        // v0.2.99: the DEVICE decides first, not the toolType. The cover
+        // trackpad ("HUAWEI Glide Keyboard", SOURCE_MOUSE, no TOUCHSCREEN
+        // bit) tags its buttonless contact stream - including the two-finger
+        // scroll's POINTER_DOWN pc=2 - as TOOL_TYPE_FINGER; the old
+        // toolType-first veto routed those to the finger machine, whose
+        // single-finger drag semantics produced the field "it grabs as
+        // selecting/grabbing instead of scrolling" - while three rounds of
+        // mouse-path fixes never saw a single one of those events. A real
+        // touchscreen finger always comes from a device carrying
+        // SOURCE_TOUCHSCREEN, so the device bit keeps the whole finger
+        // vocabulary (and the v0.2.86 PC-mode retagging veto below)
+        // intact; only a non-touchscreen pointer device's finger-tagged
+        // stream moves to the mouse path, where the v0.2.96 contact model
+        // owns it (glide = pointer motion, POINTER_DOWN pc=2 = wheel,
+        // quick lift = click, tap-then-glide = drag).
+        if (e.pointerCount > 0 && e.isFromSource(InputDevice.SOURCE_MOUSE) &&
+            e.getToolType(0) == MotionEvent.TOOL_TYPE_FINGER) {
+            val d = e.device
+            if (d != null && (d.sources and InputDevice.SOURCE_TOUCHSCREEN) == 0) return true
+        }
         if (e.pointerCount > 0) {
             when (e.getToolType(0)) {
                 MotionEvent.TOOL_TYPE_MOUSE -> return true

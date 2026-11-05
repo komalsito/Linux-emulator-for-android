@@ -218,8 +218,11 @@ android {
         //     right-click (two-finger tap).
                 // v0.2.98 vc198: trackpad scroll synthesized from the held-button
         // hover stream; generic BUTTON_PRESS deferred; evidence key +btn
-        versionCode = 198
-        versionName = "0.2.98"
+                // v0.2.99 vc199: ROUTING FIX - the pad's TOOL_TYPE_FINGER contact
+        // stream is mouse-routed by DEVICE (no TOUCHSCREEN bit), not toolType;
+        // the two-finger scroll reaches the v0.2.96 contact model at last
+        versionCode = 199
+        versionName = "0.2.99"
 
         ndk {
             abiFilters += listOf("arm64-v8a", "armeabi-v7a", "x86_64")
