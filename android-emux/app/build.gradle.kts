@@ -246,8 +246,19 @@ android {
         // XDG_SESSION_TYPE=x11 (GNOME/mutter defaulted to Wayland and died on
         // the Xvfb - the vc201 openbox fallback), and detection grows
         // mate-session/startlxqt/lxsession (ENV_VERSION 83 re-seed).
-        versionCode = 202
-        versionName = "0.2.102"
+        // v0.2.103 vc203: LADDER DEMOTION + EVIDENCE PRESERVATION. Field
+        // (vc202, healthy session): the button-delivery probe reported its
+        // KNOWN false-DEAD artifact, the escalation ladder's stage 2 killed a
+        // healthy openbox, found no candidate WM (ubuntu-desktop ships
+        // mutter, not twm/icewm/marco/...) and left the session WM-less -
+        // wm=none, 40 MB/s full-frame repaint flood, "everything very
+        // laggy". Stage 2+ now only LOGS (stage 1 reconfigure stays), and a
+        // session WM that dies at launch preserves its stderr in
+        // /tmp/wm_session.log before the openbox fallback truncates wm.log.
+        // Field-CONFIRMED this round: the vc202 routing mask fix works - pad
+        // contact events now log [mouse] and reach the v0.2.96 contact model.
+        versionCode = 203
+        versionName = "0.2.103"
 
         ndk {
             abiFilters += listOf("arm64-v8a", "armeabi-v7a", "x86_64")

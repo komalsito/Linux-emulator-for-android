@@ -432,8 +432,20 @@ btn_watch() {
           fi
           { echo "$(date +%s) stage1 rc=$(rc_xml_effective) grabs=${RCX_BAD:-none}"; } > /tmp/emux_btn_action 2>/dev/null
         else
-          echo "emux-x11: button verdict STILL DEAD (stage $STG) - switching window manager" >&2
-          wm_fallback "stage $STG: clicks still not delivered after the rc.xml rewrite"
+          # v0.2.103 FIELD DEMOTION: the WM switch is dead code BY DECISION.
+          # vc202 field: a HEALTHY openbox session (furniture up, user
+          # interacting) got probe=DEAD - the KNOWN passive-grab artifact that
+          # has shown on every healthy session all week - and stage 2 killed
+          # openbox, found no candidate WM (ubuntu-desktop brings mutter, not
+          # twm/icewm/jwm/marco/metacity/fluxbox/xfwm4) and left the session
+          # WM-LESS: badge wm=none, a 40 MB/s full-frame repaint flood and
+          # "everything is very laggy, can't interact". A WM swap is only
+          # ever justified by evidence the WM is the problem, and this probe
+          # has never provided that evidence - it false-DEADs on every
+          # healthy openbox. Stage 1 (rc.xml rewrite + reconfigure) stays:
+          # self-healing, cannot remove the WM. Stage 2+ only LOGS; a human
+          # restarts the session if clicks genuinely die.
+          echo "emux-x11: button verdict STILL DEAD (stage $STG) - NOT switching WM (probe false-DEADs on healthy sessions; the vc202 swap left a WM-less desktop)" >&2
           { echo "$(date +%s) stage$STG wm=$(cat /tmp/emux_wm_mode 2>/dev/null)"; } > /tmp/emux_btn_action 2>/dev/null
         fi
       fi
@@ -529,6 +541,12 @@ start_wm() {
   # fall straight back to the seeded openbox desktop this once.
   if [ "$1" != "openbox" ]; then
     echo "emux-x11: session $1 could not start - falling back to openbox (this session)" >&2
+    # v0.2.103: preserve the session's death log BEFORE the openbox fallback
+    # truncates wm.log. vc202 field: gnome-session died instantly and the
+    # fallback's own silent relaunch emptied wm.log, so there was NO EVIDENCE
+    # why - the exact line this app lives on. /tmp/wm_session.log now holds
+    # the session's stderr for the next diagnosis.
+    [ -s /tmp/wm.log ] && cp /tmp/wm.log /tmp/wm_session.log 2>/dev/null
     start_wm openbox && return 0
   fi
   return 1
