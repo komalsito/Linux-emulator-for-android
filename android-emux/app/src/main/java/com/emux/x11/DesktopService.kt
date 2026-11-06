@@ -546,6 +546,11 @@ class DesktopService(
                             "(${w}x${h}x16, bpl=$fbMapBpl) - damage bands read from memory, not the socket"
                         else "native capture on :$displayNum: -fbdir map unavailable - damage bands via GetImage")
                     var fbSuspect = 0
+                    // v0.2.108: once two socket sweeps in a row AGREE with the
+                    // map, the healer itself reads the map too; every 8th sweep
+                    // still goes over the socket as the cross-check.
+                    var fbGood = 0
+                    var sweepNo = 0
                     val partCap = (h / 2).coerceAtLeast(64)
                     // v0.2.83: a band taller than this is grabbed in chunks, so
                     // even a full-screen damage burst paints progressively
@@ -756,6 +761,8 @@ class DesktopService(
                         var sweepUploaded = 0
                         var fbChecked = 0
                         var fbMismatch = 0
+                        sweepNo++
+                        val fbSweep = fbMap != null && fbGood >= 2 && sweepNo % 8 != 0
                         while (y < h) {
                             if (System.currentTimeMillis() > sweepDeadline) {
                                 capped = true
@@ -764,14 +771,15 @@ class DesktopService(
                             }
                             val rows = minOf(bandRows, h - y)
                             val tb = System.currentTimeMillis()
-                            val n = runCatching { c.grabRegion565(0, y, w, rows, bandTimeout, bandBytes) }.getOrDefault(-1)
+                            val n = (if (fbSweep) fbRegion(0, y, w, rows, bandBytes).takeIf { it > 0 } else null)
+                                ?: runCatching { c.grabRegion565(0, y, w, rows, bandTimeout, bandBytes) }.getOrDefault(-1)
                             if (n <= 0) { ok = false; break }
                             // v0.2.106: the socket sweep is the ground truth -
                             // check the mapped framebuffer against it, band by
                             // band. A map that reads a different server's file
                             // (stray Xvfb) or a dead inode disagrees on nearly
                             // every band and gets dropped below.
-                            if (fbMap != null) {
+                            if (fbMap != null && !fbSweep) {
                                 val chk = fbCheckBuf(w * rows * 2)
                                 if (fbRegion(0, y, w, rows, chk) > 0) {
                                     fbChecked++
@@ -835,12 +843,13 @@ class DesktopService(
                         // bands through timing alone, never on almost all of them.
                         if (fbMap != null && fbChecked >= 4) {
                             if (fbMismatch * 4 > fbChecked * 3) {
+                                fbGood = 0
                                 fbSuspect++
                                 if (fbSuspect >= 2) {
                                     closeFbMap()
                                     noteInfo("-fbdir map DISAGREES with the server ($fbMismatch/$fbChecked bands, twice) - dropped; damage bands back on GetImage")
                                 }
-                            } else fbSuspect = 0
+                            } else { fbSuspect = 0; fbGood++ }
                         }
                         nativeGrabMs = System.currentTimeMillis() - t0
                         // v0.2.83: a sweep that ran to completion repainted the
@@ -970,11 +979,31 @@ class DesktopService(
      * because the trade is the user's, not ours: fewer pixels = bigger, softer
      * text and a proportionally higher frame rate.
      */
-    private fun captureLongSide(): Int = runCatching {
+    private fun captureQualityPref(): String = runCatching {
         androidx.preference.PreferenceManager.getDefaultSharedPreferences(ctx)
             .getString("capture_quality", DEFAULT_CAPTURE_LONG_SIDE.toString())
-            ?.toIntOrNull() ?: DEFAULT_CAPTURE_LONG_SIDE
-    }.getOrDefault(DEFAULT_CAPTURE_LONG_SIDE).coerceIn(480, 1280)
+    }.getOrNull() ?: DEFAULT_CAPTURE_LONG_SIDE.toString()
+
+    /** v0.2.108: the device's own long side in pixels (what "native" means). */
+    private fun deviceLongSide(): Int = runCatching {
+        val dm = ctx.resources.displayMetrics
+        maxOf(dm.widthPixels, dm.heightPixels)
+    }.getOrDefault(DEFAULT_CAPTURE_LONG_SIDE).coerceIn(480, 3840)
+
+    /**
+     * v0.2.108 HIGH RESOLUTION: the 1280 ceiling existed because every pixel
+     * crossed the proot socket. Damage bands now come from the mapped -fbdir
+     * framebuffer, so the screen can match the panel: "native" = device
+     * pixels at 1x UI, "native2x" = device pixels with the UI scaled 2x
+     * (same layout size as 1280, every edge twice as sharp).
+     */
+    private fun captureLongSide(): Int = when (val q = captureQualityPref()) {
+        "native", "native2x" -> deviceLongSide()
+        else -> (q.toIntOrNull() ?: DEFAULT_CAPTURE_LONG_SIDE).coerceIn(480, 3840)
+    }
+
+    /** v0.2.108: guest UI scale factor (GDK_SCALE / Xft.dpi / MATE scaling). */
+    private fun uiScale(): Int = if (captureQualityPref() == "native2x") 2 else 1
 
     /** The long side the RUNNING session actually started at. */
     @Volatile private var sessionLongSide = 0
@@ -1018,7 +1047,9 @@ class DesktopService(
             // is 2 B/px instead of 4 — half the wire, half the timeout risk —
             // and ZPixmap depth-16 IS RGB565, the format the whole frame path
             // already speaks. Guest scripts untouched (RES passes through).
-            if (px <= 921_600 * 2) return if (a >= 1f) "${longSide}x${shortSide}x16" else "${shortSide}x${longSide}x16"
+            // v0.2.108: budget raised from 2x 720p to 4K-class - the mapped
+            // framebuffer path no longer pays per pixel on the socket.
+            if (px <= 3840 * 2400) return if (a >= 1f) "${longSide}x${shortSide}x16" else "${shortSide}x${longSide}x16"
         }
         val cfg = ctx.resources.configuration
         // At the 1280 default every number below is bit-identical to the
@@ -1032,7 +1063,7 @@ class DesktopService(
         val w = dm.widthPixels; val h = dm.heightPixels
         if (w <= 0 || h <= 0) return "${phoneShort}x${longSide}x16"
         val shortSide = ((longSide * min(w, h) / max(w, h))
-            .coerceIn(longSide * 480 / 1280, 1280) / 2 * 2)
+            .coerceIn(longSide * 480 / 1280, longSide) / 2 * 2)
         return if (w >= h) "${longSide}x${shortSide}x16" else "${shortSide}x${longSide}x16"
     }
 
@@ -1042,6 +1073,8 @@ class DesktopService(
     // server that keeps coming up at the wrong size must not restart-loop.
     @Volatile private var geometryFixes = 0
     @Volatile private var lastWm = "openbox"
+    /** v0.2.108: EMUX_DESKTOP_ID of the live session ("" = none / stopping). */
+    @Volatile private var desktopId = ""
 
     /**
      * v0.2.101: the desktop the user gets is the desktop they installed.
@@ -1081,6 +1114,9 @@ class DesktopService(
         // a second startDesktop() here would launch a duplicate X/capture
         // pipeline on top of the one already waiting for frames.
         if (state.value == State.STARTING_X || state.value == State.AWAITING_FRAMES || state.value == State.CONNECTED) return
+        // v0.2.108: no session is live until the new launch stamps its id, so
+        // the start-time sweep removes EVERY earlier desktop's processes.
+        desktopId = ""
         // v0.1.17 BUGFIX (desktop showed nothing, ever): a previous failed attempt
         // left the state at ERROR and this method then refused to retry — the
         // desktop was permanently dead until app restart. Also stop() could leave
@@ -1530,7 +1566,12 @@ class DesktopService(
                 sessionW = desktopGeometry.substringBefore('x').toIntOrNull() ?: 0
                 sessionH = desktopGeometry.substringAfter('x').substringBefore('x').toIntOrNull() ?: 0
                 noteInfo("desktop geometry: $desktopGeometry")
-                val cmd = "emux-x11 $wm $desktopGeometry $displayNum"
+                // v0.2.108: every process of this desktop inherits
+                // EMUX_DESKTOP_ID (killDesktopGuests finds the whole tree by it,
+                // daemons that double-forked away from the launcher included)
+                // and EMUX_SCALE (HiDPI: GTK/Qt/Xft scale factor for the guest).
+                desktopId = "d" + System.currentTimeMillis()
+                val cmd = "EMUX_DESKTOP_ID=$desktopId EMUX_SCALE=${uiScale()} emux-x11 $wm $desktopGeometry $displayNum"
                 xRespawns = 0
                 // v0.1.80: tell the user WHERE the full log lives - the pane
                 // only shows a scrolling window; the diag file never rotates.
@@ -2380,6 +2421,37 @@ class DesktopService(
      * whole desktop guest family and drops the X locks.
      */
     private fun killDesktopGuests() {
+        // v0.2.108 THE FORCE-STOP EQUIVALENT. Field: a desktop that went stale
+        // stayed stale across "Restart desktop" and only Force stop cured it.
+        // The pattern sweep below knows Xvfb/openbox/tint2 by name, but a full
+        // session (mate-session, mate-panel, settings daemon, its own
+        // dbus-daemon, Firefox...) survived every restart - and double-forked
+        // daemons are no longer children of anything we track. Every desktop
+        // process carries EMUX_DESKTOP_ID in its environment (see the launch
+        // command): kill every same-uid process whose marker is not the live
+        // session's - all of them when stopping. Terminal-tab shells never
+        // carry the marker, so they survive exactly as with force stop's
+        // opposite: only the desktop goes.
+        runCatching {
+            val me = android.os.Process.myPid()
+            val live = desktopId
+            var killed = 0
+            java.io.File("/proc").listFiles()?.forEach { d ->
+                val pid = d.name.toIntOrNull() ?: return@forEach
+                if (pid == me) return@forEach
+                val env = runCatching { java.io.File(d, "environ").readBytes() }.getOrNull() ?: return@forEach
+                if (env.isEmpty()) return@forEach
+                val s = String(env, Charsets.ISO_8859_1)
+                val i = s.indexOf("EMUX_DESKTOP_ID=")
+                if (i < 0 || (i > 0 && s[i - 1] != '\u0000')) return@forEach
+                val end = s.indexOf('\u0000', i).let { if (it < 0) s.length else it }
+                val id = s.substring(i + "EMUX_DESKTOP_ID=".length, end)
+                if (live.isNotEmpty() && id == live) return@forEach
+                android.os.Process.killProcess(pid)
+                killed++
+            }
+            if (killed > 0) com.emux.EmuXLog.i("desktop: killed $killed process(es) of previous desktop session(s) by EMUX_DESKTOP_ID")
+        }
         // v0.1.81 FIRST: host-authoritative orphan kill. Guest-side sweeps
         // (including the proot sweep below) CANNOT signal tracees of OTHER
         // proot instances - proot only translates pids of its own tracees -
@@ -2398,7 +2470,8 @@ class DesktopService(
             // was not capturing), while fresh sessions streamed an empty
             // root window. Age filter still protects this session's own
             // launches (they start after desktopStartUpTicks).
-            val pat = Regex("Xvfb|Xorg|emux-capture|/xwd|emux-x11|openbox|tint2|pcmanfm|xterm|xclock|xeyes")
+            val pat = Regex("Xvfb|Xorg|emux-capture|/xwd|emux-x11|openbox|tint2|pcmanfm|xterm|xclock|xeyes|" +
+                "mate-session|mate-panel|mate-settings-daemon|marco|caja|wnck-applet|notification-area-applet|jgmenu")
             val proc = java.io.File("/proc")
             proc.listFiles()?.forEach { d ->
                 val pid = d.name.toIntOrNull() ?: return@forEach
@@ -4398,6 +4471,7 @@ class DesktopService(
 
     // -------------------------------------------------------------------- stop
     fun stop() {
+        desktopId = ""   // v0.2.108: the stop sweep kills the whole marked tree
         frameReader?.cancel(); frameReader = null
         runCatching { activeSock?.close() }; activeSock = null   // v0.1.54
         runCatching { listener?.close() }; listener = null

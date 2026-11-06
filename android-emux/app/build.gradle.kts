@@ -316,8 +316,20 @@ android {
         // click-safe rc.xml) and without caja in its required set; the
         // background comes from mate-settings-daemon. Terminal: app banners
         // are CRLF-normalised (the "staircase" self-test block).
-        versionCode = 207
-        versionName = "0.2.107"
+        // v0.2.108 vc208: RESTART = FORCE STOP, CENTRED TASKBAR, HIGH-RES
+        // (ENV_VERSION 89 re-seed).
+        //  1. Every desktop process carries EMUX_DESKTOP_ID; stop/start kill
+        //     every marked process of earlier sessions (MATE trees, session
+        //     buses, double-forked daemons) - field: a stale desktop survived
+        //     "Restart desktop" and only Force stop cured it.
+        //  2. Centred taskbar: full-width tint2 tray bar (strut, tray, clock)
+        //     + shrinking tint2 dock centred on top (start menu via jgmenu,
+        //     pinned apps, icon-only windows); also MATE's panel.
+        //  3. Resolution up to the device's own (Retina = native pixels, UI
+        //     2x via Xft.dpi/GDK_SCALE/MATE scaling); healer sweeps read the
+        //     validated mapped framebuffer, 1 in 8 still cross-checks the socket.
+        versionCode = 208
+        versionName = "0.2.108"
 
         ndk {
             abiFilters += listOf("arm64-v8a", "armeabi-v7a", "x86_64")

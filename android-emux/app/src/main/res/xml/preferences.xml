@@ -58,8 +58,8 @@
          immediately. -->
     <ListPreference
         app:key="capture_quality"
-        app:title="Desktop capture quality (frame rate)"
-        app:summary="Lower resolution = fewer bytes per frame = a higher frame rate, at the cost of softer text. The desktop pane shows the live rate (LIVE n.n fps, size, KB/s, ms per refresh) so you can tune it against your own device. Applies when the desktop next starts."
+        app:title="Desktop resolution"
+        app:summary="Retina renders at the real resolution of your screen with everything scaled 2x - crisp text at the usual size. Higher resolutions cost more CPU while windows change; the live rate is shown on the desktop (LIVE n.n fps). Applies when the desktop next starts (Restart desktop now)."
         app:entries="@array/capture_quality_entries"
         app:entryValues="@array/capture_quality_values"
         app:defaultValue="1280"

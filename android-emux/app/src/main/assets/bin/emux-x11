@@ -60,6 +60,25 @@ fi
 # v0.2.88: tint2 crash strikes are per-session (a config retry in one
 # session must not brand the next one as hopeless).
 [ -n "$DOCTOR_MODE" ] || rm -f /tmp/emux_tint2_strikes 2>/dev/null
+# v0.2.108: dock/tray pidfiles, HiDPI resources and the start-menu install
+# attempt are per-session too.
+[ -n "$DOCTOR_MODE" ] || rm -f /tmp/emux_tint2.pid /tmp/emux_tray.pid /tmp/emux_scale_applied /tmp/emux_jgmenu_tried /tmp/emux_start_icon 2>/dev/null
+# v0.2.108 HiDPI: the app passes EMUX_SCALE=2 for "Retina" (device
+# resolution, UI doubled). Xft.dpi (applied once X is up, see apply_scale)
+# scales Openbox, tint2 and xterm fonts; GTK gets GDK_SCALE, with
+# GDK_DPI_SCALE undoing the Xft.dpi doubling of its text (the standard
+# recipe). Under MATE its settings daemon owns GTK scaling instead
+# (window-scaling-factor), so GDK_* stay unset there.
+EMUX_SCALE="${EMUX_SCALE:-1}"
+case "$EMUX_SCALE" in 2) ;; *) EMUX_SCALE=1 ;; esac
+export EMUX_SCALE
+if [ "$EMUX_SCALE" = 2 ]; then
+  export QT_AUTO_SCREEN_SCALE_FACTOR=0 QT_SCALE_FACTOR=2 QT_FONT_DPI=96 XCURSOR_SIZE=48
+  case "$WM" in
+    mate-session) ;;
+    *) export GDK_SCALE=2 GDK_DPI_SCALE=0.5 ;;
+  esac
+fi
 export HOME="${HOME:-/root}"
 export DISPLAY=:$DN
 export TMPDIR=/tmp
@@ -482,7 +501,17 @@ btn_watch() {
 # but it depends on an arch-specific libdir and on PyXDG (which logs
 # "openbox-xdg-autostart requires PyXDG"), so we drive --startup directly.
 # --sm-disable skips the session-manager connection: there is no SM here.
+# v0.2.108: X resources for the chosen UI scale - once per session, before
+# the first client so every toolkit reads the same DPI.
+apply_scale() {
+  [ -e /tmp/emux_scale_applied ] && return 0
+  command -v xrdb >/dev/null 2>&1 || return 0
+  printf 'Xft.dpi: %s\nXcursor.size: %s\n' "$((96 * EMUX_SCALE))" "$((24 * EMUX_SCALE))" \
+    | xrdb -merge >/dev/null 2>&1 && touch /tmp/emux_scale_applied && \
+    echo "emux-x11: UI scale ${EMUX_SCALE}x (Xft.dpi $((96 * EMUX_SCALE)))" >&2
+}
 start_wm() {
+  apply_scale
   WM_BIN=""
   for c in "/usr/bin/$1" "/usr/local/bin/$1" "/bin/$1" /usr/bin/openbox /usr/bin/twm /usr/bin/icewm; do
     [ -x "$c" ] && { WM_BIN="$c"; break; }
@@ -562,7 +591,11 @@ start_wm() {
         #   - no file manager in the REQUIRED set, so a crashing caja can no
         #     longer loop; Files still opens caja as a normal window on demand;
         #   - the background drawn by mate-settings-daemon instead of caja.
-        gsettings set org.mate.session required-components-list "['windowmanager', 'panel']" 2>/dev/null
+        # v0.2.108: mate-panel is out too - its 1.26 cannot centre anything
+        # and its applets crashed here; the EmuX centred taskbar (tint2 dock
+        # + tray + start menu, start_furniture) is the panel under MATE.
+        gsettings set org.mate.session required-components-list "['windowmanager']" 2>/dev/null
+        gsettings set org.mate.interface window-scaling-factor "$EMUX_SCALE" 2>/dev/null
         gsettings set org.mate.background show-desktop-icons false 2>/dev/null
         gsettings set org.mate.background draw-background true 2>/dev/null
         if [ -x /usr/bin/openbox ]; then
@@ -632,6 +665,51 @@ paint_root() {
 # v0.2.39: bring desktop furniture up the moment it exists - called from
 # the REST pass right after install AND from the visibility watchdog, so
 # panel/icons/menu appear live without waiting for a session restart.
+# v0.2.108: pidfile liveness - two tint2 instances (dock + tray) share one
+# argv[0], so running0 cannot tell them apart.
+pid_alive() {
+  [ -s "$1" ] && kill -0 "$(cat "$1" 2>/dev/null)" 2>/dev/null
+}
+# v0.2.108 CENTRED TASKBAR: tint2 cannot centre launchers + tasks inside a
+# full-width bar (F spacers are ignored when T is present), so the desktop
+# gets two instances: a full-width BAR in the bottom layer that reserves the
+# screen edge (strut) and carries tray + clock on the right, and a shrinking
+# DOCK centred on top of it with the start button, pinned apps and open
+# windows - the Windows 11 / macOS arrangement.
+start_panels() {
+  if [ -x /usr/bin/tint2 ] && ! pid_alive /tmp/emux_tint2.pid; then
+    echo "emux-x11: starting tint2 dock (centred taskbar)" >&2
+    nohup /usr/bin/tint2 >/tmp/tint2.log 2>&1 </dev/null &
+    T2PID=$!
+    echo "$T2PID" > /tmp/emux_tint2.pid 2>/dev/null
+    sleep 1
+    if kill -0 "$T2PID" 2>/dev/null; then
+      echo "emux-x11: tint2 panel alive (pid $T2PID)" >&2
+    else
+      T2S=$(( $(cat /tmp/emux_tint2_strikes 2>/dev/null || echo 0) + 1 ))
+      echo "$T2S" > /tmp/emux_tint2_strikes 2>/dev/null
+      if [ "$T2S" -le 3 ]; then
+        echo "emux-x11: tint2 DIED within 1s of launch (strike $T2S) - tint2.log tail:" >&2
+        tail -4 /tmp/tint2.log >&2 2>/dev/null
+      else
+        echo "emux-x11: tint2 DIED within 1s of launch (strike $T2S, tail already shown)" >&2
+      fi
+      if [ "$T2S" = 2 ]; then
+        mkdir -p "$HOME/.config/emux" 2>/dev/null
+        if [ -e "$HOME/.config/tint2/tint2rc" ] && ! emux_keep tint2rc; then
+          mv -f "$HOME/.config/tint2/tint2rc" "$HOME/.config/tint2/tint2rc.crashed" 2>/dev/null
+          touch "$HOME/.config/emux/keep-tint2rc" 2>/dev/null
+          echo "emux-x11: seeded tint2rc moved aside (.crashed) + keep-tint2rc marker set - next launch uses the distro default panel" >&2
+        fi
+      fi
+    fi
+  fi
+  if [ -x /usr/bin/tint2 ] && [ -e "$HOME/.config/tint2/emux-tray.tint2rc" ] && ! pid_alive /tmp/emux_tray.pid; then
+    nohup /usr/bin/tint2 -c "$HOME/.config/tint2/emux-tray.tint2rc" >/tmp/tint2-tray.log 2>&1 </dev/null &
+    echo "$!" > /tmp/emux_tray.pid 2>/dev/null
+    echo "emux-x11: tray bar started (pid $!)" >&2
+  fi
+}
 start_furniture() {
   # v0.2.101: paint the root FIRST so a black pane stays unambiguous even
   # while a full session is taking over, then keep the EmuX furniture OFF the
@@ -641,7 +719,14 @@ start_furniture() {
   # file is written by start_wm, which always runs before this.
   paint_root
   case "$(cat /tmp/emux_wm_mode 2>/dev/null || echo openbox)" in
-    gnome-session|gnome-session-binary|gnome-shell|startxfce4|xfce4-session|mate-session|mate-session-binary|startlxqt|lxqt-session|lxsession)
+    mate-session|mate-session-binary)
+      # v0.2.108: MATE runs without mate-panel (see start_wm); the EmuX
+      # centred taskbar is its panel. No pcmanfm desktop: MATE draws its own
+      # background.
+      seed_desktop_config
+      start_panels
+      return 0 ;;
+    gnome-session|gnome-session-binary|gnome-shell|startxfce4|xfce4-session|startlxqt|lxqt-session|lxsession)
       echo "emux-x11: full-session desktop owns the furniture - EmuX panel/icons skipped" >&2
       return 0 ;;
   esac
@@ -671,32 +756,7 @@ start_furniture() {
   # drops the keep-tint2rc marker so seed_desktop_config does not recreate
   # it on the next tick - the distro default panel config is plain but it
   # EXISTS. Every death narrates its log tail so the pane names the killer.
-  if [ -x /usr/bin/tint2 ] && ! running0 tint2; then
-    echo "emux-x11: starting tint2 panel" >&2
-    nohup /usr/bin/tint2 >/tmp/tint2.log 2>&1 </dev/null &
-    T2PID=$!
-    sleep 1
-    if kill -0 "$T2PID" 2>/dev/null; then
-      echo "emux-x11: tint2 panel alive (pid $T2PID)" >&2
-    else
-      T2S=$(( $(cat /tmp/emux_tint2_strikes 2>/dev/null || echo 0) + 1 ))
-      echo "$T2S" > /tmp/emux_tint2_strikes 2>/dev/null
-      if [ "$T2S" -le 3 ]; then
-        echo "emux-x11: tint2 DIED within 1s of launch (strike $T2S) - tint2.log tail:" >&2
-        tail -4 /tmp/tint2.log >&2 2>/dev/null
-      else
-        echo "emux-x11: tint2 DIED within 1s of launch (strike $T2S, tail already shown)" >&2
-      fi
-      if [ "$T2S" = 2 ]; then
-        mkdir -p "$HOME/.config/emux" 2>/dev/null
-        if [ -e "$HOME/.config/tint2/tint2rc" ] && ! emux_keep tint2rc; then
-          mv -f "$HOME/.config/tint2/tint2rc" "$HOME/.config/tint2/tint2rc.crashed" 2>/dev/null
-          touch "$HOME/.config/emux/keep-tint2rc" 2>/dev/null
-          echo "emux-x11: seeded tint2rc moved aside (.crashed) + keep-tint2rc marker set - next launch uses the distro default panel" >&2
-        fi
-      fi
-    fi
-  fi
+  start_panels
   if [ -x /usr/bin/pcmanfm ] && ! running0 pcmanfm; then
     echo "emux-x11: starting pcmanfm desktop (icons)" >&2
     # v0.2.58 FIELD FIX: starve pcmanfm of DBUS/GIO at launch. Under proot a
@@ -879,51 +939,71 @@ open it again: the desktop re-seeds its panel, menu and icons on
 every start, and the log is in the Terminal tab.
 EOF
   fi
+  # --- v0.2.108: start-button icon - the first that exists, else a text button
+  # (cached per session: a find over the icon trees is slow under proot)
+  START_ICON=$(cat /tmp/emux_start_icon 2>/dev/null)
+  [ -e /tmp/emux_start_icon ] || for n in start-here distributor-logo view-app-grid applications-other open-menu; do
+    START_ICON=$(find /usr/share/icons /usr/share/pixmaps -name "$n.svg" 2>/dev/null | head -1)
+    [ -n "$START_ICON" ] || START_ICON=$(find /usr/share/icons /usr/share/pixmaps -name "$n.png" 2>/dev/null | sort -t/ -k6 -r | head -1)
+    [ -n "$START_ICON" ] && break
+  done
+  [ -e /tmp/emux_start_icon ] || echo "$START_ICON" > /tmp/emux_start_icon 2>/dev/null
   # --- tint2 panel config (bottom bar, launchers + tasks + tray + clock) ---
   STAMP="$HOME/.config/tint2/.emux-apps"
   OLD_APPS=""
   [ -e "$STAMP" ] && OLD_APPS=$(cat "$STAMP" 2>/dev/null)
   if emux_keep tint2rc; then
     echo "emux-x11: keep-tint2rc marker - the user's panel config is NOT rewritten" >&2
-  elif [ ! -e "$HOME/.config/tint2/tint2rc" ] || [ "$APPS" != "$OLD_APPS" ]; then
+  elif [ ! -e "$HOME/.config/tint2/tint2rc" ] || [ "$APPS s$EMUX_SCALE" != "$OLD_APPS" ]; then
     if [ -e "$HOME/.config/tint2/tint2rc" ] && ! grep -q "EmuX" "$HOME/.config/tint2/tint2rc" 2>/dev/null; then
       cp "$HOME/.config/tint2/tint2rc" "$HOME/.config/tint2/tint2rc.emux-bak" 2>/dev/null
     fi
+    S="$EMUX_SCALE"
     {
-      echo "# EmuX tint2 panel (v0.2.54) - translucent modern taskbar"
-      echo "rounded = 0"
-      echo "border_width = 0"
-      echo "background_color = #101318 70"
-      echo "border_color = #101318 100"
-      echo "rounded = 4"
+      echo "# EmuX tint2 panel (v0.2.108) - centred dock: start, pinned apps, windows"
+      # bg 1: the dock bubble
+      echo "rounded = $((12 * S))"
       echo "border_width = 1"
-      echo "background_color = #3a6ea5 100"
-      echo "border_color = #3a6ea5 100"
-      echo "panel_items = LTSBC"
+      echo "background_color = #1b1f27 94"
+      echo "border_color = #ffffff 14"
+      # bg 2: active window / pressed
+      echo "rounded = $((7 * S))"
+      echo "border_width = 0"
+      echo "background_color = #ffffff 22"
+      echo "border_color = #ffffff 0"
+      echo "background_color_hover = #ffffff 30"
+      # bg 3: hover on idle items
+      echo "rounded = $((7 * S))"
+      echo "border_width = 0"
+      echo "background_color = #ffffff 0"
+      echo "border_color = #ffffff 0"
+      echo "background_color_hover = #ffffff 14"
+      echo "background_color_pressed = #ffffff 24"
+      echo "panel_items = PLT"
       echo "panel_monitor = all"
       echo "panel_position = bottom center horizontal"
-      echo "panel_size = 100% 46"
-      echo "panel_margin = 0 0"
-      echo "panel_padding = 2 2 4"
+      echo "panel_size = 94% $((52 * S))"
+      echo "panel_shrink = 1"
+      echo "panel_margin = 0 $((4 * S))"
+      echo "panel_padding = $((8 * S)) $((4 * S)) $((6 * S))"
       echo "panel_background_id = 1"
-      echo "wm_menu = 1"
       echo "panel_layer = top"
-      echo "taskbar_mode = single_desktop"
-      echo "taskbar_padding = 2 2 2"
-      echo "taskbar_background_id = 0"
-      echo "task_icon = 1"
-      echo "task_text = 1"
-      echo "task_maximum_size = 200 40"
-      echo "task_padding = 6 2"
-      echo "task_font = sans 10"
-      echo "task_font_color = #ffffff 100"
-      echo "task_active_font_color = #ffffff 100"
-      echo "task_background_id = 0"
-      echo "task_active_background_id = 2"
-      echo "launcher_padding = 4 2 4"
+      echo "strut_policy = none"
+      echo "wm_menu = 1"
+      echo "mouse_effects = 1"
+      echo "button = new"
+      if [ -n "$START_ICON" ]; then echo "button_icon = $START_ICON"; echo "button_text = "
+      else echo "button_text = Apps"; echo "button_font = sans bold 10"; echo "button_font_color = #ffffff 100"; fi
+      echo "button_tooltip = Applications"
+      echo "button_lclick_command = $HOME/.local/bin/emux-startmenu"
+      echo "button_background_id = 3"
+      echo "button_padding = $((6 * S)) $((4 * S)) 0"
+      echo "button_max_icon_size = $((34 * S))"
+      echo "launcher_padding = $((4 * S)) 0 $((6 * S))"
       echo "launcher_background_id = 0"
-      echo "launcher_icon_size = 36"
-      echo "launcher_icon_theme = hicolor"
+      echo "launcher_icon_background_id = 3"
+      echo "launcher_icon_size = $((34 * S))"
+      echo "launcher_tooltip = 1"
       for a in $APPS; do
         case "$a" in
           terminal) echo "launcher_item_app = $HOME/.local/share/applications/emux-terminal.desktop" ;;
@@ -933,18 +1013,109 @@ EOF
           browser) echo "launcher_item_app = $HOME/.local/share/applications/emux-browser.desktop" ;;
         esac
       done
+      echo "taskbar_mode = single_desktop"
+      echo "taskbar_padding = $((6 * S)) 0 $((6 * S))"
+      echo "taskbar_background_id = 0"
+      echo "task_icon = 1"
+      echo "task_text = 0"
+      echo "task_tooltip = 1"
+      echo "task_maximum_size = $((46 * S)) $((46 * S))"
+      echo "task_padding = $((6 * S)) $((5 * S)) 0"
+      echo "task_background_id = 3"
+      echo "task_active_background_id = 2"
+      echo "task_iconified_background_id = 3"
+      echo "mouse_left = toggle_iconify"
+      echo "mouse_middle = close"
+      echo "mouse_right = close"
+      echo "tooltip_font = sans 10"
+      echo "tooltip_font_color = #ffffff 100"
+      echo "tooltip_background_id = 1"
+      echo "tooltip_padding = $((6 * S)) $((4 * S))"
+    } > "$HOME/.config/tint2/tint2rc" 2>/dev/null
+    echo "$APPS s$EMUX_SCALE" > "$STAMP" 2>/dev/null
+  fi
+  # --- v0.2.108: tray bar (full width, bottom layer, tray + clock right) ---
+  if ! emux_keep tint2rc; then
+    S="$EMUX_SCALE"
+    {
+      echo "# EmuX tint2 tray bar (v0.2.108)"
+      echo "rounded = 0"
+      echo "border_width = 0"
+      echo "background_color = #101318 82"
+      echo "border_color = #101318 0"
+      echo "panel_items = FSC"
+      echo "panel_monitor = all"
+      echo "panel_position = bottom center horizontal"
+      echo "panel_size = 100% $((60 * S))"
+      echo "panel_margin = 0 0"
+      echo "panel_padding = $((10 * S)) 0 $((8 * S))"
+      echo "panel_background_id = 1"
+      echo "panel_layer = bottom"
+      echo "strut_policy = follow_size"
+      echo "panel_window_name = emux-tray"
+      echo "wm_menu = 1"
       echo "systray = 1"
-      echo "systray_padding = 2 4 2"
+      echo "systray_padding = $((4 * S)) 0 $((6 * S))"
       echo "systray_background_id = 0"
-      echo "systray_icon_size = 20"
+      echo "systray_icon_size = $((22 * S))"
       echo "time1_format = %H:%M"
       echo "time1_font = sans 11"
       echo "time2_format = %a %d %b"
       echo "time2_font = sans 8"
       echo "clock_font_color = #ffffff 100"
-      echo "clock_padding = 6 0"
-    } > "$HOME/.config/tint2/tint2rc" 2>/dev/null
-    echo "$APPS" > "$STAMP" 2>/dev/null
+      echo "clock_padding = $((6 * S)) 0"
+      echo "clock_tooltip = %A %d %B %Y"
+    } > "$HOME/.config/tint2/emux-tray.tint2rc" 2>/dev/null
+  fi
+  # --- v0.2.108: start menu (jgmenu: searchable app list, opens at the pointer) ---
+  mkdir -p "$HOME/.local/bin" "$HOME/.config/jgmenu" 2>/dev/null
+  cat > "$HOME/.local/bin/emux-startmenu" <<'SMENU'
+#!/bin/sh
+# EmuX start menu (v0.2.108). A second click on the button closes it.
+if command -v jgmenu >/dev/null 2>&1; then
+  pkill -x jgmenu 2>/dev/null && exit 0
+  exec jgmenu --config-file="$HOME/.config/jgmenu/emux-jgmenurc"
+fi
+# The menu package is still installing (or offline): open a terminal instead
+# of doing nothing - right-click on the desktop also lists every app.
+exec x-terminal-emulator 2>/dev/null || exec xterm
+SMENU
+  chmod +x "$HOME/.local/bin/emux-startmenu" 2>/dev/null
+  S="$EMUX_SCALE"
+  {
+    echo "# EmuX jgmenu (v0.2.108)"
+    echo "csv_cmd = apps"
+    echo "tint2_look = 0"
+    echo "position_mode = pointer"
+    echo "stay_alive = 0"
+    echo "menu_width = $((300 * S))"
+    echo "menu_padding_top = $((8 * S))"
+    echo "menu_padding_right = $((6 * S))"
+    echo "menu_padding_bottom = $((8 * S))"
+    echo "menu_padding_left = $((6 * S))"
+    echo "menu_radius = $((10 * S))"
+    echo "menu_border = 1"
+    echo "item_height = $((30 * S))"
+    echo "item_padding_x = $((10 * S))"
+    echo "item_radius = $((6 * S))"
+    echo "icon_size = $((22 * S))"
+    echo "font = Sans 10"
+    echo "color_menu_bg = #1b1f27 96"
+    echo "color_menu_border = #ffffff 14"
+    echo "color_norm_fg = #eeeeee 100"
+    echo "color_sel_bg = #3a6ea5 100"
+    echo "color_sel_fg = #ffffff 100"
+    echo "color_sep_fg = #ffffff 20"
+  } > "$HOME/.config/jgmenu/emux-jgmenurc" 2>/dev/null
+  if ! command -v jgmenu >/dev/null 2>&1 && [ ! -e /tmp/emux_jgmenu_tried ]; then
+    touch /tmp/emux_jgmenu_tried 2>/dev/null
+    if command -v apt-get >/dev/null 2>&1; then
+      echo "emux-x11: installing jgmenu (start menu) in the background" >&2
+      ( DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+          -o DPkg::Lock::Timeout=300 jgmenu >/tmp/emux_jgmenu.log 2>&1 ) </dev/null >/dev/null 2>&1 &
+    elif command -v apk >/dev/null 2>&1; then
+      ( apk add --no-cache jgmenu >/tmp/emux_jgmenu.log 2>&1 ) </dev/null >/dev/null 2>&1 &
+    fi
   fi
   # --- Openbox right-click menu (same apps, plus WM controls) ---
   if [ ! -e "$HOME/.config/openbox/menu.xml" ] || ! grep -q "EmuX v0.2.94" "$HOME/.config/openbox/menu.xml" 2>/dev/null; then
@@ -1167,7 +1338,7 @@ THEME
     echo "emux-x11: rc.xml audit clean ($RCX_EFF binds no Frame/Client/Desktop context)" >&2
   fi
   # --- tint2 refresh: darker bar, bigger icons (rewrite once per stamp) ---
-  if ! emux_keep tint2rc && [ -e "$HOME/.config/tint2/tint2rc" ] && ! grep -q "EmuX tint2 panel (v0.2.54)" "$HOME/.config/tint2/tint2rc" 2>/dev/null; then
+  if ! emux_keep tint2rc && [ -e "$HOME/.config/tint2/tint2rc" ] && ! grep -q "EmuX tint2 panel (v0.2.108)" "$HOME/.config/tint2/tint2rc" 2>/dev/null; then
     cp "$HOME/.config/tint2/tint2rc" "$HOME/.config/tint2/tint2rc.pre-rice" 2>/dev/null
     rm -f "$HOME/.config/tint2/tint2rc" 2>/dev/null
   fi
@@ -1217,7 +1388,14 @@ THEME
       echo "# Run by openbox --startup (see openbox.org/help/Autostart). Every"
       echo "# command must end with & or the ones after it never run."
       echo "(command -v xsetroot >/dev/null 2>&1 && xsetroot -solid \"#20344d\") &"
-      echo "(command -v tint2 >/dev/null 2>&1 && tint2) >/dev/null 2>&1 &"
+      # v0.2.108: dock + tray bar, each with the pidfile start_panels checks -
+      # without them the launcher would start a second dock beside this one.
+      echo "if command -v tint2 >/dev/null 2>&1; then"
+      echo "  tint2 >/tmp/tint2.log 2>&1 </dev/null & echo \$! > /tmp/emux_tint2.pid"
+      echo "  if [ -e \"\$HOME/.config/tint2/emux-tray.tint2rc\" ]; then"
+      echo "    tint2 -c \"\$HOME/.config/tint2/emux-tray.tint2rc\" >/tmp/tint2-tray.log 2>&1 </dev/null & echo \$! > /tmp/emux_tray.pid"
+      echo "  fi"
+      echo "fi"
       echo "if [ -e /tmp/emux_want_picom ] && command -v picom >/dev/null 2>&1; then"
       echo "  (picom -b --backend xrender) >/dev/null 2>&1 &"
       echo "fi"

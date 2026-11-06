@@ -36,13 +36,24 @@
          this number. The multipliers below are that ratio, and the pane badge
          ("LIVE n.n fps  WxH  nKB/s  nms/refresh") shows what the device actually
          achieves, which is the only number worth trusting. -->
+    <!-- v0.2.108: resolution is no longer capped at 1280. Damage bands come
+         from the memory-mapped -fbdir framebuffer, so the screen can match the
+         device. "native2x" renders at the device's own pixels with the guest
+         UI scaled 2x (GDK_SCALE / Xft.dpi / MATE window scaling): the same
+         layout as 1280, twice as sharp. -->
     <string-array name="capture_quality_entries">
-        <item>Sharp — 1280 px (default, unchanged; ~1.5 MB per frame)</item>
-        <item>Balanced — 960 px (~1.8× the frame rate, ~0.8 MB)</item>
-        <item>Fast — 720 px (~3.2× the frame rate, ~0.5 MB)</item>
-        <item>Smooth — 540 px (~5.6× the frame rate, ~0.26 MB; the desktop gets small)</item>
+        <item>Retina — device resolution, UI 2× (sharpest; same size as 1280)</item>
+        <item>Native — device resolution, UI 1× (most workspace, small text)</item>
+        <item>Full HD — 1920 px</item>
+        <item>Sharp — 1280 px (previous default)</item>
+        <item>Balanced — 960 px</item>
+        <item>Fast — 720 px</item>
+        <item>Smooth — 540 px (the desktop gets small)</item>
     </string-array>
     <string-array name="capture_quality_values">
+        <item>native2x</item>
+        <item>native</item>
+        <item>1920</item>
         <item>1280</item>
         <item>960</item>
         <item>720</item>
