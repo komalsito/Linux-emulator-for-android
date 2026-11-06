@@ -2112,6 +2112,22 @@ else
   # v0.2.6: publish the display this session ACTUALLY runs on; emux-capture
   # and the Android control plane read it instead of assuming :0/$2.
   echo "$DN" > /tmp/emux_display_num 2>/dev/null
+  # v0.2.104: TERMINAL-DISPLAY HINT. Field (vc203 screenshot): every X
+  # command run from the Terminal tab died "Can't open display: (null)" -
+  # the app-side sessionEnv pins DISPLAY=:0, the display rotates past :0 on
+  # stale sockets, and (see v0.2.13 below) a bare ":N" cannot reach a
+  # tcp-only server at all - so the pin was wrong twice over and NO
+  # guest-side diagnostic (xdotool / xdpyinfo / wmctrl / GUI launches)
+  # could ever run. Publish the VERIFIED display to login shells: bash -l
+  # sources /etc/profile -> /etc/profile.d/*.sh, so every new Terminal tab
+  # exports the LIVE display. Rewritten at each desktop start; stale when
+  # the desktop is down (harmless - nothing listens either way).
+  DFORM="127.0.0.1:$DN"
+  if [ -e /tmp/.X11-unix/X$DN ]; then DFORM=":$DN"; fi
+  if mkdir -p /etc/profile.d 2>/dev/null; then
+    echo "export DISPLAY=$DFORM" > /etc/profile.d/emux-display.sh 2>/dev/null &&
+      echo "emux-x11: terminal hint -> /etc/profile.d/emux-display.sh (DISPLAY=$DFORM)" >&2
+  fi
   # v0.2.13: a tcp-only server (no unix socket) is NOT reachable as ":N"
   # on this libX11 stack - it does not fall back to tcp. Export the tcp
   # form so openbox/xwd connect first try.

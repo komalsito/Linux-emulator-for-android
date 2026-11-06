@@ -257,8 +257,26 @@ android {
         // /tmp/wm_session.log before the openbox fallback truncates wm.log.
         // Field-CONFIRMED this round: the vc202 routing mask fix works - pad
         // contact events now log [mouse] and reach the v0.2.96 contact model.
-        versionCode = 203
-        versionName = "0.2.103"
+        // v0.2.104 vc204: TERMINAL-DISPLAY HINT (ENV_VERSION 85 re-seed).
+        // Field (vc203 screenshot): every X command from the Terminal tab
+        // died with "Can't open display: (null)". Three stacked causes:
+        //  1. sessionEnv pins DISPLAY=:0 host-side, but the desktop display
+        //     ROTATES on stale-socket occupation (v0.2.5) - the terminal
+        //     pointed at a display nothing served.
+        //  2. the field Xvfb is TCP-ONLY (the -nolisten unix ladder) and
+        //     this libX11 stack does NOT fall back to TCP for a bare ":N"
+        //     (the guest script's own v0.2.13 note) - even a correct ":N"
+        //     could not connect; the guest session code already exports
+        //     127.0.0.1:$DN internally for exactly this reason.
+        //  3. consequence: NO guest-side diagnostic (the xdotool wheel
+        //     test, xdpyinfo, wmctrl, GUI app launches) could ever run.
+        // emux-x11 now publishes the VERIFIED post-rotation display (unix
+        // form when the socket exists, TCP form otherwise) to
+        // /etc/profile.d/emux-display.sh at every desktop start; login
+        // shells (bash -l -> /etc/profile -> profile.d) export it, and the
+        // app-side DISPLAY=:0 stays only as the pre-desktop fallback.
+        versionCode = 204
+        versionName = "0.2.104"
 
         ndk {
             abiFilters += listOf("arm64-v8a", "armeabi-v7a", "x86_64")
