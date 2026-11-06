@@ -954,17 +954,17 @@ EOF
   [ -e "$STAMP" ] && OLD_APPS=$(cat "$STAMP" 2>/dev/null)
   if emux_keep tint2rc; then
     echo "emux-x11: keep-tint2rc marker - the user's panel config is NOT rewritten" >&2
-  elif [ ! -e "$HOME/.config/tint2/tint2rc" ] || [ "$APPS s$EMUX_SCALE" != "$OLD_APPS" ]; then
+  elif [ ! -e "$HOME/.config/tint2/tint2rc" ] || [ "$APPS s$EMUX_SCALE v109" != "$OLD_APPS" ]; then
     if [ -e "$HOME/.config/tint2/tint2rc" ] && ! grep -q "EmuX" "$HOME/.config/tint2/tint2rc" 2>/dev/null; then
       cp "$HOME/.config/tint2/tint2rc" "$HOME/.config/tint2/tint2rc.emux-bak" 2>/dev/null
     fi
     S="$EMUX_SCALE"
     {
-      echo "# EmuX tint2 panel (v0.2.108) - centred dock: start, pinned apps, windows"
+      echo "# EmuX tint2 panel (v0.2.109) - centred dock: start, pinned apps, windows"
       # bg 1: the dock bubble
       echo "rounded = $((12 * S))"
       echo "border_width = 1"
-      echo "background_color = #1b1f27 94"
+      echo "background_color = #1b1f27 100"
       echo "border_color = #ffffff 14"
       # bg 2: active window / pressed
       echo "rounded = $((7 * S))"
@@ -988,7 +988,7 @@ EOF
       echo "panel_padding = $((8 * S)) $((4 * S)) $((6 * S))"
       echo "panel_background_id = 1"
       echo "panel_layer = top"
-      echo "strut_policy = none"
+      echo "strut_policy = follow_size"
       echo "wm_menu = 1"
       echo "mouse_effects = 1"
       echo "button = new"
@@ -1032,26 +1032,30 @@ EOF
       echo "tooltip_background_id = 1"
       echo "tooltip_padding = $((6 * S)) $((4 * S))"
     } > "$HOME/.config/tint2/tint2rc" 2>/dev/null
-    echo "$APPS s$EMUX_SCALE" > "$STAMP" 2>/dev/null
+    echo "$APPS s$EMUX_SCALE v109" > "$STAMP" 2>/dev/null
   fi
   # --- v0.2.108: tray bar (full width, bottom layer, tray + clock right) ---
   if ! emux_keep tint2rc; then
     S="$EMUX_SCALE"
     {
-      echo "# EmuX tint2 tray bar (v0.2.108)"
-      echo "rounded = 0"
-      echo "border_width = 0"
-      echo "background_color = #101318 82"
-      echo "border_color = #101318 0"
-      echo "panel_items = FSC"
+      echo "# EmuX tint2 tray (v0.2.109) - floating pill, bottom right"
+      # v0.2.109: the full-width bar is gone (field: "erase the green bar" -
+      # without a compositor its translucency showed the wallpaper through as
+      # a tinted strip). Tray + clock float as a pill matching the dock.
+      echo "rounded = $((12 * S))"
+      echo "border_width = 1"
+      echo "background_color = #1b1f27 100"
+      echo "border_color = #ffffff 14"
+      echo "panel_items = SC"
       echo "panel_monitor = all"
-      echo "panel_position = bottom center horizontal"
-      echo "panel_size = 100% $((60 * S))"
-      echo "panel_margin = 0 0"
-      echo "panel_padding = $((10 * S)) 0 $((8 * S))"
+      echo "panel_position = bottom right horizontal"
+      echo "panel_size = 30% $((52 * S))"
+      echo "panel_shrink = 1"
+      echo "panel_margin = $((8 * S)) $((4 * S))"
+      echo "panel_padding = $((10 * S)) $((4 * S)) $((8 * S))"
       echo "panel_background_id = 1"
-      echo "panel_layer = bottom"
-      echo "strut_policy = follow_size"
+      echo "panel_layer = top"
+      echo "strut_policy = none"
       echo "panel_window_name = emux-tray"
       echo "wm_menu = 1"
       echo "systray = 1"
@@ -1338,7 +1342,7 @@ THEME
     echo "emux-x11: rc.xml audit clean ($RCX_EFF binds no Frame/Client/Desktop context)" >&2
   fi
   # --- tint2 refresh: darker bar, bigger icons (rewrite once per stamp) ---
-  if ! emux_keep tint2rc && [ -e "$HOME/.config/tint2/tint2rc" ] && ! grep -q "EmuX tint2 panel (v0.2.108)" "$HOME/.config/tint2/tint2rc" 2>/dev/null; then
+  if ! emux_keep tint2rc && [ -e "$HOME/.config/tint2/tint2rc" ] && ! grep -q "EmuX tint2 panel (v0.2.109)" "$HOME/.config/tint2/tint2rc" 2>/dev/null; then
     cp "$HOME/.config/tint2/tint2rc" "$HOME/.config/tint2/tint2rc.pre-rice" 2>/dev/null
     rm -f "$HOME/.config/tint2/tint2rc" 2>/dev/null
   fi

@@ -328,8 +328,19 @@ android {
         //  3. Resolution up to the device's own (Retina = native pixels, UI
         //     2x via Xft.dpi/GDK_SCALE/MATE scaling); healer sweeps read the
         //     validated mapped framebuffer, 1 in 8 still cross-checks the socket.
-        versionCode = 208
-        versionName = "0.2.108"
+        // v0.2.109 vc209: TRUE COLOR + INPUT IDENTITY FIX (ENV_VERSION 90).
+        //  1. 24-bit desktop (default; Settings > Desktop colors): Xvfb depth
+        //     24, XRGB8888 end to end (grab, -fbdir map, mirror, ARGB_8888).
+        //  2. The Huawei settings tier (CodePrefs) finally offers Retina.
+        //  3. Server identity: res-id-base is per CLIENT, so the v0.2.90 guard
+        //     rejected every healthy control plane -> input on the busy capture
+        //     socket / slow agent. Now an atom token interned by the capture.
+        //  4. Button probe (maps + clicks a window: closed open menus) runs once
+        //     per server after 8 s idle instead of after every reconnect.
+        //  5. Taskbar: full-width tinted bar replaced by a floating tray pill;
+        //     dock opaque and reserves the bottom edge.
+        versionCode = 209
+        versionName = "0.2.109"
 
         ndk {
             abiFilters += listOf("arm64-v8a", "armeabi-v7a", "x86_64")

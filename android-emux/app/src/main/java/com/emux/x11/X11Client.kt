@@ -1548,9 +1548,12 @@ class X11Client(
      */
     fun grabRegion565(
         x: Int, y: Int, w: Int, h: Int, timeoutMs: Int, out: ByteArray,
+        // v0.2.109: 4 = deliver XRGB8888 LE (B,G,R,X bytes) for a true-color
+        // session instead of down-converting to 565. 2 keeps the old contract.
+        outBpp: Int = 2,
     ): Int {
         if (rootWindow == 0 || w <= 0 || h <= 0) return -1
-        val n = w * h * 2
+        val n = w * h * outBpp
         if (out.size < n) return -1
         // 16-byte body / 5-unit request — the v0.2.83 wire fix, unchanged.
         val req = ByteBuffer.allocate(16).order(order)
@@ -1586,6 +1589,32 @@ class X11Client(
         if (have < w * h * bpp) { lastGrabError = "short=$have"; return -1 }
         val stride = have / h
         if (stride < w * bpp) { lastGrabError = "stride=$stride"; return -1 }
+        if (outBpp == 4) {
+            // v0.2.109 true color: copy 32-bit rows as-is (a 16-bit server is
+            // expanded instead, so the caller's format never depends on it).
+            var src = 0
+            var dst = 0
+            for (row in 0 until h) {
+                if (bpp == 4) {
+                    System.arraycopy(data, src, out, dst, w * 4)
+                } else {
+                    var o = src
+                    for (cx in 0 until w) {
+                        val v = (data[o].toInt() and 0xFF) or ((data[o + 1].toInt() and 0xFF) shl 8)
+                        val d = dst + cx * 4
+                        out[d] = (((v and 0x1F) * 255) / 31).toByte()
+                        out[d + 1] = ((((v ushr 5) and 0x3F) * 255) / 63).toByte()
+                        out[d + 2] = ((((v ushr 11) and 0x1F) * 255) / 31).toByte()
+                        out[d + 3] = 0
+                        o += 2
+                    }
+                }
+                src += stride
+                dst += w * 4
+            }
+            lastGrabError = ""
+            return n
+        }
         if (bpp == 2 && stride == w * 2) {
             System.arraycopy(data, 0, out, 0, n)     // the field-fast path: pure copy
         } else {

@@ -41,6 +41,16 @@
          device. "native2x" renders at the device's own pixels with the guest
          UI scaled 2x (GDK_SCALE / Xft.dpi / MATE window scaling): the same
          layout as 1280, twice as sharp. -->
+    <!-- v0.2.109: X server depth. 24-bit = XRGB8888 end to end (no gradient
+         banding); 16-bit = RGB565, half the bytes per changed pixel. -->
+    <string-array name="color_depth_entries">
+        <item>True color — 24-bit (smooth gradients, sharpest)</item>
+        <item>High color — 16-bit (half the bytes per frame, faster)</item>
+    </string-array>
+    <string-array name="color_depth_values">
+        <item>24</item>
+        <item>16</item>
+    </string-array>
     <string-array name="capture_quality_entries">
         <item>Retina — device resolution, UI 2× (sharpest; same size as 1280)</item>
         <item>Native — device resolution, UI 1× (most workspace, small text)</item>

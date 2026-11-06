@@ -65,6 +65,14 @@
         app:defaultValue="1280"
         app:useSimpleSummaryProvider="true" />
 
+    <ListPreference
+        app:key="color_depth"
+        app:title="Desktop colors"
+        app:entries="@array/color_depth_entries"
+        app:entryValues="@array/color_depth_values"
+        app:defaultValue="24"
+        app:useSimpleSummaryProvider="true" />
+
     <Preference
         app:key="restart_desktop"
         app:title="Restart desktop now"

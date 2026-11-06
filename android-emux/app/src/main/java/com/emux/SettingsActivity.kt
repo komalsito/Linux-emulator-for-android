@@ -320,6 +320,7 @@ class SettingsActivity : AppCompatActivity() {
                     row("Linux distribution", sp.getString("distro", "alpine") ?: "alpine")
                     row("Desktop", sp.getString("desktop_session", "auto") ?: "auto")
                     row("Root acceleration", if (sp.getBoolean("root_accel", true)) "ON" else "OFF")
+                    row("Desktop colors", (sp.getString("color_depth", "24") ?: "24") + "-bit")
                     row("Desktop capture quality",
                         (sp.getString("capture_quality", "1280") ?: "1280") + " px long side" +
                             qualityPrediction(this@SettingsActivity))
@@ -460,18 +461,31 @@ class SettingsActivity : AppCompatActivity() {
             // v0.2.79: capture quality + the restart that applies it. Mirrors
             // res/xml/preferences.xml, which is the tier that normally runs.
             screen.addPreference(androidx.preference.ListPreference(ctx).apply {
-                key = "capture_quality"; title = "Desktop capture quality (frame rate)"
-                summary = "Lower resolution = fewer bytes per frame = a higher frame rate, at " +
-                    "the cost of softer text. The desktop pane shows the live rate so you can " +
-                    "tune it against your own device. Applies when the desktop next starts." +
-                    qualityPrediction(ctx)
+                // v0.2.109: THIS is the tier the field Huawei runs - v0.2.108
+                // only updated the XML tier, so "Retina" never appeared there.
+                key = "capture_quality"; title = "Desktop resolution"
+                summary = "Retina renders at the real resolution of your screen with everything " +
+                    "scaled 2x - crisp text at the usual size. Applies when the desktop next " +
+                    "starts (Restart desktop now)."
                 entries = arrayOf(
-                    "Sharp — 1280 px (default, unchanged; ~1.5 MB per frame)",
-                    "Balanced — 960 px (~1.8× the frame rate, ~0.8 MB)",
-                    "Fast — 720 px (~3.2× the frame rate, ~0.5 MB)",
-                    "Smooth — 540 px (~5.6× the frame rate, ~0.26 MB; the desktop gets small)")
-                entryValues = arrayOf("1280", "960", "720", "540")
+                    "Retina — device resolution, UI 2× (sharpest; same size as 1280)",
+                    "Native — device resolution, UI 1× (most workspace, small text)",
+                    "Full HD — 1920 px",
+                    "Sharp — 1280 px (previous default)",
+                    "Balanced — 960 px",
+                    "Fast — 720 px",
+                    "Smooth — 540 px (the desktop gets small)")
+                entryValues = arrayOf("native2x", "native", "1920", "1280", "960", "720", "540")
                 setDefaultValue(com.emux.x11.DesktopService.DEFAULT_CAPTURE_LONG_SIDE.toString())
+                summaryProvider = androidx.preference.ListPreference.SimpleSummaryProvider.getInstance()
+            })
+            screen.addPreference(androidx.preference.ListPreference(ctx).apply {
+                key = "color_depth"; title = "Desktop colors"
+                entries = arrayOf("True color — 24-bit (smooth gradients, sharpest)",
+                    "High color — 16-bit (half the bytes per frame, faster)")
+                entryValues = arrayOf("24", "16")
+                setDefaultValue("24")
+                summaryProvider = androidx.preference.ListPreference.SimpleSummaryProvider.getInstance()
             })
             screen.addPreference(androidx.preference.Preference(ctx).apply {
                 key = "restart_desktop"; title = "Restart desktop now"

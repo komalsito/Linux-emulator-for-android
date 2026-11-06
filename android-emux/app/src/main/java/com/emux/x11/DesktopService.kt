@@ -351,6 +351,28 @@ class DesktopService(
     @Volatile private var fbMapBpl = 0
     @Volatile private var fbMapW = 0
     @Volatile private var fbMapH = 0
+    @Volatile private var fbMapB = 2
+    // v0.2.109 SERVER IDENTITY, done right. v0.2.90 compared the setup
+    // reply's resource-id-base between the capture and input connections, but
+    // the X server hands EVERY CLIENT its own base - two connections to the
+    // same Xvfb always differ. So the guard rejected every healthy control
+    // plane ("control plane reached a different X server"), input fell back to
+    // the busy capture socket or the per-event xdotool agent, and taps felt
+    // slow and flaky. Atoms ARE per server: the capture interns a unique name,
+    // the input plane looks it up with only-if-exists - same id = same server,
+    // None = a different one.
+    private val serverToken = "_EMUX_SRV_" + java.lang.Long.toHexString(System.nanoTime())
+    @Volatile private var capTokenAtom = 0
+
+    /** true = [c] is the server the capture streams (or there is nothing to compare). */
+    private fun onCapturedServer(c: X11Client): Boolean {
+        val tok = capTokenAtom
+        if (tok == 0 || nativeClient?.connected != true) return true
+        return runCatching { c.internAtom(serverToken, onlyIfExists = true) }.getOrDefault(tok) == tok
+    }
+
+    /** v0.2.109: bytes per pixel of the live native pipeline (2 = 565, 4 = XRGB). */
+    @Volatile private var pxB = 2
     private var fbCheck: ByteArray? = null
 
     private fun openFbMap(w: Int, h: Int): Boolean {
@@ -365,10 +387,10 @@ class DesktopService(
                 val head = ByteArray(minOf(len, 65_536L).toInt())
                 mb.duplicate().get(head)
                 val hd = xwdHeaderOf(head, head.size) ?: return@runCatching false
-                if (hd.w != w || hd.h != h || hd.bpp != 16 || !hd.le || hd.bpl < w * 2)
+                if (hd.w != w || hd.h != h || hd.bpp != pxB * 8 || !hd.le || hd.bpl < w * pxB)
                     return@runCatching false
                 if (hd.off.toLong() + hd.bpl.toLong() * h > len) return@runCatching false
-                fbMapOff = hd.off; fbMapBpl = hd.bpl; fbMapW = w; fbMapH = h
+                fbMapOff = hd.off; fbMapBpl = hd.bpl; fbMapW = w; fbMapH = h; fbMapB = pxB
                 fbMap = mb
                 true
             }
@@ -383,13 +405,14 @@ class DesktopService(
     private fun fbRegion(x: Int, y: Int, bw: Int, rows: Int, out: ByteArray): Int {
         val mb = fbMap ?: return -1
         if (x < 0 || y < 0 || bw <= 0 || rows <= 0 || x + bw > fbMapW || y + rows > fbMapH) return -1
-        val n = bw * rows * 2
+        val b = fbMapB
+        val n = bw * rows * b
         if (out.size < n) return -1
         return try {
             val d = mb.duplicate()
             for (r in 0 until rows) {
-                d.position(fbMapOff + (y + r) * fbMapBpl + x * 2)
-                d.get(out, r * bw * 2, bw * 2)
+                d.position(fbMapOff + (y + r) * fbMapBpl + x * b)
+                d.get(out, r * bw * b, bw * b)
             }
             n
         } catch (t: Throwable) {
@@ -460,6 +483,15 @@ class DesktopService(
                     // pipe, and paint each band the moment it lands. The
                     // pane goes live progressively instead of never.
                     val w = c.screenWidth; val h = c.screenHeight
+                    // v0.2.109 TRUE COLOR: the pipeline carries the server's own
+                    // pixels end to end - 2 bytes (RGB565) on a depth-16 screen,
+                    // 4 bytes (XRGB8888) on depth 24. Everything below sizes
+                    // its buffers by this, never by a literal 2.
+                    val pB = if (c.depth >= 24) 4 else 2
+                    pxB = pB
+                    // v0.2.109: stamp THIS server with an atom only it knows,
+                    // so the input plane can prove it reached the same one.
+                    capTokenAtom = runCatching { c.internAtom(serverToken) }.getOrDefault(0)
                     // v0.2.80 FIELD FIX ("capture only goes up to 1 fps" while
                     // the badge still read 1280x...): the X screen size is fixed
                     // when Xvfb starts, so a quality change lands ONLY via a
@@ -490,23 +522,23 @@ class DesktopService(
                     // and go through the band-diff painter - half the memory of
                     // the old IntArray bandBuf, and unchanged rows are never
                     // converted nor uploaded at all.
-                    var bandBytes = ByteArray(w * bandRows * 2)
+                    var bandBytes = ByteArray(w * bandRows * pB)
                     fun setBands(r: Int) {
                         bandRows = r.coerceIn(4, h)
                         nativeBandRows = bandRows
-                        if (bandBytes.size < w * bandRows * 2) bandBytes = ByteArray(w * bandRows * 2)
+                        if (bandBytes.size < w * bandRows * pB) bandBytes = ByteArray(w * bandRows * pB)
                     }
                     run {
                         val p0 = System.currentTimeMillis()
-                        val probeBytes = ByteArray(w * 16 * 2)
-                        val probeN = runCatching { c.grabRegion565(0, 0, w, 16, 10_000, probeBytes) }.getOrDefault(-1)
+                        val probeBytes = ByteArray(w * 16 * pB)
+                        val probeN = runCatching { c.grabRegion565(0, 0, w, 16, 10_000, probeBytes, pB) }.getOrDefault(-1)
                         val pms = (System.currentTimeMillis() - p0).coerceAtLeast(1)
                         if (probeN > 0) {
                             nativeProofAtMs = System.currentTimeMillis()
                             lastSourceProofAtMs = nativeProofAtMs
-                            nativeKbPerS = (w * 16 * 2) / pms
+                            nativeKbPerS = (w * 16 * pB) / pms
                             kbEwma = nativeKbPerS
-                            setBands(((nativeKbPerS * 1024 * 6 / 5) / (w * 2)).toInt().coerceIn(8, h))
+                            setBands(((nativeKbPerS * 1024 * 6 / 5) / (w * pB)).toInt().coerceIn(8, h))
                             noteInfo("native probe on :$displayNum: ${w}x16 in ${pms}ms -> ~${nativeKbPerS}KB/s -> band ${bandRows} rows of $h")
                         } else {
                             setBands(8)
@@ -543,7 +575,7 @@ class DesktopService(
                     val fbOk = openFbMap(w, h)
                     noteInfo(if (fbOk)
                         "native capture on :$displayNum: -fbdir framebuffer MAPPED " +
-                            "(${w}x${h}x16, bpl=$fbMapBpl) - damage bands read from memory, not the socket"
+                            "(${w}x${h}x${pB * 8}, bpl=$fbMapBpl) - damage bands read from memory, not the socket"
                         else "native capture on :$displayNum: -fbdir map unavailable - damage bands via GetImage")
                     var fbSuspect = 0
                     // v0.2.108: once two socket sweeps in a row AGREE with the
@@ -557,7 +589,7 @@ class DesktopService(
                     // instead of vanishing behind one giant reply.
                     val chunkRows = minOf(partCap, 256)
                     // v0.2.84: chunks land raw (565) for the band-diff painter.
-                    val partBytes = ByteArray(w * chunkRows * 2)
+                    val partBytes = ByteArray(w * chunkRows * pB)
                     // v0.2.83 PERSISTENT DIRTY BANDS - the replacement for the
                     // v0.2.82 union rectangle. That design merged ALL damage
                     // since the last tick into ONE rect, and whenever the rect
@@ -614,7 +646,7 @@ class DesktopService(
                     var ticks = 149
                     while (isActive && state.value != State.IDLE && state.value != State.ERROR) {
                         val t0 = System.currentTimeMillis()
-                        ensureBitmap(w, h)
+                        ensureBitmap(w, h, pB == 4)
                         // v0.2.83: once native has proven itself, retire the
                         // guest mailbox pipelines - co-running them is CPU
                         // contention against the very grabs that make the
@@ -677,7 +709,7 @@ class DesktopService(
                                         val gt = System.currentTimeMillis()
                                         val n = fbRegion(b[0], by, bw, rows, partBytes).takeIf { it > 0 }
                                             ?: runCatching {
-                                                c.grabRegion565(b[0], by, bw, rows, bandTimeout, partBytes)
+                                                c.grabRegion565(b[0], by, bw, rows, bandTimeout, partBytes, pB)
                                             }.getOrDefault(-1)
                                         if (n <= 0) {
                                             addDirty(b[0], by, b[0] + bw, b[3])  // keep the rest pending
@@ -694,13 +726,13 @@ class DesktopService(
                                         // change (a cursor blink back to the
                                         // same pixels, an expose of unchanged
                                         // wallpaper - all free now).
-                                        if (diffUpload(b[0], by, bw, rows, partBytes, 0, w, h) > 0) {
+                                        if (diffUpload(b[0], by, bw, rows, partBytes, 0, w, h, pB) > 0) {
                                             frameId++
                                             onUiInvalidated()      // progressive paint per chunk
                                             painted = true
                                         }
                                         val bms = (System.currentTimeMillis() - gt).coerceAtLeast(1)
-                                        val bkb = (bw.toLong() * rows * 2) / bms
+                                        val bkb = (bw.toLong() * rows * pB) / bms
                                         kbEwma = if (kbEwma <= 0) bkb else (kbEwma * 3 + bkb) / 4
                                         if (nativeKbPerS <= 0) nativeKbPerS = kbEwma
                                         by += rows
@@ -772,7 +804,7 @@ class DesktopService(
                             val rows = minOf(bandRows, h - y)
                             val tb = System.currentTimeMillis()
                             val n = (if (fbSweep) fbRegion(0, y, w, rows, bandBytes).takeIf { it > 0 } else null)
-                                ?: runCatching { c.grabRegion565(0, y, w, rows, bandTimeout, bandBytes) }.getOrDefault(-1)
+                                ?: runCatching { c.grabRegion565(0, y, w, rows, bandTimeout, bandBytes, pB) }.getOrDefault(-1)
                             if (n <= 0) { ok = false; break }
                             // v0.2.106: the socket sweep is the ground truth -
                             // check the mapped framebuffer against it, band by
@@ -780,10 +812,10 @@ class DesktopService(
                             // (stray Xvfb) or a dead inode disagrees on nearly
                             // every band and gets dropped below.
                             if (fbMap != null && !fbSweep) {
-                                val chk = fbCheckBuf(w * rows * 2)
+                                val chk = fbCheckBuf(w * rows * pB)
                                 if (fbRegion(0, y, w, rows, chk) > 0) {
                                     fbChecked++
-                                    if (!regionEquals(chk, bandBytes, w * rows * 2)) fbMismatch++
+                                    if (!regionEquals(chk, bandBytes, w * rows * pB)) fbMismatch++
                                 }
                             }
                             nativeProofAtMs = System.currentTimeMillis()
@@ -793,14 +825,14 @@ class DesktopService(
                             // field screenshot did: probe failed, no sweep ever
                             // completed, both readings -1).
                             val bms = (System.currentTimeMillis() - tb).coerceAtLeast(1)
-                            val bkb = (w * rows * 2) / bms
+                            val bkb = (w * rows * pB) / bms
                             kbEwma = if (kbEwma <= 0) bkb else (kbEwma * 3 + bkb) / 4
                             if (nativeKbPerS <= 0) nativeKbPerS = kbEwma
                             // v0.2.84: the healer sweep is a DIFF now - an idle
                             // desktop costs the grab plus a memcmp per band and
                             // uploads nothing, invalidates nothing, and does not
                             // dent the LIVE fps reading with fake frames.
-                            if (diffUpload(0, y, w, rows, bandBytes, 0, w, h) > 0) {
+                            if (diffUpload(0, y, w, rows, bandBytes, 0, w, h, pB) > 0) {
                                 sweepUploaded++
                                 frameId++
                                 lastAnyFrameAtMs = System.currentTimeMillis()
@@ -862,7 +894,7 @@ class DesktopService(
                         // than the current bands assume - never regrow on one.
                         if (!capped && bandRows < h) {
                             val target = if (nativeKbPerS > 0)
-                                ((nativeKbPerS * 1024 * 6 / 5) / (w * 2)).toInt().coerceIn(8, h)
+                                ((nativeKbPerS * 1024 * 6 / 5) / (w * pB)).toInt().coerceIn(8, h)
                             else bandRows * 2
                             if (target > bandRows) setBands(minOf(target, bandRows * 2))
                         }
@@ -1002,6 +1034,12 @@ class DesktopService(
         else -> (q.toIntOrNull() ?: DEFAULT_CAPTURE_LONG_SIDE).coerceIn(480, 3840)
     }
 
+    /** v0.2.109: X screen depth - 24 (true color, default) or 16. */
+    private fun colorDepth(): Int = runCatching {
+        androidx.preference.PreferenceManager.getDefaultSharedPreferences(ctx)
+            .getString("color_depth", "24")
+    }.getOrNull()?.toIntOrNull()?.takeIf { it == 16 || it == 24 } ?: 24
+
     /** v0.2.108: guest UI scale factor (GDK_SCALE / Xft.dpi / MATE scaling). */
     private fun uiScale(): Int = if (captureQualityPref() == "native2x") 2 else 1
 
@@ -1049,7 +1087,7 @@ class DesktopService(
             // already speaks. Guest scripts untouched (RES passes through).
             // v0.2.108: budget raised from 2x 720p to 4K-class - the mapped
             // framebuffer path no longer pays per pixel on the socket.
-            if (px <= 3840 * 2400) return if (a >= 1f) "${longSide}x${shortSide}x16" else "${shortSide}x${longSide}x16"
+            if (px <= 3840 * 2400) return if (a >= 1f) "${longSide}x${shortSide}x${colorDepth()}" else "${shortSide}x${longSide}x${colorDepth()}"
         }
         val cfg = ctx.resources.configuration
         // At the 1280 default every number below is bit-identical to the
@@ -1058,13 +1096,13 @@ class DesktopService(
         // a squarer one - the v0.2.66 letterbox bug, one level down.
         val longSide = captureLongSide()
         val phoneShort = (longSide * 720 / 1280) / 2 * 2
-        if (cfg.smallestScreenWidthDp in 1 until 600) return "${longSide}x${phoneShort}x16"
+        if (cfg.smallestScreenWidthDp in 1 until 600) return "${longSide}x${phoneShort}x${colorDepth()}"
         val dm = ctx.resources.displayMetrics
         val w = dm.widthPixels; val h = dm.heightPixels
-        if (w <= 0 || h <= 0) return "${phoneShort}x${longSide}x16"
+        if (w <= 0 || h <= 0) return "${phoneShort}x${longSide}x${colorDepth()}"
         val shortSide = ((longSide * min(w, h) / max(w, h))
             .coerceIn(longSide * 480 / 1280, longSide) / 2 * 2)
-        return if (w >= h) "${longSide}x${shortSide}x16" else "${shortSide}x${longSide}x16"
+        return if (w >= h) "${longSide}x${shortSide}x${colorDepth()}" else "${shortSide}x${longSide}x${colorDepth()}"
     }
 
     // ------------------------------------------------------------------ start
@@ -1878,16 +1916,19 @@ class DesktopService(
                         // plane base, the input plane is on a wrong server -
                         // recycle it and re-aim at the one the user sees.
                         val ncap = nativeClient
-                        if (ncap != null && ncap.connected && c.resIdBase != ncap.resIdBase) {
-                            displayNum = ncap.displayNum
-                            captureDisplay = ncap.displayNum
-                            recycleControlPlane(
-                                "input plane is on a different X server than the streamed one " +
-                                    "(input res-id 0x" + Integer.toHexString(c.resIdBase) +
-                                    ", capture 0x" + Integer.toHexString(ncap.resIdBase) +
-                                    " on :" + ncap.displayNum + ") - reconnecting to the capture server")
-                            continue
-                        }
+                        if (ncap != null && ncap.connected && !onCapturedServer(c)) {
+                            // two strikes: one failed lookup under load is not proof
+                            identityMiss++
+                            if (identityMiss >= 2) {
+                                identityMiss = 0
+                                displayNum = ncap.displayNum
+                                captureDisplay = ncap.displayNum
+                                recycleControlPlane(
+                                    "input plane is on a different X server than the streamed one " +
+                                        "(server token missing on :" + ncap.displayNum + ") - reconnecting")
+                                continue
+                            }
+                        } else identityMiss = 0
                         if (cap != null && cap != displayNum) {
                             displayNum = cap
                             recycleControlPlane(
@@ -2654,12 +2695,11 @@ class DesktopService(
                 // the deadline loop re-aims and retries; displayNum now
                 // follows the capture client, so the retry lands right.
                 nativeClient?.takeIf { it.connected }?.let { nc ->
-                    if (c.resIdBase != nc.resIdBase) {
+                    if (!onCapturedServer(c)) {
                         runCatching { c.close() }
                         throw java.io.IOException(
-                            "control plane reached a different X server (res-id 0x" +
-                                Integer.toHexString(c.resIdBase) + ") than the captured one (0x" +
-                                Integer.toHexString(nc.resIdBase) + " on :" + nc.displayNum + ")")
+                            "control plane reached a different X server than the captured one (:" +
+                                nc.displayNum + ") - server token not found")
                     }
                 }
                 x11 = c
@@ -2858,10 +2898,14 @@ class DesktopService(
         }
     }
 
-    private fun ensureBitmap(w: Int, h: Int) {
+    private fun ensureBitmap(w: Int, h: Int, trueColor: Boolean = pxB == 4) {
+        // v0.2.109: ARGB_8888 for a true-color session - a 24-bit desktop
+        // squeezed into an RGB_565 bitmap would band exactly like before.
+        val cfg = if (trueColor) Bitmap.Config.ARGB_8888 else Bitmap.Config.RGB_565
         synchronized(frameLock) {
-            if (reusable == null || reusable!!.width != w || reusable!!.height != h) {
-                reusable = Bitmap.createBitmap(w, h, Bitmap.Config.RGB_565)
+            if (reusable == null || reusable!!.width != w || reusable!!.height != h || reusable!!.config != cfg) {
+                reusable = Bitmap.createBitmap(w, h, cfg)
+                prevRaw = null   // a new bitmap is blank: the mirror must not claim otherwise
             }
             currentFrame = reusable
         }
@@ -2895,10 +2939,10 @@ class DesktopService(
     private var prevH = 0
     private var diffPx: IntArray? = null
 
-    private fun ensurePrevRaw(w: Int, h: Int): ByteArray {
+    private fun ensurePrevRaw(w: Int, h: Int, b: Int = 2): ByteArray {
         var p = prevRaw
-        if (p == null || prevW != w || prevH != h || p.size != w * h * 2) {
-            p = ByteArray(w * h * 2)
+        if (p == null || prevW != w || prevH != h || p.size != w * h * b) {
+            p = ByteArray(w * h * b)
             prevRaw = p; prevW = w; prevH = h
         }
         return p
@@ -2916,9 +2960,9 @@ class DesktopService(
      *         to what is already on screen and NOTHING was touched.
      */
     private fun diffUpload(fx: Int, fy: Int, w: Int, rows: Int,
-                           raw: ByteArray, off0: Int, bmpW: Int, bmpH: Int): Int {
+                           raw: ByteArray, off0: Int, bmpW: Int, bmpH: Int, pb: Int = 2): Int {
         val bmp = currentFrame ?: return 0
-        val prev = ensurePrevRaw(bmpW, bmpH)
+        val prev = ensurePrevRaw(bmpW, bmpH, pb)
         var px = diffPx
         val need = bmpW * RAW_BAND
         if (px == null || px.size < need) { px = IntArray(need); diffPx = px }
@@ -2928,9 +2972,9 @@ class DesktopService(
         synchronized(frameLock) {
             while (r < rows) {
                 val sliceRows = minOf(RAW_BAND, rows - r)
-                val len = sliceRows * w * 2
-                val ro = off0 + r * w * 2
-                val po = (fy + r) * bmpW * 2 + fx * 2
+                val len = sliceRows * w * pb
+                val ro = off0 + r * w * pb
+                val po = (fy + r) * bmpW * pb + fx * pb
                 // v0.2.106 STALE-PIXEL FIX: compare ROW BY ROW. The mirror's
                 // stride is the screen width; a damage band narrower than the
                 // screen has a stride of its own width. The old contiguous
@@ -2940,12 +2984,12 @@ class DesktopService(
                 // a menu item highlight) over flat background could compare
                 // "identical", skip the upload AND skip the mirror update, and
                 // that strip then stayed stale on screen until a full repaint.
-                val rowLen = w * 2
+                val rowLen = w * pb
                 var changed = false
                 var rr0 = 0
                 while (rr0 < sliceRows && !changed) {
                     val a = ro + rr0 * rowLen
-                    val b = po + rr0 * bmpW * 2
+                    val b = po + rr0 * bmpW * pb
                     var i = 0
                     while (i < rowLen && raw[a + i] == prev[b + i]) i++
                     if (i < rowLen) changed = true
@@ -2953,16 +2997,27 @@ class DesktopService(
                 }
                 if (changed) {
                     var j = 0; var k = 0
-                    while (k < len) {
-                        val v = (raw[ro + k].toInt() and 0xFF) or
-                            ((raw[ro + k + 1].toInt() and 0xFF) shl 8)
-                        px[j++] = lut[v]
-                        k += 2
+                    if (pb == 4) {
+                        // XRGB8888 LE: bytes B,G,R,X
+                        while (k < len) {
+                            px[j++] = -0x1000000 or
+                                ((raw[ro + k + 2].toInt() and 0xFF) shl 16) or
+                                ((raw[ro + k + 1].toInt() and 0xFF) shl 8) or
+                                (raw[ro + k].toInt() and 0xFF)
+                            k += 4
+                        }
+                    } else {
+                        while (k < len) {
+                            val v = (raw[ro + k].toInt() and 0xFF) or
+                                ((raw[ro + k + 1].toInt() and 0xFF) shl 8)
+                            px[j++] = lut[v]
+                            k += 2
+                        }
                     }
                     bmp.setPixels(px, 0, w, fx, fy + r, w, sliceRows)
                     for (rr in 0 until sliceRows) {
-                        System.arraycopy(raw, ro + rr * w * 2,
-                            prev, po + rr * bmpW * 2, w * 2)
+                        System.arraycopy(raw, ro + rr * w * pb,
+                            prev, po + rr * bmpW * pb, w * pb)
                     }
                     uploaded++
                 } else diffSkips++
@@ -3699,6 +3754,7 @@ class DesktopService(
     // inputLine gate opens), and reconnect + re-proof in the background.
     @Volatile private var ctrlWriteFails = 0
     @Volatile private var keepaliveMiss = 0
+    @Volatile private var identityMiss = 0   // v0.2.109: consecutive server-token misses
     /** v0.2.92: failed control-plane reconnects since the last success (badge: rxfail=). */
     @Volatile private var reconnectFails = 0
     fun reconnectFailCount(): Int = reconnectFails
@@ -4101,9 +4157,38 @@ class DesktopService(
         // daemon thread instead: same anti-race guarantee (never probe
         // under live input), but the probe provably runs at the first
         // >=1.5 s pause.
-        if (userActive(1_500)) inputProof = "motion-ok"   // parked, not dead
-        while (userActive(1_500) && c.connected) runCatching { Thread.sleep(250) }
+        // v0.2.109 FIELD ("the start menu closes by itself if I take too
+        // long"): the probe maps a window and CLICKS it, which dismisses any
+        // open menu or popup. It ran at the first 1.5 s pause of EVERY new
+        // control-plane connection - and the broken identity guard recycled
+        // that connection constantly. Now: once per X server (the verdict is
+        // a property of the server + WM, not of a socket), and only after
+        // 8 s without input.
+        val tok = capTokenAtom
+        if (tok != 0 && probedToken == tok) {
+            buttonDelivered = probedDelivered
+            btnMode = probedBtnMode
+            inputProof = probedProof
+            return
+        }
+        if (userActive(8_000)) inputProof = "motion-ok"   // parked, not dead
+        while (userActive(8_000) && c.connected) runCatching { Thread.sleep(250) }
         if (!c.connected) return
+        try { buttonProofAndEscalateOnce(c) } finally {
+            probedToken = tok
+            probedDelivered = buttonDelivered
+            probedBtnMode = btnMode
+            probedProof = inputProof
+        }
+    }
+
+    // v0.2.109: last button verdict, keyed by the server token.
+    @Volatile private var probedToken = 0
+    @Volatile private var probedDelivered: Boolean? = null
+    @Volatile private var probedBtnMode = "-"
+    @Volatile private var probedProof = "pending"
+
+    private fun buttonProofAndEscalateOnce(c: X11Client) {
         var r = runCatching { c.probeButtonDelivery() }.getOrNull()
         if (r == null) {
             inputProof = "btn-probe-error"
