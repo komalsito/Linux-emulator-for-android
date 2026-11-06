@@ -308,8 +308,16 @@ android {
         //  5. Status line: the errorText collector was unreachable after an
         //     endless StateFlow.collect, and each Desktop-tab tap leaked
         //     another collector.
-        versionCode = 206
-        versionName = "0.2.106"
+        // v0.2.107 vc207: MATE THAT WORKS UNDER PROOT (ENV_VERSION 88 re-seed).
+        // Field vc206 ps/wm.log: TWO mate-session trees (start_wm has four call
+        // sites and never checked for a running WM), marco never running, and
+        // caja crash-looping on /proc/self/mountinfo (EPERM under proot).
+        // start_wm is idempotent; MATE runs with Openbox as its WM (the
+        // click-safe rc.xml) and without caja in its required set; the
+        // background comes from mate-settings-daemon. Terminal: app banners
+        // are CRLF-normalised (the "staircase" self-test block).
+        versionCode = 207
+        versionName = "0.2.107"
 
         ndk {
             abiFilters += listOf("arm64-v8a", "armeabi-v7a", "x86_64")

@@ -578,7 +578,7 @@ class MainActivity : AppCompatActivity() {
                             // Now dead sessions are skipped and a replacement is
                             // spawned; pumpOutput prints the exit notice instead.
                             if (list.any { it.id < 9000 && it.state.value == com.emux.terminal.TerminalSession.State.DEAD }) {
-                                view.feed("\n[emux] previous shell exited — starting a new one…\n".toByteArray())
+                                view.feedText("\n[emux] previous shell exited — starting a new one…\n")
                             }
                             TerminalService.startSession(this@MainActivity, "bash -l")
                             return@collect
@@ -599,7 +599,7 @@ class MainActivity : AppCompatActivity() {
                         // Candidates resets it now that script(1) may exist.
                         com.emux.terminal.TtyWrap.setDistroCandidates(this@MainActivity)
                         if (com.emux.terminal.TtyWrap.available() && ptyUpgradedSessions.add(s.id)) {
-                            view.feed("\n[emux] PTY engine available now — restarting this shell with a real PTY…\n".toByteArray())
+                            view.feedText("\n[emux] PTY engine available now — restarting this shell with a real PTY…\n")
                             s.restart()
                         } else if (!com.emux.terminal.TtyWrap.available() &&
                             s.canGuestPty() && ptyGuestUpgraded.add(s.id)) {
@@ -610,7 +610,7 @@ class MainActivity : AppCompatActivity() {
                             // (pty=false, no echo, staircased output) even
                             // though the guest PTY engine (script inside proot)
                             // was available. Upgrade through it explicitly.
-                            view.feed("\n[emux] guest PTY (script inside proot) available — restarting this shell with a real PTY…\n".toByteArray())
+                            view.feedText("\n[emux] guest PTY (script inside proot) available — restarting this shell with a real PTY…\n")
                             s.upgradeToGuestPtyIfAvailable()
                         }
                     }
@@ -645,9 +645,9 @@ class MainActivity : AppCompatActivity() {
                     // v0.1.37: guest-side PTY (script(1) inside proot) counts
                     // as a real PTY even though no host wrapper probes OK.
                     if (!tty.available() && !s.ptyWrapped) {
-                        if (ptyWarned.add(s.id)) view.feed("\n[emux] WARNING: no PTY wrapper found on this ROM - typing will NOT echo and commands may hang. Install busybox or root the device.\n".toByteArray())
+                        if (ptyWarned.add(s.id)) view.feedText("\n[emux] WARNING: no PTY wrapper found on this ROM - typing will NOT echo and commands may hang. Install busybox or root the device.\n")
                     } else if (!tty.hasCtty && !s.ptyWrapped) {
-                        view.feed("\n[emux] NOTE: PTY relay active but WITHOUT controlling terminal (toybox script). Ctrl-Z / background jobs may misbehave; normal typing works.\n".toByteArray())
+                        view.feedText("\n[emux] NOTE: PTY relay active but WITHOUT controlling terminal (toybox script). Ctrl-Z / background jobs may misbehave; normal typing works.\n")
                     }
                 }
             }
@@ -710,7 +710,7 @@ class MainActivity : AppCompatActivity() {
                 } else {
                     ""
                 }
-                if (line.isNotEmpty()) view.feed(line.toByteArray())
+                if (line.isNotEmpty()) view.feedText(line)
                 // v0.1.24 DIAGNOSTIC PROBE: every prior fix round was blind —
                 // we could not tell whether the distro shell actually starts,
                 // whether the musl loader execs, or which layer fails. Run one
@@ -767,7 +767,7 @@ class MainActivity : AppCompatActivity() {
                             .forEach { append("[emux]   ").append(it).append("\n") }
                         append("[emux] ------------------------------\n")
                     }
-                    kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) { view.feed(summary.toByteArray()) }
+                    kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Main) { view.feedText(summary) }
                 }
             }
         }
@@ -807,7 +807,7 @@ class MainActivity : AppCompatActivity() {
             repeatOnLifecycle(Lifecycle.State.STARTED) {
                 launch {
                     if (s.state.value == com.emux.terminal.TerminalSession.State.DEAD) {
-                        view.feed("[emux] session #${s.id} already exited (code ${s.exitCode}) — starting a new shell…\n".toByteArray())
+                        view.feedText("[emux] session #${s.id} already exited (code ${s.exitCode}) — starting a new shell…\n")
                     } else {
                         s.state.collect { st ->
                             if (st == com.emux.terminal.TerminalSession.State.DEAD) {
@@ -817,7 +817,7 @@ class MainActivity : AppCompatActivity() {
                                 // `exit` just ends the session visibly.
                                 val why = if (s.exitedCleanly) "exited cleanly"
                                     else "exited abnormally (code ${s.exitCode})"
-                                view.feed("\n[emux] process $why — ${if (s.exitedCleanly) "press ENTER or tap Install for a new shell." else "restarting…" }\n".toByteArray())
+                                view.feedText("\n[emux] process $why — ${if (s.exitedCleanly) "press ENTER or tap Install for a new shell." else "restarting…" }\n")
                             }
                         }
                     }
@@ -1191,3 +1191,10 @@ class MainActivity : AppCompatActivity() {
         super.onStop()
     }
 }
+
+/** v0.2.107: app-generated terminal text. These banners used bare "\n", which
+ *  a VT terminal treats as line-feed WITHOUT carriage return, so every line
+ *  started where the previous one ended (the "staircase" self-test block).
+ *  Normalise to CRLF here instead of trusting each call site. */
+private fun com.emux.terminal.VtTerminalView.feedText(text: String) =
+    feed(text.replace("\r\n", "\n").replace("\n", "\r\n").toByteArray())

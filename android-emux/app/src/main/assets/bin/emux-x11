@@ -488,6 +488,17 @@ start_wm() {
     [ -x "$c" ] && { WM_BIN="$c"; break; }
   done
   [ -n "$WM_BIN" ] || return 1
+  # v0.2.107 IDEMPOTENT LAUNCH. start_wm has four call sites (first launch,
+  # REST pass, display self-heal, the main path). A second plain `openbox`
+  # just exits ("a window manager is already running"), so this never showed -
+  # until full sessions: the field ps had TWO mate-session trees (two panels,
+  # two settings daemons, two session buses) fighting over one display. The
+  # self-heal path clears /tmp/emux_wm_launched on purpose, so a WM stuck on a
+  # dead display still gets relaunched.
+  if [ -e /tmp/emux_wm_launched ] && running0 "$(basename "$WM_BIN")"; then
+    echo "emux-x11: $(basename "$WM_BIN") already running - not starting a second one" >&2
+    return 0
+  fi
   # Source the Openbox environment scripts first, exactly as openbox-session does.
   for E in /etc/xdg/openbox/environment "$HOME/.config/openbox/environment"; do
     [ -r "$E" ] && . "$E" 2>/dev/null
@@ -540,7 +551,37 @@ start_wm() {
         gsettings set org.mate.screensaver idle-activation-enabled false 2>/dev/null
         gsettings set org.mate.screensaver lock-enabled false 2>/dev/null
         gsettings set org.mate.power-manager sleep-display-ac 0 2>/dev/null
-        echo "emux-x11: MATE tuned for Xvfb (compositor off, screensaver/lock off)" >&2
+        # v0.2.107 FIELD (vc206 ps + wm.log): marco never ran at all - no
+        # window manager, so no decorations, focus or click-to-raise, and an
+        # undecorated "Untitled window" over everything - and caja crash-looped
+        # (a new pid every ~250 ms: GIO cannot read /proc/self/mountinfo under
+        # proot on this ROM), leaving the root black while mate-session kept
+        # respawning it. So MATE runs here with:
+        #   - Openbox as its window manager: the WM this launcher has already
+        #     made click-safe (write_rc_xml) and that works on this device;
+        #   - no file manager in the REQUIRED set, so a crashing caja can no
+        #     longer loop; Files still opens caja as a normal window on demand;
+        #   - the background drawn by mate-settings-daemon instead of caja.
+        gsettings set org.mate.session required-components-list "['windowmanager', 'panel']" 2>/dev/null
+        gsettings set org.mate.background show-desktop-icons false 2>/dev/null
+        gsettings set org.mate.background draw-background true 2>/dev/null
+        if [ -x /usr/bin/openbox ]; then
+          write_rc_xml
+          mkdir -p /usr/share/applications 2>/dev/null
+          cat > /usr/share/applications/emux-openbox.desktop <<'OBDESK'
+[Desktop Entry]
+Type=Application
+Name=Openbox (EmuX)
+Exec=openbox
+NoDisplay=true
+X-GNOME-WMName=Openbox
+X-GNOME-Autostart-Phase=WindowManager
+X-MATE-Autostart-Phase=WindowManager
+X-MATE-AutoRestart=true
+OBDESK
+          gsettings set org.mate.session.required-components windowmanager 'emux-openbox' 2>/dev/null
+        fi
+        echo "emux-x11: MATE tuned for Xvfb (openbox WM, no required caja, compositor/screensaver/lock off)" >&2
       fi
       echo "emux-x11: launching full session $WM_BIN (bus: ${DBUS_SESSION_BUS_ADDRESS:-none})" >&2
       nohup "$WM_BIN" >/tmp/wm.log 2>&1 </dev/null & ;;
