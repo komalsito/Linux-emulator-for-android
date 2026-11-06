@@ -1919,9 +1919,11 @@ class DesktopView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attrs) 
         // they can never become a left-drag either.
         if (android.os.Build.VERSION.SDK_INT >= 34) {
             when (event.classification) {
-                MotionEvent.CLASSIFICATION_TWO_FINGER_SWIPE -> return onTouchpadScroll(event)
-                MotionEvent.CLASSIFICATION_MULTI_FINGER_SWIPE,
-                MotionEvent.CLASSIFICATION_PINCH -> {
+                // literals: CLASSIFICATION_MULTI_FINGER_SWIPE (4) is not in the
+                // compileSdk 34 android.jar, so name none of them here
+                3 /* TWO_FINGER_SWIPE */ -> return onTouchpadScroll(event)
+                4 /* MULTI_FINGER_SWIPE */,
+                5 /* PINCH */ -> {
                     noteEventShape("touchpad-swallow", event)
                     return true
                 }
