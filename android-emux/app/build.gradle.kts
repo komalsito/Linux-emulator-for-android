@@ -233,8 +233,21 @@ android {
         // session owns the desktop, and falls back to openbox if the session
         // cannot stand up under proot+Xvfb (GNOME Shell software-renders -
         // Xfce is the realistic choice). No input changes this round.
-        versionCode = 201
-        versionName = "0.2.101"
+        // v0.2.102 vc202: THE SCROLL FIX + DESKTOP CHOICES.
+        // Field log (vc200) proved the v0.2.99/v0.2.100 device-first rule
+        // NEVER FIRED ONCE: its touchscreen veto was '(sources and
+        // SOURCE_TOUCHSCREEN) == 0' - a partial-bit test; SOURCE_TOUCHSCREEN
+        // is 0x1002 and every pointer device carries the 0x2 pointer-class
+        // bit, so the test failed for the pad (sources 0x1002313, src=0x2002
+        // SOURCE_MOUSE, tt=FINGER) and its two-finger scroll kept routing to
+        // the finger machine as a drag. Both sites now demand the FULL mask
+        // (supportsSource semantics) - pad contact/scroll reaches the v0.2.96
+        // contact model at last. Sessions: emux-x11 exports
+        // XDG_SESSION_TYPE=x11 (GNOME/mutter defaulted to Wayland and died on
+        // the Xvfb - the vc201 openbox fallback), and detection grows
+        // mate-session/startlxqt/lxsession (ENV_VERSION 83 re-seed).
+        versionCode = 202
+        versionName = "0.2.102"
 
         ndk {
             abiFilters += listOf("arm64-v8a", "armeabi-v7a", "x86_64")

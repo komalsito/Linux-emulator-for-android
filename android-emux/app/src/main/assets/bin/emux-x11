@@ -331,7 +331,7 @@ wm_pid() {
         # v0.2.101: full sessions must be found by the watchdog too, or it
         # relaunches start_wm every tick forever. head -2 covers
         # gnome-session -> gnome-session-binary and startxfce4's chain.
-        gnome-session|gnome-session-binary|gnome-shell|startxfce4|xfce4-session|xfce4-session-binary|mutter) echo match ;;
+        gnome-session|gnome-session-binary|gnome-shell|startxfce4|xfce4-session|xfce4-session-binary|mutter|mate-session|mate-session-binary|startlxqt|lxqt-session|lxsession) echo match ;;
       esac
     done | grep -q match || continue
     echo "$p"
@@ -369,7 +369,7 @@ wm_fallback() {
   # its own way - swapping the user's installed desktop for twm behind their
   # back is the worse failure by far.
   case "$OLDM" in
-    gnome-session|gnome-session-binary|gnome-shell|startxfce4|xfce4-session)
+    gnome-session|gnome-session-binary|gnome-shell|startxfce4|xfce4-session|mate-session|mate-session-binary|startlxqt|lxqt-session|lxsession)
       echo "emux-x11: WM mode '$OLDM' is a full session - ladder will not replace it (probe artifacts ignored)" >&2
       return 0 ;;
   esac
@@ -490,7 +490,12 @@ start_wm() {
         echo "emux-x11: launching $WM_BIN --sm-disable (no autostart file to run)" >&2
         nohup "$WM_BIN" --sm-disable >/tmp/wm.log 2>&1 </dev/null &
       fi ;;
-    gnome-session|startxfce4|xfce4-session)
+    gnome-session|startxfce4|xfce4-session|mate-session|startlxqt|lxsession|lxqt-session)
+      # v0.2.102: GNOME/mutter default to Wayland and die instantly on an
+      # Xvfb (the vc201 field fallback - openbox returned, but GNOME never
+      # got a chance). We are an X11 session by construction; say so up
+      # front instead of letting mutter guess and fail.
+      export XDG_SESSION_TYPE=x11
       # v0.2.101: FULL-DESKTOP SESSIONS (field: 'apt install ubuntu-desktop'
       # must change what the user sees, not just sit on disk). A session
       # manager brings its own panel, icons, WM and autostart; stacking the
@@ -552,7 +557,7 @@ start_furniture() {
   # file is written by start_wm, which always runs before this.
   paint_root
   case "$(cat /tmp/emux_wm_mode 2>/dev/null || echo openbox)" in
-    gnome-session|gnome-session-binary|gnome-shell|startxfce4|xfce4-session)
+    gnome-session|gnome-session-binary|gnome-shell|startxfce4|xfce4-session|mate-session|mate-session-binary|startlxqt|lxqt-session|lxsession)
       echo "emux-x11: full-session desktop owns the furniture - EmuX panel/icons skipped" >&2
       return 0 ;;
   esac

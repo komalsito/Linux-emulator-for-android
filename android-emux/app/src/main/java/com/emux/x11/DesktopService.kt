@@ -949,6 +949,9 @@ class DesktopService(
         return when {
             java.io.File(rootfs, "usr/bin/gnome-session").isFile -> "gnome-session"
             java.io.File(rootfs, "usr/bin/startxfce4").isFile -> "startxfce4"
+            java.io.File(rootfs, "usr/bin/mate-session").isFile -> "mate-session"
+            java.io.File(rootfs, "usr/bin/startlxqt").isFile -> "startlxqt"
+            java.io.File(rootfs, "usr/bin/lxsession").isFile -> "lxsession"
             else -> "openbox"
         }
     }

@@ -997,7 +997,20 @@ class DesktopView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attrs) 
         // quick lift = click, tap-then-glide = drag).
         if (e.isFromSource(InputDevice.SOURCE_MOUSE)) {
             val d = e.device
-            if (d != null && (d.sources and InputDevice.SOURCE_TOUCHSCREEN) == 0) return true
+            // v0.2.102 THE REAL SCROLL FIX: this was
+            // '(d.sources and SOURCE_TOUCHSCREEN) == 0' - a PARTIAL-bit test.
+            // SOURCE_TOUCHSCREEN is SOURCE_CLASS_POINTER | 0x1000 = 0x1002, and
+            // EVERY pointer device carries the SOURCE_CLASS_POINTER bit 0x2,
+            // so the AND was never 0 for any pointer device and the whole
+            // v0.2.99/v0.2.100 device-first rule NEVER FIRED ONCE. The vc200
+            // field log is the proof: Glide Keyboard sources 0x1002313
+            // (TOUCHPAD|MOUSE|KEYBOARD|DPAD - no touchscreen bit), its
+            // two-finger scroll events arrive src=0x2002 (SOURCE_MOUSE), and
+            // they STILL routed [touch] with tt=1. The test must demand the
+            // FULL mask, exactly like InputDevice.supportsSource() (which the
+            // device-inventory note at the bottom of this file already used,
+            // printing the right answer while the routing used the wrong one).
+            if (d != null && d.sources and InputDevice.SOURCE_TOUCHSCREEN != InputDevice.SOURCE_TOUCHSCREEN) return true
         }
         if (e.pointerCount > 0) {
             when (e.getToolType(0)) {
@@ -1022,7 +1035,12 @@ class DesktopView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attrs) 
         // reintroduced through a new seam. A real mouse/trackpad device never
         // carries SOURCE_TOUCHSCREEN, so this cannot cost the v0.2.85 feature.
         val dev = e.device ?: return true
-        return dev.sources and InputDevice.SOURCE_TOUCHSCREEN == 0
+        // v0.2.102: same full-mask fix - the partial-bit test always returned
+        // false here too, so the v0.2.86 toolType-UNKNOWN trust rule was dead
+        // code from the day it shipped. A touchscreen device carries the full
+        // 0x1002 mask and stays vetoed (the Huawei PC-mode re-tagging guard);
+        // a pad (0x1002313) does not and is trusted.
+        return dev.sources and InputDevice.SOURCE_TOUCHSCREEN != InputDevice.SOURCE_TOUCHSCREEN
     }
 
     /** ACTION_SCROLL is a WHEEL event, not a finger gesture, so it must NOT
