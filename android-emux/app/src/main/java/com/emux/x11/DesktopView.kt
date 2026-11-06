@@ -824,7 +824,8 @@ class DesktopView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attrs) 
                 // accumulators and natural-scroll setting as every other
                 // wheel path.
                 if (android.os.Build.VERSION.SDK_INT >= 29 &&
-                    event.classification == MotionEvent.CLASSIFICATION_AMBIGUOUS_GESTURE) {
+                    (event.classification == MotionEvent.CLASSIFICATION_AMBIGUOUS_GESTURE ||
+                        event.classification == 3 /* CLASSIFICATION_TWO_FINGER_SWIPE, API 34 */)) {
                     if (!hoverWheelArmed) {
                         hoverWheelArmed = true
                         wheelCentroidX = event.x; wheelCentroidY = event.y
@@ -1500,7 +1501,8 @@ class DesktopView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attrs) 
                     // classifier changing its mind exits the mode and the
                     // pointer resumes gliding.
                     if (android.os.Build.VERSION.SDK_INT >= 29 && mouseContactDown &&
-                        e.classification == MotionEvent.CLASSIFICATION_AMBIGUOUS_GESTURE) {
+                        (e.classification == MotionEvent.CLASSIFICATION_AMBIGUOUS_GESTURE ||
+                        e.classification == 3 /* CLASSIFICATION_TWO_FINGER_SWIPE, API 34 */)) {
                         if (!contactWheel) {
                             contactWheel = true
                             contactWheelMoved = false
@@ -1851,7 +1853,80 @@ class DesktopView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attrs) 
         }
     })
 
+    // v0.2.105: state for the Android 14+ touchpad two-finger-swipe wheel.
+    // The anchor is where the cursor was when the swipe began: the fake
+    // finger moves with the gesture, but X must scroll the window UNDER THE
+    // CURSOR, not wherever the synthetic finger has wandered to.
+    private var tpAnchorX = 0f
+    private var tpAnchorY = 0f
+    private var tpLastX = 0f
+    private var tpLastY = 0f
+    private var tpScrollNoted = false
+
+    @androidx.annotation.RequiresApi(34)
+    private fun onTouchpadScroll(e: MotionEvent): Boolean {
+        noteEventShape("touchpad-scroll", e)
+        when (e.actionMasked) {
+            MotionEvent.ACTION_DOWN -> {
+                dismissIntroCard()
+                startupDismissed = true
+                noteMouseActive()
+                // drop any held button / pending drag-lock so a swipe can never
+                // continue (or start) a left-drag
+                releaseMouseButtons(e)
+                tpAnchorX = e.x; tpAnchorY = e.y
+                tpLastX = e.x; tpLastY = e.y
+                wheelAccumV = 0f; wheelAccumH = 0f
+                if (!tpScrollNoted) {
+                    tpScrollNoted = true
+                    desktop?.noteInfo("trackpad scroll: TWO_FINGER_SWIPE classification -> wheel (v0.2.105)")
+                }
+            }
+            MotionEvent.ACTION_MOVE -> {
+                noteMouseActive()
+                if (frameless) return true
+                val dx = e.x - tpLastX
+                val dy = e.y - tpLastY
+                tpLastX = e.x; tpLastY = e.y
+                val dir = if (mouseNaturalScroll()) -1f else 1f
+                wheelAccumV = (wheelAccumV + (-dy / SCROLL_STEP_PX) * dir).coerceIn(-64f, 64f)
+                wheelAccumH = (wheelAccumH + (dx / SCROLL_STEP_PX) * dir).coerceIn(-64f, 64f)
+                val nv = wheelAccumV.toInt()
+                if (nv != 0) wheelAccumV -= nv
+                val nh = wheelAccumH.toInt()
+                if (nh != 0) wheelAccumH -= nh
+                if (nv != 0 || nh != 0) {
+                    val (x, y) = mapToX(tpAnchorX, tpAnchorY, false)
+                    desktop?.injectScrollPair(x, y, nv, nh)
+                }
+            }
+            MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                wheelAccumV = 0f; wheelAccumH = 0f
+            }
+        }
+        return true
+    }
+
     override fun onTouchEvent(event: MotionEvent): Boolean {
+        // v0.2.105: ANDROID 14+ TOUCHPAD GESTURES. A real touchpad's two-finger
+        // swipe is NOT delivered as two pointers: the framework's gesture
+        // converter emits ONE fake-finger DOWN/MOVE/UP stream classified
+        // CLASSIFICATION_TWO_FINGER_SWIPE (3). Every older wheel path keyed on
+        // AMBIGUOUS_GESTURE (1), so the swipe fell through to the single-contact
+        // model and became a left-drag (text selection). Intercept it here,
+        // before isMouseInput()/scaleDetector, and turn its delta into wheel
+        // notches. Three-finger swipes and touchpad pinches are swallowed so
+        // they can never become a left-drag either.
+        if (android.os.Build.VERSION.SDK_INT >= 34) {
+            when (event.classification) {
+                MotionEvent.CLASSIFICATION_TWO_FINGER_SWIPE -> return onTouchpadScroll(event)
+                MotionEvent.CLASSIFICATION_MULTI_FINGER_SWIPE,
+                MotionEvent.CLASSIFICATION_PINCH -> {
+                    noteEventShape("touchpad-swallow", event)
+                    return true
+                }
+            }
+        }
         // v0.2.85: a real mouse/trackpad button gets the DIRECT path (press on
         // DOWN, release on UP, no finger-gesture interpretation at all). The
         // stylus deliberately does NOT take this path - it is touch by design.
