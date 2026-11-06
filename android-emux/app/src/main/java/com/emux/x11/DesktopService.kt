@@ -2346,7 +2346,7 @@ class DesktopService(
                 "esac; done; " +
                 "rm -f /tmp/.X0-lock /tmp/.X11-unix/X0 2>/dev/null; true"
             val pb = ProcessBuilder(
-                proot.absolutePath, "-0", "-r", rootfs.absolutePath,
+                proot.absolutePath, "--link2symlink", "-0", "-r", rootfs.absolutePath,
                 "-b", "/dev", "-b", "/proc", "-b", "/sys", "-w", "/",
                 "/bin/sh", "-c", payload)
             pb.environment().clear()

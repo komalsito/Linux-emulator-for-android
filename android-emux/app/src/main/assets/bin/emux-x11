@@ -34,7 +34,7 @@ if [ -n "$ROOT" ] && [ -d "$ROOT/lib" ]; then
     echo "emux-x11: host mode - re-exec inside proot" >&2
     mkdir -p "$ROOT/tmp" 2>/dev/null
     LD_LIBRARY_PATH="$NB" HOME=/root PROOT_TMP_DIR="$ROOT/tmp" \
-    PROOT_LOADER="$NB/loader" exec "$NB/proot" -0 -r "$ROOT" \
+    PROOT_LOADER="$NB/loader" exec "$NB/proot" --link2symlink -0 -r "$ROOT" \
       -b /dev -b /proc -b /sys -w /root \
       /bin/sh -l -c "unset EMUX_ROOTFS EMUX_ROOT EMUX_NATIVE_BRIDGE; exec /usr/local/bin/emux-x11 $WM \"$RES\" $DN"
   fi

@@ -106,16 +106,16 @@ if [ -x "$PROOT" ]; then
         # geometry). Escaped \$ hands the literal $(tty) to the guest dash,
         # whose stdin IS the pts. The guard keeps a rootfs without the seeded
         # watcher (interrupted bootstrap) from printing a not-found line.
-        exec "$PROOT" -0 -r "$ROOT" -b /dev -b /proc -b /sys -w /root /usr/bin/script -qfc "( [ -x /usr/local/bin/emux-winsize ] && /usr/local/bin/emux-winsize \$(tty) >/dev/null 2>&1 ) & exec /bin/bash -l" /dev/null
+        exec "$PROOT" --link2symlink -0 -r "$ROOT" -b /dev -b /proc -b /sys -w /root /usr/bin/script -qfc "( [ -x /usr/local/bin/emux-winsize ] && /usr/local/bin/emux-winsize \$(tty) >/dev/null 2>&1 ) & exec /bin/bash -l" /dev/null
       fi
-      exec "$PROOT" -0 -r "$ROOT" -b /dev -b /proc -b /sys -w /root /usr/bin/script -qfc "( [ -x /usr/local/bin/emux-winsize ] && /usr/local/bin/emux-winsize \$(tty) >/dev/null 2>&1 ) & exec /bin/sh -l" /dev/null
+      exec "$PROOT" --link2symlink -0 -r "$ROOT" -b /dev -b /proc -b /sys -w /root /usr/bin/script -qfc "( [ -x /usr/local/bin/emux-winsize ] && /usr/local/bin/emux-winsize \$(tty) >/dev/null 2>&1 ) & exec /bin/sh -l" /dev/null
     fi
     if [ -f "$ROOT/bin/bash" ]; then
-      exec "$PROOT" -0 -r "$ROOT" -b /dev -b /proc -b /sys -w /root /bin/bash -l
+      exec "$PROOT" --link2symlink -0 -r "$ROOT" -b /dev -b /proc -b /sys -w /root /bin/bash -l
     fi
-    exec "$PROOT" -0 -r "$ROOT" -b /dev -b /proc -b /sys -w /root /bin/sh -l
+    exec "$PROOT" --link2symlink -0 -r "$ROOT" -b /dev -b /proc -b /sys -w /root /bin/sh -l
   fi
-  exec "$PROOT" -0 -r "$ROOT" -b /dev -b /proc -b /sys -w /root /bin/sh -l -c "$CMD"
+  exec "$PROOT" --link2symlink -0 -r "$ROOT" -b /dev -b /proc -b /sys -w /root /bin/sh -l -c "$CMD"
 fi
 
 # --- Path 2: distro loader exec (no proot available) --------------------------
