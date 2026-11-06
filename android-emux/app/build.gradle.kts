@@ -339,8 +339,21 @@ android {
         //     per server after 8 s idle instead of after every reconnect.
         //  5. Taskbar: full-width tinted bar replaced by a floating tray pill;
         //     dock opaque and reserves the bottom edge.
-        versionCode = 209
-        versionName = "0.2.109"
+        // v0.2.110 vc210: DYNAMIC DOCK (ENV_VERSION 91 re-seed).
+        // Field (vc209): "the taskbar leaves this bar of the background" -
+        // the centred dock floated 4 px above the bottom edge at 94% width
+        // with strut_policy=follow_size, so every maximized window stopped
+        // ABOVE the dock band while the reserved edge showed the wallpaper
+        // around the floating dock (4 px strip under it, side gaps) - a
+        // permanent background bar under every window.
+        // The dock and the tray pill are now flush with the bottom edge and
+        // intellihide (tint2 autohide=2): visible on the bare desktop, no
+        // strut (maximized windows run to the true screen edge), both bars
+        // slide away when a window overlaps their rectangle and pop back
+        // over it when the pointer touches the bottom edge (1 px stays
+        // peeking - tint2 unhides on pointer-enter).
+        versionCode = 210
+        versionName = "0.2.110"
 
         ndk {
             abiFilters += listOf("arm64-v8a", "armeabi-v7a", "x86_64")

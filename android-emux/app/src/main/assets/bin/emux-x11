@@ -954,13 +954,13 @@ EOF
   [ -e "$STAMP" ] && OLD_APPS=$(cat "$STAMP" 2>/dev/null)
   if emux_keep tint2rc; then
     echo "emux-x11: keep-tint2rc marker - the user's panel config is NOT rewritten" >&2
-  elif [ ! -e "$HOME/.config/tint2/tint2rc" ] || [ "$APPS s$EMUX_SCALE v109" != "$OLD_APPS" ]; then
+  elif [ ! -e "$HOME/.config/tint2/tint2rc" ] || [ "$APPS s$EMUX_SCALE v110" != "$OLD_APPS" ]; then
     if [ -e "$HOME/.config/tint2/tint2rc" ] && ! grep -q "EmuX" "$HOME/.config/tint2/tint2rc" 2>/dev/null; then
       cp "$HOME/.config/tint2/tint2rc" "$HOME/.config/tint2/tint2rc.emux-bak" 2>/dev/null
     fi
     S="$EMUX_SCALE"
     {
-      echo "# EmuX tint2 panel (v0.2.109) - centred dock: start, pinned apps, windows"
+      echo "# EmuX tint2 panel (v0.2.110) - centred dock: start, pinned apps, windows"
       # bg 1: the dock bubble
       echo "rounded = $((12 * S))"
       echo "border_width = 1"
@@ -984,11 +984,26 @@ EOF
       echo "panel_position = bottom center horizontal"
       echo "panel_size = 94% $((52 * S))"
       echo "panel_shrink = 1"
-      echo "panel_margin = 0 $((4 * S))"
+      # v0.2.110 DYNAMIC DOCK: the 4 px float margin + the strut left a
+      # wallpaper band at the bottom of every maximized window (field:
+      # "the taskbar leaves this bar of the background") - the reserved
+      # edge showed the wallpaper around the floating dock (4 px strip
+      # under it, side gaps, rounded notches). The dock is now flush with
+      # the bottom edge, reserves NOTHING (maximized windows run to the
+      # true screen edge) and INTELLIHIDES: visible on the bare desktop,
+      # sliding away whenever a window overlaps its rectangle, popping
+      # back over it when the pointer hits the bottom edge. 1 px stays
+      # peeking while hidden: tint2 unhides on pointer-enter, a fully
+      # off-screen panel window would be unreachable.
+      echo "panel_margin = 0 0"
+      echo "autohide = 2"
+      echo "autohide_show_timeout = 0.15"
+      echo "autohide_hide_timeout = 0.4"
+      echo "autohide_height = 1"
       echo "panel_padding = $((8 * S)) $((4 * S)) $((6 * S))"
       echo "panel_background_id = 1"
       echo "panel_layer = top"
-      echo "strut_policy = follow_size"
+      echo "strut_policy = none"
       echo "wm_menu = 1"
       echo "mouse_effects = 1"
       echo "button = new"
@@ -1032,13 +1047,13 @@ EOF
       echo "tooltip_background_id = 1"
       echo "tooltip_padding = $((6 * S)) $((4 * S))"
     } > "$HOME/.config/tint2/tint2rc" 2>/dev/null
-    echo "$APPS s$EMUX_SCALE v109" > "$STAMP" 2>/dev/null
+    echo "$APPS s$EMUX_SCALE v110" > "$STAMP" 2>/dev/null
   fi
   # --- v0.2.108: tray bar (full width, bottom layer, tray + clock right) ---
   if ! emux_keep tint2rc; then
     S="$EMUX_SCALE"
     {
-      echo "# EmuX tint2 tray (v0.2.109) - floating pill, bottom right"
+      echo "# EmuX tint2 tray (v0.2.110) - floating pill, bottom right"
       # v0.2.109: the full-width bar is gone (field: "erase the green bar" -
       # without a compositor its translucency showed the wallpaper through as
       # a tinted strip). Tray + clock float as a pill matching the dock.
@@ -1051,7 +1066,16 @@ EOF
       echo "panel_position = bottom right horizontal"
       echo "panel_size = 30% $((52 * S))"
       echo "panel_shrink = 1"
-      echo "panel_margin = $((8 * S)) $((4 * S))"
+      # v0.2.110: the pill gets the same dynamic-dock treatment (flush
+      # bottom + intellihide) so both bars behave as one unit - visible
+      # together on the desktop, sliding away together when a maximized
+      # window covers them, back together when the pointer hits the
+      # bottom edge.
+      echo "panel_margin = $((8 * S)) 0"
+      echo "autohide = 2"
+      echo "autohide_show_timeout = 0.15"
+      echo "autohide_hide_timeout = 0.4"
+      echo "autohide_height = 1"
       echo "panel_padding = $((10 * S)) $((4 * S)) $((8 * S))"
       echo "panel_background_id = 1"
       echo "panel_layer = top"
@@ -1342,7 +1366,7 @@ THEME
     echo "emux-x11: rc.xml audit clean ($RCX_EFF binds no Frame/Client/Desktop context)" >&2
   fi
   # --- tint2 refresh: darker bar, bigger icons (rewrite once per stamp) ---
-  if ! emux_keep tint2rc && [ -e "$HOME/.config/tint2/tint2rc" ] && ! grep -q "EmuX tint2 panel (v0.2.109)" "$HOME/.config/tint2/tint2rc" 2>/dev/null; then
+  if ! emux_keep tint2rc && [ -e "$HOME/.config/tint2/tint2rc" ] && ! grep -q "EmuX tint2 panel (v0.2.110)" "$HOME/.config/tint2/tint2rc" 2>/dev/null; then
     cp "$HOME/.config/tint2/tint2rc" "$HOME/.config/tint2/tint2rc.pre-rice" 2>/dev/null
     rm -f "$HOME/.config/tint2/tint2rc" 2>/dev/null
   fi
