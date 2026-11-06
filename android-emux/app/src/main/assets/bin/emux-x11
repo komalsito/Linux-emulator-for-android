@@ -508,6 +508,18 @@ start_wm() {
       # got a chance). We are an X11 session by construction; say so up
       # front instead of letting mutter guess and fail.
       export XDG_SESSION_TYPE=x11
+      # v0.2.106: no accessibility bus exists under proot; without this every
+      # GTK app (caja, mate-panel, mate-settings-daemon) blocks ~25 s per start
+      # trying to reach at-spi - a desktop that "hangs" for its first minute.
+      export NO_AT_BRIDGE=1
+      if [ -z "$XDG_RUNTIME_DIR" ]; then
+        XDG_RUNTIME_DIR="/tmp/runtime-$(id -u)"
+        mkdir -p "$XDG_RUNTIME_DIR" 2>/dev/null && chmod 700 "$XDG_RUNTIME_DIR" 2>/dev/null
+        export XDG_RUNTIME_DIR
+      fi
+      case "$(basename "$WM_BIN")" in
+        mate-session) export XDG_CURRENT_DESKTOP=MATE DESKTOP_SESSION=mate ;;
+      esac
       # v0.2.101: FULL-DESKTOP SESSIONS (field: 'apt install ubuntu-desktop'
       # must change what the user sees, not just sit on disk). A session
       # manager brings its own panel, icons, WM and autostart; stacking the
@@ -516,6 +528,19 @@ start_wm() {
       # environment scripts sourced above are openbox's; harmless here.
       if command -v dbus-launch >/dev/null 2>&1; then
         eval "$(dbus-launch --sh-syntax 2>/dev/null)" 2>/dev/null || true
+      fi
+      # v0.2.106 MATE ON A SOFTWARE FRAMEBUFFER: marco's compositor re-renders
+      # the whole screen for every change (pure cost on Xvfb, and every repaint
+      # is pixels the capture then has to move), and mate-screensaver would
+      # blank the pane after idle and ask for a password this user never set.
+      # Written into the dconf user db through the bus just started; harmless
+      # no-ops when the schema is absent.
+      if [ "$(basename "$WM_BIN")" = mate-session ] && command -v gsettings >/dev/null 2>&1; then
+        gsettings set org.mate.Marco.general compositing-manager false 2>/dev/null
+        gsettings set org.mate.screensaver idle-activation-enabled false 2>/dev/null
+        gsettings set org.mate.screensaver lock-enabled false 2>/dev/null
+        gsettings set org.mate.power-manager sleep-display-ac 0 2>/dev/null
+        echo "emux-x11: MATE tuned for Xvfb (compositor off, screensaver/lock off)" >&2
       fi
       echo "emux-x11: launching full session $WM_BIN (bus: ${DBUS_SESSION_BUS_ADDRESS:-none})" >&2
       nohup "$WM_BIN" >/tmp/wm.log 2>&1 </dev/null & ;;

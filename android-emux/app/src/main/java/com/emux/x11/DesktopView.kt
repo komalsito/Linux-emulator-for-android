@@ -1411,6 +1411,35 @@ class DesktopView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attrs) 
      * pointer (MOVE becomes hover); a real click still arrives as
      * ACTION_BUTTON_PRESS, or as a DOWN with its button set.
      */
+    // v0.2.106: pointer-mode SWIPE state (see the MOVE branch).
+    private var swipeAnchored = false
+    private var swipeNotches = 0
+    private var swipeGestures = 0
+
+    /** v0.2.106: buttonless single-contact travel on an external pointer device
+     *  scrolls (Android <= 13 pointer-mode SWIPE). Read live; default ON. */
+    private fun padSwipeScroll(): Boolean =
+        settingsPrefs?.getBoolean("trackpad_swipe_scroll", true) ?: true
+
+    private fun noteSwipeOnce() {
+        swipeGestures++
+        if (swipeGestures <= 3) desktop?.noteInfo(
+            "trackpad scroll: pointer-mode SWIPE (1-pointer buttonless contact) -> wheel, " +
+                "anchored at the cursor (v0.2.106, gesture #$swipeGestures)")
+    }
+
+    /** v0.2.106 evidence: one line per scroll gesture (first 12 per session) -
+     *  how many notches it produced. "0 notches" on a real swipe means the
+     *  pointer never moved and the next round needs the raw axes. */
+    private fun noteSwipeEnd(e: MotionEvent) {
+        if (!swipeAnchored) return
+        swipeAnchored = false
+        if (swipeGestures <= 12) desktop?.noteInfo(
+            "trackpad scroll gesture end: notches=$swipeNotches pc=${e.pointerCount} " +
+                "travel=${abs(e.x - contactDownX).toInt()}x${abs(e.y - contactDownY).toInt()}")
+        swipeNotches = 0
+    }
+
     private fun onMouseTouchEvent(e: MotionEvent): Boolean {
         noteEventShape("mouse", e)   // v0.2.97: evidence - what the mouse/trackpad path sees
         when (e.actionMasked) {
@@ -1484,8 +1513,15 @@ class DesktopView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attrs) 
                     val nv = wheelAccumV.toInt(); if (nv != 0) wheelAccumV -= nv
                     val nh = wheelAccumH.toInt(); if (nh != 0) wheelAccumH -= nh
                     if (nv != 0 || nh != 0) {
-                        val (x, y) = mapToX(cx, cy)
+                        // v0.2.106: a pointer-mode SWIPE moves its single
+                        // reported pointer AWAY from the cursor (AOSP keeps the
+                        // real cursor still and reports cursor + finger travel),
+                        // so scroll where the gesture STARTED - under the
+                        // cursor - and leave the X pointer where it is.
+                        val (x, y) = if (swipeAnchored) mapToX(contactDownX, contactDownY, false)
+                                     else mapToX(cx, cy)
                         desktop?.injectScrollPair(x, y, nv, nh)
+                        swipeNotches += abs(nv) + abs(nh)
                     }
                     return true
                 }
@@ -1546,6 +1582,41 @@ class DesktopView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attrs) 
                         desktop?.injectClick(x, y, 1, press = true)
                         return true
                     }
+                    // v0.2.106 THE POINTER-MODE SWIPE (root cause of the whole
+                    // scroll saga on the Glide Keyboard). On Android <= 13 a
+                    // touchpad in pointer mode reports gestures through
+                    // TouchInputMapper's PointerGesture machine: ONE finger
+                    // moving = HOVER (no DOWN at all); TWO fingers = a DOWN at
+                    // the cursor (PRESS), and when they move together the
+                    // gesture becomes SWIPE - still exactly ONE pointer, no
+                    // button bits, moving from the cursor by the fingers'
+                    // travel. Only fingers spread wide apart (FREEFORM) produce
+                    // the POINTER_DOWN pc=2 that v0.2.96 waited for. So the
+                    // everyday two-finger scroll arrived here as a buttonless
+                    // single-contact glide and moved the pointer instead of the
+                    // wheel. A buttonless contact that travels (and is not the
+                    // tap-then-glide drag above) IS that swipe: wheel it,
+                    // anchored at the cursor. Setting: "trackpad_swipe_scroll".
+                    if (contactMoved && padSwipeScroll()) {
+                        contactWheel = true
+                        swipeAnchored = true
+                        contactWheelMoved = true          // never a tap at lift
+                        contactWheelStartMs = System.currentTimeMillis()
+                        // count the travel that crossed the slop, so a short
+                        // flick still scrolls
+                        wheelCentroidX = contactDownX; wheelCentroidY = contactDownY
+                        wheelAccumV = 0f; wheelAccumH = 0f
+                        cancelPendingPress()
+                        noteSwipeOnce()
+                        // re-enter MOVE: the contactWheel branch consumes this
+                        // event's delta right away
+                        return onMouseTouchEvent(e)
+                    }
+                    // Before the slop is crossed the contact is still
+                    // undecided (tap or swipe): with swipe-scroll on, keep the
+                    // X pointer still, exactly like Android keeps its cursor
+                    // still during a PRESS.
+                    if (padSwipeScroll()) return true
                     val now = System.currentTimeMillis()
                     // v0.2.96: 60 motion events/s (was 30): the XTEST pump
                     // coalesces pending motions to the newest anyway, so the
@@ -1616,6 +1687,7 @@ class DesktopView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attrs) 
             }
             MotionEvent.ACTION_UP -> {
                 noteMouseActive()
+                noteSwipeEnd(e)
                 if (mouseOverlayDown) { mouseOverlayDown = false; return true }
                 if (!frameless && mouseContactDown && mouseHeldButton == 0 && !contactWheelMoved) {
                     // v0.2.96 tap-to-click: a buttonless contact that lifts
@@ -1647,6 +1719,7 @@ class DesktopView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attrs) 
             }
             MotionEvent.ACTION_CANCEL -> {
                 mouseOverlayDown = false
+                noteSwipeEnd(e)
                 releaseMouseButtons(e)
                 return true
             }

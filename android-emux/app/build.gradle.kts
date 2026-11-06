@@ -288,8 +288,28 @@ android {
         //     or directory" while installing MATE). Android forbids hardlinks
         //     in app storage; the linkfix shim's link()->linkat() cannot create
         //     one either. All proot argv (app + guest scripts) now pass it.
-        versionCode = 205
-        versionName = "0.2.105"
+        // v0.2.106 vc206: POINTER-MODE SWIPE SCROLL + INSTALLED DESKTOP +
+        // ZERO-COPY CAPTURE (ENV_VERSION 87 re-seed).
+        //  1. Scroll root cause: on Android <= 13 a pointer-mode touchpad
+        //     (HUAWEI Glide Keyboard) reports the everyday two-finger scroll as
+        //     PointerGesture SWIPE = ONE buttonless pointer moving from the
+        //     cursor; only wide-apart fingers (FREEFORM) give POINTER_DOWN.
+        //     That contact glided the pointer. It now drives the wheel,
+        //     anchored at the cursor (setting trackpad_swipe_scroll, default on).
+        //  2. Desktop: the persisted legacy "wm"=openbox always overrode the
+        //     installed-desktop detection; new key desktop_session=auto picks
+        //     MATE > Xfce > LXQt > LXDE > GNOME (GNOME last: it cannot run on
+        //     Xvfb). MATE starts with NO_AT_BRIDGE, compositor + lock off.
+        //  3. Capture: damage bands are read from the memory-mapped Xvfb
+        //     -fbdir framebuffer instead of GetImage over the proot socket;
+        //     the healer sweep cross-checks it and drops it on disagreement.
+        //  4. Stale pixels: diffUpload compared narrow bands against the
+        //     mirror with the wrong stride and could skip real changes.
+        //  5. Status line: the errorText collector was unreachable after an
+        //     endless StateFlow.collect, and each Desktop-tab tap leaked
+        //     another collector.
+        versionCode = 206
+        versionName = "0.2.106"
 
         ndk {
             abiFilters += listOf("arm64-v8a", "armeabi-v7a", "x86_64")

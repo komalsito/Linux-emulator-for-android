@@ -13,12 +13,12 @@
         app:defaultValue="alpine" />
 
     <ListPreference
-        app:key="wm"
-        app:title="@string/pref_wm_title"
-        app:summary="Openbox is installed with the desktop components; Xfce4/LXDE/i3 need their packages installed inside the Linux environment first (apt install xfce4 / lxde / i3). Any choice falls back to Openbox, then xterm."
+        app:key="desktop_session"
+        app:title="Desktop"
+        app:summary="Automatic starts the full desktop installed in the Linux environment (MATE, Xfce, LXQt...) or the built-in Openbox desktop. A session that cannot start falls back to Openbox. Applies when the desktop next starts."
         app:entries="@array/wm_entries"
         app:entryValues="@array/wm_values"
-        app:defaultValue="openbox"
+        app:defaultValue="auto"
         app:useSimpleSummaryProvider="true" />
 
     <SwitchPreferenceCompat
@@ -80,6 +80,12 @@
         app:entryValues="@array/mouse_scroll_scale_values"
         app:defaultValue="3"
         app:useSimpleSummaryProvider="true" />
+
+    <SwitchPreferenceCompat
+        app:key="trackpad_swipe_scroll"
+        app:title="Trackpad: two-finger swipe scrolls"
+        app:summary="For keyboard-cover trackpads (Android 13 and older) that report a two-finger swipe as one moving contact. Turn off only if moving ONE finger on your trackpad scrolls instead of moving the pointer."
+        app:defaultValue="true" />
 
     <SwitchPreferenceCompat
         app:key="mouse_natural_scroll"

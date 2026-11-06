@@ -318,7 +318,7 @@ class SettingsActivity : AppCompatActivity() {
                     val sp = androidx.preference.PreferenceManager
                         .getDefaultSharedPreferences(this@SettingsActivity)
                     row("Linux distribution", sp.getString("distro", "alpine") ?: "alpine")
-                    row("Window manager", sp.getString("wm", "openbox") ?: "openbox")
+                    row("Desktop", sp.getString("desktop_session", "auto") ?: "auto")
                     row("Root acceleration", if (sp.getBoolean("root_accel", true)) "ON" else "OFF")
                     row("Desktop capture quality",
                         (sp.getString("capture_quality", "1280") ?: "1280") + " px long side" +
@@ -431,10 +431,10 @@ class SettingsActivity : AppCompatActivity() {
                 setDefaultValue("alpine")
             })
             screen.addPreference(androidx.preference.ListPreference(ctx).apply {
-                key = "wm"; title = "Window manager"
-                entries = arrayOf("Openbox", "IceWM", "Fluxbox", "Awesome")
-                entryValues = arrayOf("openbox", "icewm", "fluxbox", "awesome")
-                setDefaultValue("openbox")
+                key = "desktop_session"; title = "Desktop"
+                entries = arrayOf("Automatic (installed desktop)", "MATE", "Xfce", "LXQt", "Openbox (lightweight)")
+                entryValues = arrayOf("auto", "mate-session", "startxfce4", "startlxqt", "openbox")
+                setDefaultValue("auto")
                 summaryProvider = androidx.preference.ListPreference.SimpleSummaryProvider.getInstance()
             })
             screen.addPreference(androidx.preference.SwitchPreferenceCompat(ctx).apply {
@@ -505,6 +505,13 @@ class SettingsActivity : AppCompatActivity() {
                 entryValues = arrayOf("1", "3", "5", "9")
                 setDefaultValue("3")
                 summaryProvider = androidx.preference.ListPreference.SimpleSummaryProvider.getInstance()
+            })
+            screen.addPreference(androidx.preference.SwitchPreferenceCompat(ctx).apply {
+                key = "trackpad_swipe_scroll"; title = "Trackpad: two-finger swipe scrolls"
+                summary = "For keyboard-cover trackpads (Android 13 and older) that report a " +
+                    "two-finger swipe as one moving contact. Turn off only if moving ONE finger " +
+                    "on your trackpad scrolls instead of moving the pointer."
+                setDefaultValue(true)
             })
             screen.addPreference(androidx.preference.SwitchPreferenceCompat(ctx).apply {
                 key = "mouse_natural_scroll"; title = "Natural scrolling (mouse / trackpad)"

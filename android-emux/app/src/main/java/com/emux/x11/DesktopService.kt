@@ -340,6 +340,77 @@ class DesktopService(
      * display rotation or an LMK-kill of Xvfb self-heals without touching
      * the control plane.
      */
+    // ------------------------------------------------------------------
+    // v0.2.106: memory-mapped -fbdir framebuffer (see startNativeCapture).
+    // Xvfb opens its -fbdir file with O_CREAT and no O_TRUNC, extends it once
+    // and unlinks it at exit, so a live mapping can never shrink under us
+    // (the SIGBUS case); an unlinked file just stops changing, which the
+    // healer's socket cross-check catches.
+    @Volatile private var fbMap: java.nio.MappedByteBuffer? = null
+    @Volatile private var fbMapOff = 0
+    @Volatile private var fbMapBpl = 0
+    @Volatile private var fbMapW = 0
+    @Volatile private var fbMapH = 0
+    private var fbCheck: ByteArray? = null
+
+    private fun openFbMap(w: Int, h: Int): Boolean {
+        closeFbMap()
+        return runCatching {
+            val f = java.io.File(com.emux.core.FsLayout.linuxRoot(ctx), "tmp/emux_fbdir/Xvfb_screen0")
+            if (!f.isFile) return@runCatching false
+            val len = f.length()
+            if (len < 200L || len > 64_000_000L) return@runCatching false
+            java.io.RandomAccessFile(f, "r").use { raf ->
+                val mb = raf.channel.map(java.nio.channels.FileChannel.MapMode.READ_ONLY, 0, len)
+                val head = ByteArray(minOf(len, 65_536L).toInt())
+                mb.duplicate().get(head)
+                val hd = xwdHeaderOf(head, head.size) ?: return@runCatching false
+                if (hd.w != w || hd.h != h || hd.bpp != 16 || !hd.le || hd.bpl < w * 2)
+                    return@runCatching false
+                if (hd.off.toLong() + hd.bpl.toLong() * h > len) return@runCatching false
+                fbMapOff = hd.off; fbMapBpl = hd.bpl; fbMapW = w; fbMapH = h
+                fbMap = mb
+                true
+            }
+        }.getOrDefault(false)
+    }
+
+    private fun closeFbMap() { fbMap = null }
+
+    /** Copy a region of the mapped framebuffer into [out] as contiguous
+     *  RGB565 LE rows (the same layout grabRegion565 produces).
+     *  @return bytes written, or -1 when the map is off or the region invalid. */
+    private fun fbRegion(x: Int, y: Int, bw: Int, rows: Int, out: ByteArray): Int {
+        val mb = fbMap ?: return -1
+        if (x < 0 || y < 0 || bw <= 0 || rows <= 0 || x + bw > fbMapW || y + rows > fbMapH) return -1
+        val n = bw * rows * 2
+        if (out.size < n) return -1
+        return try {
+            val d = mb.duplicate()
+            for (r in 0 until rows) {
+                d.position(fbMapOff + (y + r) * fbMapBpl + x * 2)
+                d.get(out, r * bw * 2, bw * 2)
+            }
+            n
+        } catch (t: Throwable) {
+            closeFbMap()
+            noteInfo("-fbdir map read failed (${t.javaClass.simpleName}) - damage bands back on GetImage")
+            -1
+        }
+    }
+
+    private fun fbCheckBuf(n: Int): ByteArray {
+        var b = fbCheck
+        if (b == null || b.size < n) { b = ByteArray(n); fbCheck = b }
+        return b
+    }
+
+    private fun regionEquals(a: ByteArray, b: ByteArray, n: Int): Boolean {
+        var i = 0
+        while (i < n) { if (a[i] != b[i]) return false; i++ }
+        return true
+    }
+
     fun startNativeCapture(onUiInvalidated: () -> Unit) {
         nativeJob?.cancel()
         nativeJob = scope.launch {
@@ -462,6 +533,19 @@ class DesktopService(
                             "only changed rectangles cross the pipe")
                     else noteInfo(
                         "native capture on :$displayNum: DAMAGE unavailable - full sweeps as before")
+                    // v0.2.106 ZERO-COPY PIXELS: Xvfb runs with -fbdir, so its
+                    // framebuffer IS a file in the shared rootfs. Map it once
+                    // per connection and serve damage bands from memory: the
+                    // proot-translated socket now carries only DamageNotify
+                    // events and the (validated) healer sweep, instead of
+                    // every changed pixel. Falls back to GetImage per band on
+                    // any mismatch or read failure.
+                    val fbOk = openFbMap(w, h)
+                    noteInfo(if (fbOk)
+                        "native capture on :$displayNum: -fbdir framebuffer MAPPED " +
+                            "(${w}x${h}x16, bpl=$fbMapBpl) - damage bands read from memory, not the socket"
+                        else "native capture on :$displayNum: -fbdir map unavailable - damage bands via GetImage")
+                    var fbSuspect = 0
                     val partCap = (h / 2).coerceAtLeast(64)
                     // v0.2.83: a band taller than this is grabbed in chunks, so
                     // even a full-screen damage burst paints progressively
@@ -586,9 +670,10 @@ class DesktopService(
                                     while (by < b[3]) {
                                         val rows = minOf(chunkRows, b[3] - by)
                                         val gt = System.currentTimeMillis()
-                                        val n = runCatching {
-                                            c.grabRegion565(b[0], by, bw, rows, bandTimeout, partBytes)
-                                        }.getOrDefault(-1)
+                                        val n = fbRegion(b[0], by, bw, rows, partBytes).takeIf { it > 0 }
+                                            ?: runCatching {
+                                                c.grabRegion565(b[0], by, bw, rows, bandTimeout, partBytes)
+                                            }.getOrDefault(-1)
                                         if (n <= 0) {
                                             addDirty(b[0], by, b[0] + bw, b[3])  // keep the rest pending
                                             failed = true
@@ -669,6 +754,8 @@ class DesktopService(
                         val sweepDeadline = if (dmgOk) t0 + 8_000L else Long.MAX_VALUE
                         var capped = false
                         var sweepUploaded = 0
+                        var fbChecked = 0
+                        var fbMismatch = 0
                         while (y < h) {
                             if (System.currentTimeMillis() > sweepDeadline) {
                                 capped = true
@@ -679,6 +766,18 @@ class DesktopService(
                             val tb = System.currentTimeMillis()
                             val n = runCatching { c.grabRegion565(0, y, w, rows, bandTimeout, bandBytes) }.getOrDefault(-1)
                             if (n <= 0) { ok = false; break }
+                            // v0.2.106: the socket sweep is the ground truth -
+                            // check the mapped framebuffer against it, band by
+                            // band. A map that reads a different server's file
+                            // (stray Xvfb) or a dead inode disagrees on nearly
+                            // every band and gets dropped below.
+                            if (fbMap != null) {
+                                val chk = fbCheckBuf(w * rows * 2)
+                                if (fbRegion(0, y, w, rows, chk) > 0) {
+                                    fbChecked++
+                                    if (!regionEquals(chk, bandBytes, w * rows * 2)) fbMismatch++
+                                }
+                            }
                             nativeProofAtMs = System.currentTimeMillis()
                             lastSourceProofAtMs = nativeProofAtMs
                             // v0.2.80: KB/s from the bands that ACTUALLY land, so
@@ -730,6 +829,19 @@ class DesktopService(
                         nativeMisses = 0
                         nativeLastErr = ""
                         nativeBandY = if (capped) y else h
+                        // v0.2.106: two sweeps in a row where >75% of the bands
+                        // disagree with the map = the map is not this server's
+                        // framebuffer. Busy content (video) can disagree on a few
+                        // bands through timing alone, never on almost all of them.
+                        if (fbMap != null && fbChecked >= 4) {
+                            if (fbMismatch * 4 > fbChecked * 3) {
+                                fbSuspect++
+                                if (fbSuspect >= 2) {
+                                    closeFbMap()
+                                    noteInfo("-fbdir map DISAGREES with the server ($fbMismatch/$fbChecked bands, twice) - dropped; damage bands back on GetImage")
+                                }
+                            } else fbSuspect = 0
+                        }
                         nativeGrabMs = System.currentTimeMillis() - t0
                         // v0.2.83: a sweep that ran to completion repainted the
                         // whole screen, so every pending damage band is now
@@ -808,6 +920,7 @@ class DesktopService(
                     captureMode = if (nativeFrames > 0) "native-retry" else captureMode
                 } finally {
                     runCatching { c?.close() }
+                    closeFbMap()   // v0.2.106: remapped on the next connection
                     if (nativeClient === c) {
                         nativeClient = null
                         // v0.2.92: the connection that carried capture-plane
@@ -946,18 +1059,24 @@ class DesktopService(
      */
     private fun defaultWmCommand(): String {
         val rootfs = com.emux.core.FsLayout.linuxRoot(ctx)
+        // v0.2.106: GNOME moved LAST. GNOME Shell needs real GL and dies
+        // instantly under proot+Xvfb (field vc201/vc202), and a leftover
+        // gnome-session from an earlier ubuntu-desktop attempt used to win
+        // over a working MATE/Xfce - the user then got the openbox fallback.
         return when {
-            java.io.File(rootfs, "usr/bin/gnome-session").isFile -> "gnome-session"
-            java.io.File(rootfs, "usr/bin/startxfce4").isFile -> "startxfce4"
             java.io.File(rootfs, "usr/bin/mate-session").isFile -> "mate-session"
+            java.io.File(rootfs, "usr/bin/startxfce4").isFile -> "startxfce4"
             java.io.File(rootfs, "usr/bin/startlxqt").isFile -> "startlxqt"
             java.io.File(rootfs, "usr/bin/lxsession").isFile -> "lxsession"
+            java.io.File(rootfs, "usr/bin/gnome-session").isFile -> "gnome-session"
             else -> "openbox"
         }
     }
 
     fun startDesktop(wmCommand: String = defaultWmCommand()) {
-        lastWm = wmCommand
+        // v0.2.106: "auto" / blank = the installed desktop (Settings default).
+        val wm = if (wmCommand.isBlank() || wmCommand == "auto") defaultWmCommand() else wmCommand
+        lastWm = wm
         // v0.1.100: AWAITING_FRAMES is also an in-progress state —
         // a second startDesktop() here would launch a duplicate X/capture
         // pipeline on top of the one already waiting for frames.
@@ -1411,7 +1530,7 @@ class DesktopService(
                 sessionW = desktopGeometry.substringBefore('x').toIntOrNull() ?: 0
                 sessionH = desktopGeometry.substringAfter('x').substringBefore('x').toIntOrNull() ?: 0
                 noteInfo("desktop geometry: $desktopGeometry")
-                val cmd = "emux-x11 $wmCommand $desktopGeometry $displayNum"
+                val cmd = "emux-x11 $wm $desktopGeometry $displayNum"
                 xRespawns = 0
                 // v0.1.80: tell the user WHERE the full log lives - the pane
                 // only shows a scrolling window; the diag file never rotates.
@@ -2739,9 +2858,27 @@ class DesktopService(
                 val len = sliceRows * w * 2
                 val ro = off0 + r * w * 2
                 val po = (fy + r) * bmpW * 2 + fx * 2
-                var i = 0
-                while (i < len && raw[ro + i] == prev[po + i]) i++
-                if (i < len) {
+                // v0.2.106 STALE-PIXEL FIX: compare ROW BY ROW. The mirror's
+                // stride is the screen width; a damage band narrower than the
+                // screen has a stride of its own width. The old contiguous
+                // compare walked the mirror with the band's stride, so from the
+                // second row on it compared against the WRONG mirror bytes - a
+                // narrow changed band (a blinking cursor, a scrolled strip,
+                // a menu item highlight) over flat background could compare
+                // "identical", skip the upload AND skip the mirror update, and
+                // that strip then stayed stale on screen until a full repaint.
+                val rowLen = w * 2
+                var changed = false
+                var rr0 = 0
+                while (rr0 < sliceRows && !changed) {
+                    val a = ro + rr0 * rowLen
+                    val b = po + rr0 * bmpW * 2
+                    var i = 0
+                    while (i < rowLen && raw[a + i] == prev[b + i]) i++
+                    if (i < rowLen) changed = true
+                    rr0++
+                }
+                if (changed) {
                     var j = 0; var k = 0
                     while (k < len) {
                         val v = (raw[ro + k].toInt() and 0xFF) or

@@ -464,6 +464,8 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    private var desktopStatusJob: kotlinx.coroutines.Job? = null
+
     private fun showDesktop() {
         b.termContainer.visibility = android.view.View.GONE
         b.paneDesktop.visibility = android.view.View.VISIBLE
@@ -493,14 +495,26 @@ class MainActivity : AppCompatActivity() {
             desktop.frameCallback = { runOnUiThread { b.desktopView.onNewFrame(desktop.frameId) } }
         }
         b.desktopView.desktop = desktop
-        lifecycleScope.launch {
+        // v0.2.106 PERF: every tap on the Desktop tab used to launch ANOTHER
+        // lifecycle-long collector; after a few tab switches N collectors each
+        // rebuilt the full diagnostic history string on the UI thread for
+        // every noteInfo line. One collector, ever.
+        desktopStatusJob?.cancel()
+        desktopStatusJob = lifecycleScope.launch {
             repeatOnLifecycle(Lifecycle.State.STARTED) {
-                desktop.state.collect { _ -> updateDesktopStatus() }
+                // v0.2.106: also refresh the moment the session is live, so
+                // the line can never stay on "Starting X server..." over a
+                // working desktop (field screenshot).
+                updateDesktopStatus()
                 // v0.1.66: the status line must ALSO refresh on errorText /
                 // history changes - the state collector alone left the pane
                 // showing a stale single line while diagnostics accumulated
                 // (field screenshots proved the history never rendered).
+                // v0.2.106: ...and it never did: StateFlow.collect never
+                // returns, so the errorText launch that sat AFTER it was
+                // unreachable. Both collectors now start side by side.
                 launch { desktop.errorText.collect { updateDesktopStatus() } }
+                desktop.state.collect { _ -> updateDesktopStatus() }
             }
         }
     }
@@ -534,9 +548,11 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    // v0.2.106: "auto" (default) lets DesktopService pick the installed
+    // desktop. The legacy "wm" key is ignored on purpose - see arrays.xml.
     private fun prefsWm(): String =
         androidx.preference.PreferenceManager.getDefaultSharedPreferences(this)
-            .getString("wm", "openbox") ?: "openbox"
+            .getString("desktop_session", "auto") ?: "auto"
 
     /** Attach a live TerminalService session to the view, creating one if needed. */
     private fun ensureSessionAttached() {

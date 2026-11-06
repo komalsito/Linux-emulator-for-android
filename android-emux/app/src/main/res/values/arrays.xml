@@ -1,16 +1,24 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
+    <!-- v0.2.106: desktop session. "auto" = whatever full desktop is
+         installed in the active distro (MATE > Xfce > LXQt > LXDE > GNOME),
+         else the seeded Openbox desktop. Stored under the NEW key
+         "desktop_session": the old "wm" key holds a persisted "openbox" on
+         every install that ever opened Settings, which silently overrode the
+         auto-detection (field: MATE installed, desktop still Openbox). -->
     <string-array name="wm_entries">
+        <item>Automatic (installed desktop)</item>
+        <item>MATE</item>
+        <item>Xfce</item>
+        <item>LXQt</item>
         <item>Openbox (lightweight)</item>
-        <item>Xfce4 session</item>
-        <item>LXDE session</item>
-        <item>i3 (tiling)</item>
     </string-array>
     <string-array name="wm_values">
-        <item>openbox</item>
+        <item>auto</item>
+        <item>mate-session</item>
         <item>startxfce4</item>
-        <item>startlxde</item>
-        <item>i3</item>
+        <item>startlxqt</item>
+        <item>openbox</item>
     </string-array>
 
     <!-- v0.1.47: installable distributions (values MUST match DistroCatalog ids) -->
