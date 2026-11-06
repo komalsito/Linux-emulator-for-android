@@ -275,8 +275,21 @@ android {
         // /etc/profile.d/emux-display.sh at every desktop start; login
         // shells (bash -l -> /etc/profile -> profile.d) export it, and the
         // app-side DISPLAY=:0 stays only as the pre-desktop fallback.
-        versionCode = 204
-        versionName = "0.2.104"
+        // v0.2.105 vc205: TOUCHPAD SCROLL + HARDLINK FIX (ENV_VERSION 86 re-seed).
+        //  1. Android 14+ delivers a touchpad two-finger swipe as ONE fake
+        //     finger classified CLASSIFICATION_TWO_FINGER_SWIPE (3); every
+        //     wheel path keyed on AMBIGUOUS_GESTURE (1), so the swipe became a
+        //     left-drag (text selection). DesktopView.onTouchEvent now routes
+        //     classification 3 straight to the wheel (anchored at the cursor)
+        //     and swallows 3-finger swipes / touchpad pinches.
+        //  2. No proot launch used --link2symlink, so every package shipping a
+        //     hardlink pair died in dpkg (field: perl-base 5.38.2 "error
+        //     setting ownership of /usr/bin/perl5.38.2.dpkg-new: No such file
+        //     or directory" while installing MATE). Android forbids hardlinks
+        //     in app storage; the linkfix shim's link()->linkat() cannot create
+        //     one either. All proot argv (app + guest scripts) now pass it.
+        versionCode = 205
+        versionName = "0.2.105"
 
         ndk {
             abiFilters += listOf("arm64-v8a", "armeabi-v7a", "x86_64")

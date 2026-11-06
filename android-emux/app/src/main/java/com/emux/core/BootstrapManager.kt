@@ -1549,7 +1549,7 @@ class BootstrapManager(private val ctx: Context) {
             else -> return ApkRun(false, "runPmProot called for ${spec.pkg}")
         }
         val argv = listOf(
-            proot.absolutePath, "-0", "-r", dest.absolutePath,
+            proot.absolutePath, "--link2symlink", "-0", "-r", dest.absolutePath,
             "-b", "/dev", "-b", "/proc", "-b", "/sys", "-w", "/",
             "/bin/sh", "-c", payload,
         )
@@ -1821,7 +1821,7 @@ class BootstrapManager(private val ctx: Context) {
             pkgs.joinToString(" ") + "; " +
             "i=0; while [ \$i -lt 2 ]; do dpkg --configure -a >&2 && break; i=\$((i + 1)); done"
         val argv = listOf(
-            proot.absolutePath, "-0", "-r", dest.absolutePath,
+            proot.absolutePath, "--link2symlink", "-0", "-r", dest.absolutePath,
             "-b", "/dev", "-b", "/proc", "-b", "/sys", "-w", "/",
             "/bin/sh", "-c", payload,
         )
@@ -2050,7 +2050,7 @@ class BootstrapManager(private val ctx: Context) {
                 // Termux temp dir being uncreatable here.
                 val ht = prootTmp(ctx)
                 sb.append("proot-ptrace=${probeExec(
-                    listOf(proot.absolutePath, "-0", "-r", dest.absolutePath,
+                    listOf(proot.absolutePath, "--link2symlink", "-0", "-r", dest.absolutePath,
                         "-b", "/dev", "/bin/true"),
                     nb + ("PROOT_TMP_DIR" to ht.absolutePath))}\n")
             }
@@ -2387,7 +2387,7 @@ class BootstrapManager(private val ctx: Context) {
         val hostTmp = prootTmp(ctx)
         val nb = FsLayout.nativeBridgeDir(ctx)
         val argv = listOf(
-            proot.absolutePath, "-0", "-r", dest.absolutePath,
+            proot.absolutePath, "--link2symlink", "-0", "-r", dest.absolutePath,
             "-b", "/dev", "-b", "/proc", "-b", "/sys", "-w", "/",
             "/bin/sh", "-c", payload,
         )
@@ -2767,7 +2767,7 @@ class BootstrapManager(private val ctx: Context) {
         val hostTmp = prootTmp(ctx)
         val nb = FsLayout.nativeBridgeDir(ctx)
         val argv = listOf(
-            proot.absolutePath, "-0", "-r", dest.absolutePath,
+            proot.absolutePath, "--link2symlink", "-0", "-r", dest.absolutePath,
             "-b", "/dev", "-b", "/proc", "-b", "/sys", "-w", "/",
             "/sbin/apk", "add", "--arch", archName(), "--no-cache",
         ) + pkgs
