@@ -62,7 +62,7 @@ fi
 [ -n "$DOCTOR_MODE" ] || rm -f /tmp/emux_tint2_strikes 2>/dev/null
 # v0.2.108: dock/tray pidfiles, HiDPI resources and the start-menu install
 # attempt are per-session too.
-[ -n "$DOCTOR_MODE" ] || rm -f /tmp/emux_tint2.pid /tmp/emux_tray.pid /tmp/emux_scale_applied /tmp/emux_jgmenu_tried /tmp/emux_start_icon 2>/dev/null
+[ -n "$DOCTOR_MODE" ] || rm -f /tmp/emux_tint2.pid /tmp/emux_tray.pid /tmp/emux_scale_applied /tmp/emux_jgmenu_tried /tmp/emux_start_icon /tmp/emux_clipd.pid /tmp/emux_clip_in /tmp/emux_clip_out /tmp/emux_clip_last 2>/dev/null
 # v0.2.108 HiDPI: the app passes EMUX_SCALE=2 for "Retina" (device
 # resolution, UI doubled). Xft.dpi (applied once X is up, see apply_scale)
 # scales Openbox, tint2 and xterm fonts; GTK gets GDK_SCALE, with
@@ -506,6 +506,23 @@ btn_watch() {
 apply_scale() {
   [ -e /tmp/emux_scale_applied ] && return 0
   command -v xrdb >/dev/null 2>&1 || return 0
+  # v0.2.111 xterm that behaves like a modern terminal (field: "on the
+  # terminal inside the desktop I cannot copy nor paste"): a scalable font
+  # (bitmap fonts ignore Xft.dpi - unreadable at Retina), selecting text
+  # copies it to CLIPBOARD (which the bridge hands to the tablet), Ctrl+Shift+C
+  # / Ctrl+Shift+V copy and paste, right-click (= long-press) pastes.
+  cat > /tmp/emux-xterm.ad <<'XTAD'
+XTerm*faceName: Monospace
+XTerm*faceSize: 11
+XTerm*selectToClipboard: true
+XTerm*scrollBar: false
+XTerm*saveLines: 5000
+XTerm*VT100.translations: #override \n\
+    Ctrl Shift <Key>C: copy-selection(CLIPBOARD) \n\
+    Ctrl Shift <Key>V: insert-selection(CLIPBOARD) \n\
+    <Btn3Down>: insert-selection(CLIPBOARD)
+XTAD
+  xrdb -merge /tmp/emux-xterm.ad >/dev/null 2>&1
   printf 'Xft.dpi: %s\nXcursor.size: %s\n' "$((96 * EMUX_SCALE))" "$((24 * EMUX_SCALE))" \
     | xrdb -merge >/dev/null 2>&1 && touch /tmp/emux_scale_applied && \
     echo "emux-x11: UI scale ${EMUX_SCALE}x (Xft.dpi $((96 * EMUX_SCALE)))" >&2
@@ -710,7 +727,45 @@ start_panels() {
     echo "emux-x11: tray bar started (pid $!)" >&2
   fi
 }
+# v0.2.111 CLIPBOARD BRIDGE, guest side: X CLIPBOARD <-> the app, through
+# two files in /tmp (see DesktopService "CLIPBOARD BRIDGE"). Runs for every
+# desktop kind - a full session owns its panels, not the clipboard.
+start_clipd() {
+  pid_alive /tmp/emux_clipd.pid && return 0
+  cat > /tmp/emux-clipd <<'CLIPD'
+#!/bin/sh
+# EmuX clipboard bridge (v0.2.111). Waits for xclip while it installs.
+IN=/tmp/emux_clip_in; OUT=/tmp/emux_clip_out; LAST=/tmp/emux_clip_last
+T=""; command -v timeout >/dev/null 2>&1 && T="timeout 3"
+while ! command -v xclip >/dev/null 2>&1; do sleep 5; done
+: > "$LAST"
+while :; do
+  # tablet -> Linux: own both selections (Ctrl+V and middle-click paste)
+  if [ -e "$IN" ] && mv -f "$IN" "$IN.cur" 2>/dev/null; then
+    if [ -s "$IN.cur" ]; then
+      xclip -selection clipboard -i < "$IN.cur" >/dev/null 2>&1
+      xclip -selection primary -i < "$IN.cur" >/dev/null 2>&1
+      cp -f "$IN.cur" "$LAST" 2>/dev/null
+    fi
+    rm -f "$IN.cur"
+  fi
+  # Linux -> tablet: hand over CLIPBOARD whenever it holds new text (bounded:
+  # an owner that never answers must not wedge the bridge)
+  if $T xclip -selection clipboard -o > "$OUT.part" 2>/dev/null && [ -s "$OUT.part" ] \
+     && ! cmp -s "$OUT.part" "$LAST"; then
+    cp -f "$OUT.part" "$LAST" 2>/dev/null
+    mv -f "$OUT.part" "$OUT" 2>/dev/null
+  fi
+  rm -f "$OUT.part"
+  sleep 1
+done
+CLIPD
+  nohup sh /tmp/emux-clipd >/dev/null 2>&1 </dev/null &
+  echo "$!" > /tmp/emux_clipd.pid 2>/dev/null
+  echo "emux-x11: clipboard bridge started (pid $!)" >&2
+}
 start_furniture() {
+  start_clipd
   # v0.2.101: paint the root FIRST so a black pane stays unambiguous even
   # while a full session is taking over, then keep the EmuX furniture OFF the
   # session's desktop - a session manager (gnome-session / startxfce4 via
@@ -954,13 +1009,13 @@ EOF
   [ -e "$STAMP" ] && OLD_APPS=$(cat "$STAMP" 2>/dev/null)
   if emux_keep tint2rc; then
     echo "emux-x11: keep-tint2rc marker - the user's panel config is NOT rewritten" >&2
-  elif [ ! -e "$HOME/.config/tint2/tint2rc" ] || [ "$APPS s$EMUX_SCALE v110" != "$OLD_APPS" ]; then
+  elif [ ! -e "$HOME/.config/tint2/tint2rc" ] || [ "$APPS s$EMUX_SCALE v111" != "$OLD_APPS" ]; then
     if [ -e "$HOME/.config/tint2/tint2rc" ] && ! grep -q "EmuX" "$HOME/.config/tint2/tint2rc" 2>/dev/null; then
       cp "$HOME/.config/tint2/tint2rc" "$HOME/.config/tint2/tint2rc.emux-bak" 2>/dev/null
     fi
     S="$EMUX_SCALE"
     {
-      echo "# EmuX tint2 panel (v0.2.110) - centred dock: start, pinned apps, windows"
+      echo "# EmuX tint2 panel (v0.2.111) - centred dock: start, pinned apps, windows"
       # bg 1: the dock bubble
       echo "rounded = $((12 * S))"
       echo "border_width = 1"
@@ -997,9 +1052,14 @@ EOF
       # off-screen panel window would be unreachable.
       echo "panel_margin = 0 0"
       echo "autohide = 2"
-      echo "autohide_show_timeout = 0.15"
-      echo "autohide_hide_timeout = 0.4"
-      echo "autohide_height = 1"
+      # v0.2.111 (field: "the dock hides too fast" + interactions felt
+      # twitchy): stays 1.5 s after the pointer leaves - enough to come back
+      # to it or reach the start menu - and reveals after a deliberate
+      # 0.3 s at the edge instead of popping on every pass. The reveal strip
+      # scales with the UI (1 px was unreachable-feeling at Retina).
+      echo "autohide_show_timeout = 0.3"
+      echo "autohide_hide_timeout = 1.5"
+      echo "autohide_height = $((2 * S))"
       echo "panel_padding = $((8 * S)) $((4 * S)) $((6 * S))"
       echo "panel_background_id = 1"
       echo "panel_layer = top"
@@ -1047,7 +1107,7 @@ EOF
       echo "tooltip_background_id = 1"
       echo "tooltip_padding = $((6 * S)) $((4 * S))"
     } > "$HOME/.config/tint2/tint2rc" 2>/dev/null
-    echo "$APPS s$EMUX_SCALE v110" > "$STAMP" 2>/dev/null
+    echo "$APPS s$EMUX_SCALE v111" > "$STAMP" 2>/dev/null
   fi
   # --- v0.2.108: tray bar (full width, bottom layer, tray + clock right) ---
   if ! emux_keep tint2rc; then
@@ -1073,9 +1133,14 @@ EOF
       # bottom edge.
       echo "panel_margin = $((8 * S)) 0"
       echo "autohide = 2"
-      echo "autohide_show_timeout = 0.15"
-      echo "autohide_hide_timeout = 0.4"
-      echo "autohide_height = 1"
+      # v0.2.111 (field: "the dock hides too fast" + interactions felt
+      # twitchy): stays 1.5 s after the pointer leaves - enough to come back
+      # to it or reach the start menu - and reveals after a deliberate
+      # 0.3 s at the edge instead of popping on every pass. The reveal strip
+      # scales with the UI (1 px was unreachable-feeling at Retina).
+      echo "autohide_show_timeout = 0.3"
+      echo "autohide_hide_timeout = 1.5"
+      echo "autohide_height = $((2 * S))"
       echo "panel_padding = $((10 * S)) $((4 * S)) $((8 * S))"
       echo "panel_background_id = 1"
       echo "panel_layer = top"
@@ -1135,14 +1200,18 @@ SMENU
     echo "color_sel_fg = #ffffff 100"
     echo "color_sep_fg = #ffffff 20"
   } > "$HOME/.config/jgmenu/emux-jgmenurc" 2>/dev/null
-  if ! command -v jgmenu >/dev/null 2>&1 && [ ! -e /tmp/emux_jgmenu_tried ]; then
+  # v0.2.111: xclip (clipboard bridge, emux-clipd) rides the same install.
+  EXTRA_PKGS=""
+  command -v jgmenu >/dev/null 2>&1 || EXTRA_PKGS="$EXTRA_PKGS jgmenu"
+  command -v xclip >/dev/null 2>&1 || EXTRA_PKGS="$EXTRA_PKGS xclip"
+  if [ -n "$EXTRA_PKGS" ] && [ ! -e /tmp/emux_jgmenu_tried ]; then
     touch /tmp/emux_jgmenu_tried 2>/dev/null
     if command -v apt-get >/dev/null 2>&1; then
-      echo "emux-x11: installing jgmenu (start menu) in the background" >&2
+      echo "emux-x11: installing$EXTRA_PKGS in the background" >&2
       ( DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-          -o DPkg::Lock::Timeout=300 jgmenu >/tmp/emux_jgmenu.log 2>&1 ) </dev/null >/dev/null 2>&1 &
+          -o DPkg::Lock::Timeout=300 $EXTRA_PKGS >/tmp/emux_jgmenu.log 2>&1 ) </dev/null >/dev/null 2>&1 &
     elif command -v apk >/dev/null 2>&1; then
-      ( apk add --no-cache jgmenu >/tmp/emux_jgmenu.log 2>&1 ) </dev/null >/dev/null 2>&1 &
+      ( apk add --no-cache $EXTRA_PKGS >/tmp/emux_jgmenu.log 2>&1 ) </dev/null >/dev/null 2>&1 &
     fi
   fi
   # --- Openbox right-click menu (same apps, plus WM controls) ---
@@ -1366,7 +1435,7 @@ THEME
     echo "emux-x11: rc.xml audit clean ($RCX_EFF binds no Frame/Client/Desktop context)" >&2
   fi
   # --- tint2 refresh: darker bar, bigger icons (rewrite once per stamp) ---
-  if ! emux_keep tint2rc && [ -e "$HOME/.config/tint2/tint2rc" ] && ! grep -q "EmuX tint2 panel (v0.2.110)" "$HOME/.config/tint2/tint2rc" 2>/dev/null; then
+  if ! emux_keep tint2rc && [ -e "$HOME/.config/tint2/tint2rc" ] && ! grep -q "EmuX tint2 panel (v0.2.111)" "$HOME/.config/tint2/tint2rc" 2>/dev/null; then
     cp "$HOME/.config/tint2/tint2rc" "$HOME/.config/tint2/tint2rc.pre-rice" 2>/dev/null
     rm -f "$HOME/.config/tint2/tint2rc" 2>/dev/null
   fi

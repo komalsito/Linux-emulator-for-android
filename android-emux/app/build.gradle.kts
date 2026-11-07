@@ -352,8 +352,18 @@ android {
         // slide away when a window overlaps their rectangle and pop back
         // over it when the pointer touches the bottom edge (1 px stays
         // peeking - tint2 unhides on pointer-enter).
-        versionCode = 210
-        versionName = "0.2.110"
+        // v0.2.111 vc211: UNIVERSAL CLIPBOARD + CLEAN DESKTOP (ENV_VERSION 92).
+        //  1. Clipboard bridge: tablet <-> X CLIPBOARD/PRIMARY via tmp files
+        //     and guest emux-clipd (xclip, installed in the background);
+        //     tablet side pushes on window focus / clip change, pulls every 0.5 s.
+        //  2. xterm: Xft font (scales at Retina), select = copy, Ctrl+Shift+C/V,
+        //     right-click/long-press pastes. Terminal tab: Ctrl+Shift+C/V too.
+        //  3. Diagnostic badge hidden by default (Settings > Show desktop
+        //     diagnostics); still appears by itself when the capture goes stale.
+        //  4. Dock/tray intellihide: hide after 1.5 s (was 0.4), show after a
+        //     deliberate 0.3 s, reveal strip 2 px x UI scale.
+        versionCode = 211
+        versionName = "0.2.111"
 
         ndk {
             abiFilters += listOf("arm64-v8a", "armeabi-v7a", "x86_64")

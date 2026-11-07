@@ -479,6 +479,17 @@ class SettingsActivity : AppCompatActivity() {
                 setDefaultValue(com.emux.x11.DesktopService.DEFAULT_CAPTURE_LONG_SIDE.toString())
                 summaryProvider = androidx.preference.ListPreference.SimpleSummaryProvider.getInstance()
             })
+            screen.addPreference(androidx.preference.SwitchPreferenceCompat(ctx).apply {
+                key = "desktop_hud"; title = "Show desktop diagnostics"
+                summary = "The frame-rate / input status lines at the top left of the desktop. " +
+                    "Off keeps the desktop clean; they still appear by themselves if the picture stops updating."
+                setDefaultValue(false)
+            })
+            screen.addPreference(androidx.preference.SwitchPreferenceCompat(ctx).apply {
+                key = "clipboard_sync"; title = "Share clipboard with the desktop"
+                summary = "Copy on the tablet, paste in Linux apps - and the other way round."
+                setDefaultValue(true)
+            })
             screen.addPreference(androidx.preference.ListPreference(ctx).apply {
                 key = "color_depth"; title = "Desktop colors"
                 entries = arrayOf("True color — 24-bit (smooth gradients, sharpest)",

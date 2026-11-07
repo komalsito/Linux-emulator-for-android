@@ -991,6 +991,12 @@ class VtTerminalView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attr
             pasteClipboard()
             return true
         }
+        // v0.2.111: the Linux-terminal convention too - Ctrl+Shift+V pastes,
+        // Ctrl+Shift+C copies the current selection (plain Ctrl+C stays SIGINT).
+        if (event.isCtrlPressed && event.isShiftPressed && !event.isAltPressed) {
+            if (keyCode == KeyEvent.KEYCODE_V) { pasteClipboard(); return true }
+            if (keyCode == KeyEvent.KEYCODE_C && selA >= 0 && selB >= 0) { copySelection(); return true }
+        }
         // v0.1.84: IN-APP layout switch shortcut - the ROM's external-keyboard
         // layout shortcut never reaches this app (field device), so Alt+Shift
         // (either press order) toggles the terminal layout Auto<->Spanish and

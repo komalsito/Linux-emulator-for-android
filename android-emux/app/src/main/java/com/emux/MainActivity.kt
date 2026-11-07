@@ -1093,6 +1093,27 @@ class MainActivity : AppCompatActivity() {
     }
 
     // -------------------------------------------------------- power lifecycle
+    // v0.2.111 CLIPBOARD BRIDGE, tablet side. Android only lets the app READ
+    // the clipboard while it has input focus, so the tablet's clipboard goes
+    // to the Linux desktop at the two moments that is true: the window
+    // regains focus (copied in another app, came back), and the clip changes
+    // while EmuX is in front (e.g. a copy in the Terminal tab).
+    private val clipListener = android.content.ClipboardManager.OnPrimaryClipChangedListener { pushClipToDesktop() }
+
+    private fun pushClipToDesktop() {
+        runCatching {
+            val cm = getSystemService(android.content.ClipboardManager::class.java) ?: return
+            val clip = cm.primaryClip ?: return
+            if (clip.itemCount == 0) return
+            desktop.pushClipboardToGuest(clip.getItemAt(0).coerceToText(this)?.toString())
+        }
+    }
+
+    override fun onWindowFocusChanged(hasFocus: Boolean) {
+        super.onWindowFocusChanged(hasFocus)
+        if (hasFocus) pushClipToDesktop()
+    }
+
     override fun onResume() {
         super.onResume()
         // v0.2.86 CRASH-LOOP FIX (field HUAWEI MRDI-W09, API 31: "entering
@@ -1160,6 +1181,7 @@ class MainActivity : AppCompatActivity() {
 
     override fun onStart() {
         super.onStart()
+        runCatching { getSystemService(android.content.ClipboardManager::class.java)?.addPrimaryClipChangedListener(clipListener) }   // v0.2.111
         // v0.1.3 CRASH FIX: on Android 14+ (targetSdk 34) registering a receiver
         // for SCREEN_ON/SCREEN_OFF requires the RECEIVER_NOT_EXPORTED flag —
         // without it, registerReceiver throws SecurityException here and this ran
@@ -1187,6 +1209,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     override fun onStop() {
+        runCatching { getSystemService(android.content.ClipboardManager::class.java)?.removePrimaryClipChangedListener(clipListener) }
         runCatching { unregisterReceiver(screenReceiver) }
         super.onStop()
     }

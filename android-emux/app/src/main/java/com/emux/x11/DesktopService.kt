@@ -1609,6 +1609,7 @@ class DesktopService(
                 // daemons that double-forked away from the launcher included)
                 // and EMUX_SCALE (HiDPI: GTK/Qt/Xft scale factor for the guest).
                 desktopId = "d" + System.currentTimeMillis()
+                startClipboardBridge()   // v0.2.111
                 val cmd = "EMUX_DESKTOP_ID=$desktopId EMUX_SCALE=${uiScale()} emux-x11 $wm $desktopGeometry $displayNum"
                 xRespawns = 0
                 // v0.1.80: tell the user WHERE the full log lives - the pane
@@ -4555,8 +4556,78 @@ class DesktopService(
     }
 
     // -------------------------------------------------------------------- stop
+    // ------------------------------------------------------------------
+    // v0.2.111 CLIPBOARD BRIDGE (field: "copy outside, paste on the desktop -
+    // and copy on the desktop, paste on the tablet"). Two files in the shared
+    // rootfs /tmp carry text between the Android clipboard and the X
+    // CLIPBOARD/PRIMARY selections, the guest side being emux-clipd (xclip),
+    // started by emux-x11 with the desktop:
+    //   tmp/emux_clip_in   Android -> X  (written here, applied + deleted by clipd)
+    //   tmp/emux_clip_out  X -> Android  (written by clipd, read + deleted here)
+    // clipLast is the last text that crossed in EITHER direction, so a copy
+    // never echoes back (Android sets -> listener fires -> same text -> stop).
+    @Volatile private var clipLast: String? = null
+    private var clipJob: Job? = null
+
+    private fun clipboardSyncOn(): Boolean = runCatching {
+        androidx.preference.PreferenceManager.getDefaultSharedPreferences(ctx).getBoolean("clipboard_sync", true)
+    }.getOrDefault(true)
+
+    /** Android -> X. Called on the UI side when the tablet clipboard is readable
+     *  (window focus / clip-changed): reading it in the background is not allowed. */
+    fun pushClipboardToGuest(text: String?) {
+        if (text.isNullOrEmpty() || text == clipLast || !clipboardSyncOn()) return
+        if (state.value == State.IDLE || state.value == State.ERROR) return
+        clipLast = text
+        scope.launch {
+            runCatching {
+                val dir = java.io.File(com.emux.core.FsLayout.linuxRoot(ctx), "tmp")
+                val part = java.io.File(dir, "emux_clip_in.part")
+                part.writeText(text.take(1_000_000))
+                part.renameTo(java.io.File(dir, "emux_clip_in"))   // atomic hand-over
+            }
+        }
+    }
+
+    /** X -> Android: pick up what emux-clipd saw on the X CLIPBOARD. */
+    private fun startClipboardBridge() {
+        clipJob?.cancel()
+        clipJob = scope.launch {
+            val f = java.io.File(com.emux.core.FsLayout.linuxRoot(ctx), "tmp/emux_clip_out")
+            runCatching { f.delete() }   // never replay a previous session's copy
+            // Seed the new desktop with what the tablet already has copied
+            // (readable here only while EmuX holds focus - Android returns
+            // nothing otherwise, which is fine). clipLast is cleared so the
+            // fresh X server gets it even if it crossed in a past session.
+            delay(4_000)
+            clipLast = null
+            android.os.Handler(android.os.Looper.getMainLooper()).post {
+                runCatching {
+                    val clip = ctx.getSystemService(android.content.ClipboardManager::class.java)?.primaryClip
+                    if (clip != null && clip.itemCount > 0)
+                        pushClipboardToGuest(clip.getItemAt(0).coerceToText(ctx)?.toString())
+                }
+            }
+            while (isActive) {
+                delay(500)
+                if (!f.isFile) continue
+                val txt = runCatching { f.readText() }.getOrNull()
+                runCatching { f.delete() }
+                if (txt.isNullOrEmpty() || txt == clipLast || !clipboardSyncOn()) continue
+                clipLast = txt
+                android.os.Handler(android.os.Looper.getMainLooper()).post {
+                    runCatching {
+                        ctx.getSystemService(android.content.ClipboardManager::class.java)
+                            ?.setPrimaryClip(android.content.ClipData.newPlainText("Linux desktop", txt))
+                    }
+                }
+            }
+        }
+    }
+
     fun stop() {
         desktopId = ""   // v0.2.108: the stop sweep kills the whole marked tree
+        clipJob?.cancel(); clipJob = null   // v0.2.111
         frameReader?.cancel(); frameReader = null
         runCatching { activeSock?.close() }; activeSock = null   // v0.1.54
         runCatching { listener?.close() }; listener = null

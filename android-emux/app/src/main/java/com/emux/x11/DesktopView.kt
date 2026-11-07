@@ -420,7 +420,16 @@ class DesktopView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attrs) 
         }
         // v0.2.33 LIVE badge (see onNewFrame)
         val fps = frameTimes.size / 2f
-        if (fps > 0f) {
+        // v0.2.111 CLEAN DESKTOP (field request): the diagnostic badge lines
+        // (LIVE/INPUT/proof + gesture legend) are hidden unless Settings >
+        // "Show desktop diagnostics" is on. They come back by themselves only
+        // when the capture goes STALE - the one moment they are worth reading.
+        val staleNow = run {
+            val ageMs = System.currentTimeMillis() - lastFrameMs
+            val proofAge = desktop?.sourceProofAgeSec ?: -1L
+            ageMs > 8_000 && !(proofAge in 0..8)
+        }
+        if (fps > 0f && (showHud() || staleNow)) {
             // v0.2.68 FIX (input-dead audit, round 3): a capture helper that
             // dies AFTER the first frame used to leave this badge frozen at
             // "LIVE 0.5 fps" over the last bitmap FOREVER (frameTimes is only
@@ -2335,6 +2344,9 @@ class DesktopView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attrs) 
     private fun onOverlayTouch(sx: Float, sy: Float): Boolean {
         return false
     }
+
+    /** v0.2.111: diagnostic badge on/off (Settings, read live; default off). */
+    private fun showHud(): Boolean = settingsPrefs?.getBoolean("desktop_hud", false) ?: false
 
     private fun drawOverlay(canvas: Canvas) {
         // v0.2.89: the top-right "keys" toggle and the 40dp helper key bar are

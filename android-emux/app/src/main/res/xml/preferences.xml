@@ -65,6 +65,18 @@
         app:defaultValue="1280"
         app:useSimpleSummaryProvider="true" />
 
+    <SwitchPreferenceCompat
+        app:key="desktop_hud"
+        app:title="Show desktop diagnostics"
+        app:summary="The frame-rate / input status lines at the top left of the desktop. Off keeps the desktop clean; they still appear by themselves if the picture stops updating."
+        app:defaultValue="false" />
+
+    <SwitchPreferenceCompat
+        app:key="clipboard_sync"
+        app:title="Share clipboard with the desktop"
+        app:summary="Copy on the tablet, paste in Linux apps - and the other way round."
+        app:defaultValue="true" />
+
     <ListPreference
         app:key="color_depth"
         app:title="Desktop colors"
