@@ -403,9 +403,8 @@ class DesktopView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attrs) 
         val w = f.width * s; val h = f.height * s
         val left = (width - w) / 2 + tx
         val top = (height - h) / 2 + ty
-        srcRect.set(0, 0, f.width, f.height)
-        dstRect.set(left.toInt(), top.toInt(), (left + w).toInt(), (top + h).toInt())
-        canvas.drawBitmap(f, srcRect, dstRect, bmpPaint)
+        // v0.2.112: tiles - only the changed ones are re-uploaded to the GPU
+        f.draw(canvas, left, top, w, h, bmpPaint)
         // v0.2.66: the synthetic pointer, above the frame and below the badges
         drawCursor(canvas)
         // v0.2.88: frames flow but nothing painted yet (first-boot apt
@@ -634,7 +633,7 @@ class DesktopView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attrs) 
      * lum >= 0.12 (the painted root #20344d is ~0.2) means the desktop has
      * content and the startup card never shows again this session.
      */
-    private fun probeFrameContent(f: android.graphics.Bitmap) {
+    private fun probeFrameContent(f: TiledFrame) {
         val now = System.currentTimeMillis()
         if (now - lastContentProbeMs < 1_000) return
         lastContentProbeMs = now
@@ -642,7 +641,7 @@ class DesktopView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attrs) 
             val probe = contentProbeBmp ?: android.graphics.Bitmap.createBitmap(
                 4, 6, android.graphics.Bitmap.Config.ARGB_8888).also { contentProbeBmp = it }
             val pc = Canvas(probe)
-            pc.drawBitmap(f, null, RectF(0f, 0f, 4f, 6f), null)
+            f.draw(pc, 0f, 0f, 4f, 6f, null)
             pc.setBitmap(null)
             for (py in 0 until 6) for (px in 0 until 4) {
                 val p = probe.getPixel(px, py)
@@ -785,6 +784,24 @@ class DesktopView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attrs) 
     override fun onHoverEvent(event: android.view.MotionEvent): Boolean {
         noteEventShape("hover", event)   // v0.2.97: evidence - a trackpad can deliver whole gestures as hover
         val a = event.actionMasked
+        if (a == android.view.MotionEvent.ACTION_HOVER_EXIT) {
+            val f = desktop?.currentFrame
+            if (f != null && event.buttonState == 0 && lastHoverViewY >= 0f &&
+                event.y >= lastHoverViewY && isMouseInput(event)) {
+                val (x, y) = mapToX(event.x, event.y, false)
+                if (y >= f.height * 9 / 10) {
+                    cancelEdgeSnap()
+                    val bottom = f.height - 1
+                    val r = Runnable { edgeSnap = null; desktop?.injectMotion(x, bottom) }
+                    edgeSnap = r
+                    postDelayed(r, 60)
+                }
+            }
+        } else if (a == android.view.MotionEvent.ACTION_HOVER_MOVE ||
+            a == android.view.MotionEvent.ACTION_HOVER_ENTER) {
+            if (a == android.view.MotionEvent.ACTION_HOVER_ENTER) cancelEdgeSnap()
+            lastHoverViewY = event.y
+        }
         if (a == android.view.MotionEvent.ACTION_HOVER_MOVE ||
             a == android.view.MotionEvent.ACTION_HOVER_ENTER) {
             if (isMouseInput(event)) {
@@ -1228,6 +1245,11 @@ class DesktopView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attrs) 
     private val notedEventShapes = HashSet<String>()
     private var inputDevicesNoted = false
     private fun noteEventShape(where: String, e: MotionEvent, extra: String = "") {
+        // v0.2.112 PERF: this ran on EVERY touch/hover event (a trackpad
+        // hovers at ~120 Hz) and built a fresh key string each time - pure
+        // allocation churn on the UI thread in normal use. Evidence is
+        // collected only while the diagnostics badge is switched on.
+        if (!hudCached()) return
         // v0.2.98: button bits join the dedup key. The v0.2.97 key dropped
         // them, so a hover stream carrying BUTTON_PRIMARY (the shape the
         // field report points at: "moves as if selecting") deduped into the
@@ -1990,6 +2012,7 @@ class DesktopView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attrs) 
     }
 
     override fun onTouchEvent(event: MotionEvent): Boolean {
+        cancelEdgeSnap()   // v0.2.112: a press follows HOVER_EXIT - never snap under a click
         // v0.2.105: ANDROID 14+ TOUCHPAD GESTURES. A real touchpad's two-finger
         // swipe is NOT delivered as two pointers: the framework's gesture
         // converter emits ONE fake-finger DOWN/MOVE/UP stream classified
@@ -2347,6 +2370,28 @@ class DesktopView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attrs) 
 
     /** v0.2.111: diagnostic badge on/off (Settings, read live; default off). */
     private fun showHud(): Boolean = settingsPrefs?.getBoolean("desktop_hud", false) ?: false
+
+    // v0.2.112: the hot input paths ask at most once a second.
+    private var hudCache = false
+    private var hudCacheAtMs = 0L
+    private fun hudCached(): Boolean {
+        val now = android.os.SystemClock.uptimeMillis()
+        if (now - hudCacheAtMs > 1_000L) { hudCache = showHud(); hudCacheAtMs = now }
+        return hudCache
+    }
+
+    // v0.2.112 BOTTOM-EDGE REACH (field: "I couldn't open the taskbar"). The
+    // dock auto-hides and comes back when the X pointer touches the bottom
+    // edge - but the pane does not end at the bottom of the screen (the
+    // status line sits under it), so a trackpad pointer swept downwards
+    // leaves the view a few pixels SHORT of the edge and X never sees the
+    // last row. Leaving the pane downwards near its bottom now parks the X
+    // pointer on the bottom row. Deferred 60 ms and cancelled by any touch
+    // stream, because Android also sends HOVER_EXIT right before a click.
+    private var edgeSnap: Runnable? = null
+    private var lastHoverViewY = -1f
+
+    private fun cancelEdgeSnap() { edgeSnap?.let { removeCallbacks(it) }; edgeSnap = null }
 
     private fun drawOverlay(canvas: Canvas) {
         // v0.2.89: the top-right "keys" toggle and the 40dp helper key bar are

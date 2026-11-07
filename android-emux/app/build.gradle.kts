@@ -362,8 +362,24 @@ android {
         //     diagnostics); still appears by itself when the capture goes stale.
         //  4. Dock/tray intellihide: hide after 1.5 s (was 0.4), show after a
         //     deliberate 0.3 s, reveal strip 2 px x UI scale.
-        versionCode = 211
-        versionName = "0.2.111"
+        // v0.2.112 vc212: PERFORMANCE AUDIT (ENV_VERSION 93).
+        //  Guest: running0 ran ~6 traced execs PER PROCESS (sed/cut/tr/head/
+        //  grep) and the 5 s governor called it repeatedly for 20 min - with
+        //  MATE's 60+ processes, thousands of proot-traced execs per tick. Now
+        //  one ps + one awk. seed_desktop_config (dozen file rewrites) only
+        //  when the installed set changes, not every tick. pidfile checks via
+        //  builtins. Background apt (REST/governor/extras) once a day, nice 19,
+        //  3 tries max (was 30 per desktop start). 45 s census = diagnostics
+        //  only. Xvfb -nocursor (the pane draws the pointer). clipd lighter.
+        //  App: TiledFrame - the pane is 256x128 tiles, so a small change
+        //  re-uploads a few hundred KB to the GPU instead of the whole 13 MB
+        //  Retina/24-bit bitmap. Healer full sweeps >= 5 s apart (were every
+        //  ~1-2 s while the user worked). One pending UI post per frame burst.
+        //  Per-event diagnostics only with the badge on. Bottom-edge reach:
+        //  leaving the pane downwards parks the X pointer on the last row so
+        //  the auto-hidden dock reveals.
+        versionCode = 212
+        versionName = "0.2.112"
 
         ndk {
             abiFilters += listOf("arm64-v8a", "armeabi-v7a", "x86_64")

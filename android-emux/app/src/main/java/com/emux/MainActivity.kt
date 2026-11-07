@@ -464,6 +464,19 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    // v0.2.112 PERF: the capture thread calls frameCallback once per painted
+    // chunk - several times per frame during a burst - and each call used to
+    // post a NEW Runnable to the UI queue. One pending post at a time now;
+    // it reads the latest frameId when it runs.
+    private val framePosted = java.util.concurrent.atomic.AtomicBoolean(false)
+    private val frameRunnable = Runnable {
+        framePosted.set(false)
+        b.desktopView.onNewFrame(desktop.frameId)
+    }
+    private fun postFrame() {
+        if (framePosted.compareAndSet(false, true)) b.desktopView.post(frameRunnable)
+    }
+
     private var desktopStatusJob: kotlinx.coroutines.Job? = null
 
     private fun showDesktop() {
@@ -489,10 +502,10 @@ class MainActivity : AppCompatActivity() {
             // v0.1.28: set the UI callback BEFORE startDesktop — startDesktop
             // owns the single frame reader now (the old duplicate
             // beginFrameLoop() here raced with the internal one and lost).
-            desktop.frameCallback = { runOnUiThread { b.desktopView.onNewFrame(desktop.frameId) } }
+            desktop.frameCallback = { postFrame() }
             desktop.startDesktop(wmCommand = prefsWm())
         } else {
-            desktop.frameCallback = { runOnUiThread { b.desktopView.onNewFrame(desktop.frameId) } }
+            desktop.frameCallback = { postFrame() }
         }
         b.desktopView.desktop = desktop
         // v0.2.106 PERF: every tap on the Desktop tab used to launch ANOTHER
@@ -1163,7 +1176,7 @@ class MainActivity : AppCompatActivity() {
         b.desktopStatus.text = getString(R.string.x_starting)
         lifecycleScope.launch {
             kotlinx.coroutines.delay(2_000)
-            desktop.frameCallback = { runOnUiThread { b.desktopView.onNewFrame(desktop.frameId) } }
+            desktop.frameCallback = { postFrame() }
             desktop.startDesktop(wmCommand = prefsWm())
         }
     }

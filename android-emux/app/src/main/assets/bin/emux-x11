@@ -62,7 +62,7 @@ fi
 [ -n "$DOCTOR_MODE" ] || rm -f /tmp/emux_tint2_strikes 2>/dev/null
 # v0.2.108: dock/tray pidfiles, HiDPI resources and the start-menu install
 # attempt are per-session too.
-[ -n "$DOCTOR_MODE" ] || rm -f /tmp/emux_tint2.pid /tmp/emux_tray.pid /tmp/emux_scale_applied /tmp/emux_jgmenu_tried /tmp/emux_start_icon /tmp/emux_clipd.pid /tmp/emux_clip_in /tmp/emux_clip_out /tmp/emux_clip_last 2>/dev/null
+[ -n "$DOCTOR_MODE" ] || rm -f /tmp/emux_tint2.pid /tmp/emux_tray.pid /tmp/emux_scale_applied /tmp/emux_jgmenu_tried /tmp/emux_start_icon /tmp/emux_clipd.pid /tmp/emux_clip_in /tmp/emux_clip_out /tmp/emux_clip_last /tmp/emux_seed_sig /tmp/emux_pcmanfm_ok 2>/dev/null
 # v0.2.108 HiDPI: the app passes EMUX_SCALE=2 for "Retina" (device
 # resolution, UI doubled). Xft.dpi (applied once X is up, see apply_scale)
 # scales Openbox, tint2 and xterm fonts; GTK gets GDK_SCALE, with
@@ -131,7 +131,43 @@ running() {
 # `/bin/sh /path/emux-capture`-style wrappers) EXACTLY and skips zombies -
 # the same two traps doctor's livepid() was written for (see its comment).
 # Every furniture/visibility decision goes through it from v0.2.88 on.
+# v0.2.112 THE DESKTOP-WIDE SLOWDOWN. Under proot every command is an exec
+# that proot must trace, and this function used to run sed + cut + tr + head
+# + grep (plus subshells) for EVERY process in /proc - ~6 traced execs per
+# process, per call. A MATE session has 60+ processes and the governor calls
+# this several times every 5 s for 20 minutes: thousands of execs per tick,
+# CPU pegged, the whole desktop (cursor, clicks, repaints) behind it. Now the
+# whole process table is read ONCE by ps and matched by ONE awk; the
+# per-process walk stays only as the fallback for a guest without ps.
 running0() {
+  R0OUT=$(ps -eo pid=,stat=,args= 2>/dev/null)
+  if [ -n "$R0OUT" ]; then
+    printf '%s\n' "$R0OUT" | awk -v t="$1" -v me="$$" '
+      $1 != me && $2 !~ /^Z/ {
+        a = $3; sub(".*/", "", a); b = $4; sub(".*/", "", b)
+        if (a == t || b == t) { f = 1; exit }
+      }
+      END { exit f ? 0 : 1 }'
+    return $?
+  fi
+  running0_slow "$1"
+}
+# v0.2.112: is ANY of the named programs running (argv[0]/argv[1] exact)?
+running_any() {
+  RAOUT=$(ps -eo pid=,stat=,args= 2>/dev/null)
+  if [ -n "$RAOUT" ]; then
+    printf '%s\n' "$RAOUT" | awk -v l=" $* " -v me="$$" '
+      $1 != me && $2 !~ /^Z/ {
+        a = $3; sub(".*/", "", a); b = $4; sub(".*/", "", b)
+        if (index(l, " " a " ") || index(l, " " b " ")) { f = 1; exit }
+      }
+      END { exit f ? 0 : 1 }'
+    return $?
+  fi
+  for RAN in "$@"; do running0_slow "$RAN" && return 0; done
+  return 1
+}
+running0_slow() {
   R0T="$1"
   for f in /proc/[0-9]*/cmdline; do
     p=${f#/proc/}; p=${p%/cmdline}
@@ -685,7 +721,10 @@ paint_root() {
 # v0.2.108: pidfile liveness - two tint2 instances (dock + tray) share one
 # argv[0], so running0 cannot tell them apart.
 pid_alive() {
-  [ -s "$1" ] && kill -0 "$(cat "$1" 2>/dev/null)" 2>/dev/null
+  # v0.2.112: read + kill are shell builtins - no traced exec per check
+  [ -s "$1" ] || return 1
+  read -r PA_PID < "$1" 2>/dev/null || return 1
+  [ -n "$PA_PID" ] && kill -0 "$PA_PID" 2>/dev/null
 }
 # v0.2.108 CENTRED TASKBAR: tint2 cannot centre launchers + tasks inside a
 # full-width bar (F spacers are ignored when T is present), so the desktop
@@ -756,13 +795,30 @@ while :; do
     cp -f "$OUT.part" "$LAST" 2>/dev/null
     mv -f "$OUT.part" "$OUT" 2>/dev/null
   fi
-  rm -f "$OUT.part"
-  sleep 1
+  # v0.2.112: every command here is a ptrace-mediated exec under proot -
+  # 2 s cadence; OUT.part is simply overwritten next round (no rm per loop).
+  sleep 2
 done
 CLIPD
   nohup sh /tmp/emux-clipd >/dev/null 2>&1 </dev/null &
   echo "$!" > /tmp/emux_clipd.pid 2>/dev/null
   echo "emux-x11: clipboard bridge started (pid $!)" >&2
+}
+# v0.2.112: seed_desktop_config rewrites a dozen config files - every one a
+# traced exec under proot - and start_furniture ran it on EVERY governor tick
+# (5 s, 20 min). Seed once per session, and again only when the set of
+# installed programs changes (the governor installing furniture mid-session).
+seed_if_changed() {
+  SEED_SIG=""
+  for SB in xterm pcmanfm mousepad galculator gnome-calculator firefox firefox-esr \
+            chromium chromium-browser jgmenu tint2 xclip openbox picom; do
+    [ -x "/usr/bin/$SB" ] && SEED_SIG="$SEED_SIG$SB,"
+  done
+  SEED_OLD=""
+  [ -r /tmp/emux_seed_sig ] && read -r SEED_OLD < /tmp/emux_seed_sig 2>/dev/null
+  [ -n "$SEED_SIG" ] && [ "$SEED_SIG" = "$SEED_OLD" ] && return 0
+  seed_desktop_config
+  echo "$SEED_SIG" > /tmp/emux_seed_sig 2>/dev/null
 }
 start_furniture() {
   start_clipd
@@ -773,19 +829,21 @@ start_furniture() {
   # pcmanfm --desktop stacked on top fight it for the root window. The mode
   # file is written by start_wm, which always runs before this.
   paint_root
-  case "$(cat /tmp/emux_wm_mode 2>/dev/null || echo openbox)" in
+  SF_MODE=openbox
+  [ -r /tmp/emux_wm_mode ] && read -r SF_MODE < /tmp/emux_wm_mode 2>/dev/null
+  case "${SF_MODE:-openbox}" in
     mate-session|mate-session-binary)
       # v0.2.108: MATE runs without mate-panel (see start_wm); the EmuX
       # centred taskbar is its panel. No pcmanfm desktop: MATE draws its own
       # background.
-      seed_desktop_config
+      seed_if_changed
       start_panels
       return 0 ;;
     gnome-session|gnome-session-binary|gnome-shell|startxfce4|xfce4-session|startlxqt|lxqt-session|lxsession)
       echo "emux-x11: full-session desktop owns the furniture - EmuX panel/icons skipped" >&2
       return 0 ;;
   esac
-  seed_desktop_config
+  seed_if_changed
   # v0.2.59: picom is now OPT-IN (touch /tmp/emux_want_picom). Two reasons,
   # both measured rather than guessed:
   #  1. The video path is a full-screen `xwd -root` grab at ~10 fps. A
@@ -1204,14 +1262,20 @@ SMENU
   EXTRA_PKGS=""
   command -v jgmenu >/dev/null 2>&1 || EXTRA_PKGS="$EXTRA_PKGS jgmenu"
   command -v xclip >/dev/null 2>&1 || EXTRA_PKGS="$EXTRA_PKGS xclip"
-  if [ -n "$EXTRA_PKGS" ] && [ ! -e /tmp/emux_jgmenu_tried ]; then
+  # v0.2.112: a failed attempt (offline, unknown package) used to retry at
+  # EVERY desktop start - a full apt/dpkg run under proot competing with the
+  # desktop for minutes. Once a day now, at the lowest CPU priority.
+  EXTRA_DAY=$(date +%Y%m%d)
+  if [ -n "$EXTRA_PKGS" ] && [ ! -e /tmp/emux_jgmenu_tried ] && \
+     [ "$(cat /var/lib/emux_extra_pkgs_day 2>/dev/null)" != "$EXTRA_DAY" ]; then
     touch /tmp/emux_jgmenu_tried 2>/dev/null
+    echo "$EXTRA_DAY" > /var/lib/emux_extra_pkgs_day 2>/dev/null
     if command -v apt-get >/dev/null 2>&1; then
       echo "emux-x11: installing$EXTRA_PKGS in the background" >&2
-      ( DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+      ( DEBIAN_FRONTEND=noninteractive nice -n 19 apt-get install -y --no-install-recommends \
           -o DPkg::Lock::Timeout=300 $EXTRA_PKGS >/tmp/emux_jgmenu.log 2>&1 ) </dev/null >/dev/null 2>&1 &
     elif command -v apk >/dev/null 2>&1; then
-      ( apk add --no-cache $EXTRA_PKGS >/tmp/emux_jgmenu.log 2>&1 ) </dev/null >/dev/null 2>&1 &
+      ( nice -n 19 apk add --no-cache $EXTRA_PKGS >/tmp/emux_jgmenu.log 2>&1 ) </dev/null >/dev/null 2>&1 &
     fi
   fi
   # --- Openbox right-click menu (same apps, plus WM controls) ---
@@ -2294,6 +2358,12 @@ else
       FBDIR_CHECKED=1
       FBDIR_OPT=""
       mkdir -p /tmp/emux_fbdir 2>/dev/null
+      # v0.2.112: no X-side cursor. The pane draws its own pointer (and a
+      # real mouse/trackpad gets Android's), so Xvfb's software sprite was pure
+      # cost: every pointer move made the server save/restore pixels under
+      # it and re-damage that spot - capture work per motion event.
+      NOCURSOR_OPT=""
+      "$XVFB" -help 2>&1 | grep -q -- "-nocursor" && NOCURSOR_OPT="-nocursor"
       if "$XVFB" -help 2>&1 | grep -q -- "-fbdir"; then
         FBDIR_OPT="-fbdir /tmp/emux_fbdir"
         echo "emux-x11: fbdir ON - framebuffer file /tmp/emux_fbdir/Xvfb_screen0" >&2
@@ -2303,7 +2373,7 @@ else
     fi
     # stale screen files from a previous attempt would paint a photograph
     rm -f /tmp/emux_fbdir/Xvfb_screen* 2>/dev/null
-    "$XVFB" :"$DN" -screen 0 "$RES" -listen tcp -ac -extension MIT-SHM ${FBDIR_OPT:-} "$@" >/tmp/xvfb.log 2>&1 &
+    "$XVFB" :"$DN" -screen 0 "$RES" -listen tcp -ac -extension MIT-SHM ${FBDIR_OPT:-} ${NOCURSOR_OPT:-} "$@" >/tmp/xvfb.log 2>&1 &
     XPID=$!
     XVFB_PID=$XPID; XVFB_PID_DN=$DN     # v0.2.78: ours to retire if it never serves
     i=0
@@ -2616,6 +2686,10 @@ start_agent() {
 if [ ! -e /tmp/emux_agent_launched ]; then
   touch /tmp/emux_agent_launched
   start_agent
+  # v0.2.112: the census below walks every process with ~4 traced execs each,
+  # 45 s in - right when the user starts working. Diagnostics only now:
+  # touch ~/.config/emux/diagnostics to bring it back.
+  [ -e "$HOME/.config/emux/diagnostics" ] && \
   # v0.2.58 EVIDENCE ROUND: delayed deep census. ~45 s in, dump pid +
   # process state + DISPLAY of every desktop participant plus the root
   # pixmap verdict into the agent log - proves who is alive, on which
@@ -2664,7 +2738,8 @@ fi
     # Android's LMK reaps it mid-session (no root => oom protection denied),
     # relaunch it from its pidfile instead of ceasing to exist silently.
     if [ -r /tmp/emux_agent_pid ]; then
-      APID=$(tr -dc '0-9' < /tmp/emux_agent_pid 2>/dev/null)
+      APID=""; read -r APID < /tmp/emux_agent_pid 2>/dev/null   # v0.2.112: builtin, no exec
+      case "$APID" in *[!0-9]*) APID="" ;; esac
       if [ -n "$APID" ] && ! kill -0 "$APID" 2>/dev/null; then
         echo "emux-x11: governor: input agent (pid $APID) dead - relaunching" >&2
         start_agent
@@ -2677,12 +2752,17 @@ fi
     # terminal launcher (no EWMH _NET_CLIENT_LIST without a WM). Check the
     # WM set too, and retry (a once-only flag can never heal a download
     # that failed mid-way).
-    if { [ ! -x /usr/bin/tint2 ] || [ ! -x /usr/bin/pcmanfm ] || [ ! -x /usr/bin/xdotool ] || [ ! -x /usr/bin/picom ] || [ ! -x /usr/bin/openbox ] || [ ! -x /usr/bin/xterm ] || [ ! -x /usr/bin/xsetroot ]; } && [ "$APTTRIED" -lt 3 ]; then
+    # v0.2.112: picom is opt-in (never required), and a set that cannot be
+    # installed is retried on ONE day only - it used to re-run a full apt
+    # transaction 3x at every desktop start while the user was working.
+    if { [ ! -x /usr/bin/tint2 ] || [ ! -x /usr/bin/pcmanfm ] || [ ! -x /usr/bin/xdotool ] || [ ! -x /usr/bin/openbox ] || [ ! -x /usr/bin/xterm ] || [ ! -x /usr/bin/xsetroot ]; } && [ "$APTTRIED" -lt 3 ] \
+       && { [ "$APTTRIED" -gt 0 ] || [ "$(cat /var/lib/emux_gov_day 2>/dev/null)" != "$(date +%Y%m%d)" ]; }; then
       if ! apt_busy; then
+        [ "$APTTRIED" = 0 ] && date +%Y%m%d > /var/lib/emux_gov_day 2>/dev/null
         APTTRIED=$((APTTRIED + 1))
         echo "emux-x11: governor installing missing furniture/wm (tint2/pcmanfm/xdotool/picom/openbox/xterm/x11-apps) - attempt $APTTRIED/3" >&2
         ( apt_lists_stale && apt_update_once
-          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+          DEBIAN_FRONTEND=noninteractive nice -n 19 apt-get install -y --no-install-recommends \
             tint2 pcmanfm mousepad x11-xserver-utils xdotool picom openbox xterm x11-apps >>/tmp/emux_rest.log 2>&1
           dpkg --configure -a >>/tmp/emux_rest.log 2>&1
           if [ ! -x /usr/bin/xdotool ] || [ ! -x /usr/bin/openbox ]; then
@@ -2710,12 +2790,8 @@ fi
     # has=1 was a constant and the visibility client could never relaunch -
     # dead code since v0.2.45, and the reason a client-less black pane never
     # self-healed during first-boot package installs.
-    for f in /proc/[0-9]*/cmdline; do
-      a=$(tr '\0' '\n' < "$f" 2>/dev/null | head -1)
-      [ -n "$a" ] || continue
-      case "$a" in */*) a=${a##*/} ;; esac
-      case "$a" in openbox|tint2|pcmanfm|xterm|xclock|xeyes) has=1; break ;; esac
-    done
+    # v0.2.112: one ps + awk (was tr|head per process, every 5 s)
+    running_any openbox tint2 pcmanfm xterm xclock xeyes mate-session && has=1
     if [ "$has" = 0 ]; then
       for vc in /usr/bin/xterm /usr/bin/xclock /usr/bin/xeyes; do
         if [ -x "$vc" ]; then
@@ -2732,9 +2808,13 @@ fi
     # pcmanfm publishes _XROOTPMAP_ID once it paints the wallpaper; absence
     # 25 s after start = wedged: kill -9 and relaunch. 4th strike: give up
     # on the wallpaper layer and paint a solid root - never a black void.
-    if [ -x /usr/bin/pcmanfm ] && [ -e /tmp/emux_pcmanfm_started ] && running0 pcmanfm; then
+    # v0.2.112: once the root pixmap was seen, the wedge check is done for
+    # the session (it used to run ps + date + stat + xprop every 5 s forever).
+    if [ -x /usr/bin/pcmanfm ] && [ -e /tmp/emux_pcmanfm_started ] && [ ! -e /tmp/emux_pcmanfm_ok ] && running0 pcmanfm; then
       PFAGE=$(( $(date +%s) - $(stat -c %Y /tmp/emux_pcmanfm_started 2>/dev/null || echo 0) ))
-      if [ "$PFAGE" -ge 25 ] && ! xprop -root _XROOTPMAP_ID >/dev/null 2>&1; then
+      if [ "$PFAGE" -ge 25 ] && xprop -root _XROOTPMAP_ID >/dev/null 2>&1; then
+        : > /tmp/emux_pcmanfm_ok
+      elif [ "$PFAGE" -ge 25 ]; then
         W=$(( $(cat /tmp/emux_pcmanfm_wedges 2>/dev/null || echo 0) + 1 ))
         echo "$W" > /tmp/emux_pcmanfm_wedges
         echo "emux-x11: pcmanfm WEDGE strike $W (no _XROOTPMAP_ID ${PFAGE}s after start) - kill -9 + relaunch" >&2
@@ -2811,12 +2891,22 @@ if x_up && [ "$APT_BRANCH" = 1 ]; then
     for b in /usr/bin/tint2 /usr/bin/pcmanfm /usr/bin/mousepad /usr/bin/galculator; do
       [ -x "$b" ] || NEEDREST=1
     done
+    # v0.2.112: a package that never installs (offline, missing from the
+    # repo) made this run up to 30 apt/dpkg attempts on EVERY desktop start
+    # - minutes of full CPU under proot while the user works. At most once a
+    # day now, 3 attempts, lowest priority.
+    REST_DAY=$(date +%Y%m%d)
+    if [ "$NEEDREST" = 1 ] && [ "$(cat /var/lib/emux_rest_day 2>/dev/null)" = "$REST_DAY" ]; then
+      echo "emux-x11: REST furniture install already tried today - skipping" >&2
+      NEEDREST=0
+    fi
     if [ "$NEEDREST" = 1 ]; then
+    echo "$REST_DAY" > /var/lib/emux_rest_day 2>/dev/null
     apt_lists_stale && apt_update_once
     TRIES=0
-    while [ "$TRIES" -lt 30 ]; do
+    while [ "$TRIES" -lt 3 ]; do
       if apt_busy; then TRIES=$((TRIES + 1)); sleep 10; continue; fi
-      DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+      DEBIAN_FRONTEND=noninteractive nice -n 19 apt-get install -y --no-install-recommends \
         $REST >&2 && break
       TRIES=$((TRIES + 1)); heal_dpkg; sleep 2
     done
@@ -2962,7 +3052,7 @@ if [ "$RC" != 0 ] && [ ! -e /tmp/emux_xvfb_restarted ]; then
   echo "emux-x11: Xvfb died rc=$RC - restarting once${NOSHEM:+ with $NOSHEM}" >&2
   [ -f /tmp/xvfb.log ] && mv -f /tmp/xvfb.log /tmp/xvfb.log.1 2>/dev/null
   kill_stale_x
-  "$XVFB" :"$DN" -screen 0 "$RES" -listen tcp -ac -extension MIT-SHM -nolisten unix ${FBDIR_OPT:-} $NOSHEM >/tmp/xvfb.log 2>&1 &
+  "$XVFB" :"$DN" -screen 0 "$RES" -listen tcp -ac -extension MIT-SHM -nolisten unix ${FBDIR_OPT:-} ${NOCURSOR_OPT:-} $NOSHEM >/tmp/xvfb.log 2>&1 &
   XPID=$!
   i=0
   while ! x_up && [ "$i" -lt 150 ]; do sleep 0.1; i=$((i+1)); done

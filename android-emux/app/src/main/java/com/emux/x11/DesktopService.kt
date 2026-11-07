@@ -232,9 +232,9 @@ class DesktopService(
     private var hostProbeNote = ""
 
     /** Latest decoded frame; the View reads this under lock during draw. */
-    @Volatile var currentFrame: Bitmap? = null
+    @Volatile var currentFrame: TiledFrame? = null   // v0.2.112: tiled (see TiledFrame)
     private val frameLock = Any()
-    private var reusable: Bitmap? = null
+    private var reusable: TiledFrame? = null
 
     @Volatile var foreground = true
     @Volatile var screenOn = true
@@ -636,6 +636,12 @@ class DesktopService(
                     // desktop) and snap back the moment anything uploads.
                     val HEALER_TICKS = 150
                     var healerEvery = HEALER_TICKS
+                    // v0.2.112: the healer was TICK-based only, and ticks run
+                    // fastest exactly while the user works (every damage tick
+                    // is one) - so the full-screen sweep (13 MB of compare at
+                    // Retina/24-bit, plus a socket cross-check) landed every
+                    // second or two DURING interaction. Now also >= 5 s apart.
+                    var lastHealAtMs = 0L
                     var cleanHealers = 0
                     // v0.2.82: start one tick below the healer so the FIRST loop
                     // iteration is a full sweep. Damage events only report
@@ -658,7 +664,8 @@ class DesktopService(
                             // ~every 5 s a full sweep anyway: the healer, for
                             // anything DAMAGE cannot see (server-side sprite
                             // draws, a missed event, our own bookkeeping).
-                            if (ticks % healerEvery != 0) {
+                            if (ticks % healerEvery != 0 ||
+                                System.currentTimeMillis() - lastHealAtMs < 5_000L) {
                                 // Block for the first rect ONLY when nothing is
                                 // pending (the idle path costs one parked read,
                                 // never a poll); when bands are waiting from the
@@ -794,7 +801,9 @@ class DesktopService(
                         var fbChecked = 0
                         var fbMismatch = 0
                         sweepNo++
-                        val fbSweep = fbMap != null && fbGood >= 2 && sweepNo % 8 != 0
+                        lastHealAtMs = System.currentTimeMillis()
+                        // v0.2.112: a trusted map re-checks over the socket 1 sweep in 16
+                        val fbSweep = fbMap != null && fbGood >= 2 && sweepNo % 16 != 0
                         while (y < h) {
                             if (System.currentTimeMillis() > sweepDeadline) {
                                 capped = true
@@ -2905,7 +2914,7 @@ class DesktopService(
         val cfg = if (trueColor) Bitmap.Config.ARGB_8888 else Bitmap.Config.RGB_565
         synchronized(frameLock) {
             if (reusable == null || reusable!!.width != w || reusable!!.height != h || reusable!!.config != cfg) {
-                reusable = Bitmap.createBitmap(w, h, cfg)
+                reusable = TiledFrame(w, h, cfg)
                 prevRaw = null   // a new bitmap is blank: the mirror must not claim otherwise
             }
             currentFrame = reusable
