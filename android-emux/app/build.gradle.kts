@@ -34,6 +34,15 @@ android {
         // (adb install / GitHub Releases), same distribution model as Termux
         // on F-Droid.
         targetSdk = 28
+        // vc214 (ENV_VERSION 94 -> 95): SLIM LEFT RAIL - a third tint2 panel joins the centred dock:
+        //     emux-rail.tint2rc, a ~40px vertical rail on the left edge (clock at the top,
+        //     one switcher section per desktop below: click an empty section to switch
+        //     desktop, drag a task between sections to move its window; autohide with
+        //     a 2px reveal strip, no strut - same contract as the dock). The slim native
+        //     replacement for the wide vertical tint2 themes the field user installed,
+        //     which had no taskbar and no start button (no way to open Settings). The
+        //     tint2 stamp v114 re-seeds configs and reclaims a user-replaced tint2rc
+        //     (backed up as .emux-bak/.pre-rice), so the taskbar + start menu return.
         // v0.2.94 (vc194): BROWSER ICON FIX (re-seed, ENV_VERSION 80 -> 81).
         // Field: firefox-esr installed via the Mozilla Team PPA (the only
         // way on Ubuntu noble arm64 - no ESR in Ubuntu, no arm64 tarballs
@@ -393,8 +402,8 @@ android {
         //     - copies cross in milliseconds; no xclip/emux-clipd polling.
         //     xterm: selecting no longer overwrites the tablet clipboard;
         //     Ctrl+Shift+C copies, Ctrl+Shift+V / right-click paste.
-        versionCode = 213
-        versionName = "0.2.113"
+        versionCode = 214
+        versionName = "0.2.114"
 
         ndk {
             abiFilters += listOf("arm64-v8a", "armeabi-v7a", "x86_64")

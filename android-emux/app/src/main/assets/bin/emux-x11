@@ -62,7 +62,7 @@ fi
 [ -n "$DOCTOR_MODE" ] || rm -f /tmp/emux_tint2_strikes 2>/dev/null
 # v0.2.108: dock/tray pidfiles, HiDPI resources and the start-menu install
 # attempt are per-session too.
-[ -n "$DOCTOR_MODE" ] || rm -f /tmp/emux_tint2.pid /tmp/emux_tray.pid /tmp/emux_scale_applied /tmp/emux_jgmenu_tried /tmp/emux_start_icon /tmp/emux_clipd.pid /tmp/emux_clip_in /tmp/emux_clip_out /tmp/emux_clip_last /tmp/emux_seed_sig /tmp/emux_pcmanfm_ok 2>/dev/null
+[ -n "$DOCTOR_MODE" ] || rm -f /tmp/emux_tint2.pid /tmp/emux_tray.pid /tmp/emux_rail.pid /tmp/emux_scale_applied /tmp/emux_jgmenu_tried /tmp/emux_start_icon /tmp/emux_clipd.pid /tmp/emux_clip_in /tmp/emux_clip_out /tmp/emux_clip_last /tmp/emux_seed_sig /tmp/emux_pcmanfm_ok 2>/dev/null
 # v0.2.108 HiDPI: the app passes EMUX_SCALE=2 for "Retina" (device
 # resolution, UI doubled). Xft.dpi (applied once X is up, see apply_scale)
 # scales Openbox, tint2 and xterm fonts; GTK gets GDK_SCALE, with
@@ -775,6 +775,12 @@ start_panels() {
     echo "$!" > /tmp/emux_tray.pid 2>/dev/null
     echo "emux-x11: tray bar started (pid $!)" >&2
   fi
+  # v0.2.114: slim left rail (clock + desktop switcher) beside the dock.
+  if [ -x /usr/bin/tint2 ] && [ -e "$HOME/.config/tint2/emux-rail.tint2rc" ] && ! pid_alive /tmp/emux_rail.pid; then
+    nohup /usr/bin/tint2 -c "$HOME/.config/tint2/emux-rail.tint2rc" >/tmp/tint2-rail.log 2>&1 </dev/null &
+    echo "$!" > /tmp/emux_rail.pid 2>/dev/null
+    echo "emux-x11: left rail started (pid $!)" >&2
+  fi
 }
 # v0.2.111 CLIPBOARD BRIDGE, guest side: X CLIPBOARD <-> the app, through
 # two files in /tmp (see DesktopService "CLIPBOARD BRIDGE"). Runs for every
@@ -1091,13 +1097,13 @@ EOF
   [ -e "$STAMP" ] && OLD_APPS=$(cat "$STAMP" 2>/dev/null)
   if emux_keep tint2rc; then
     echo "emux-x11: keep-tint2rc marker - the user's panel config is NOT rewritten" >&2
-  elif [ ! -e "$HOME/.config/tint2/tint2rc" ] || [ "$APPS s$EMUX_SCALE v113" != "$OLD_APPS" ]; then
+  elif [ ! -e "$HOME/.config/tint2/tint2rc" ] || [ "$APPS s$EMUX_SCALE v114" != "$OLD_APPS" ]; then
     if [ -e "$HOME/.config/tint2/tint2rc" ] && ! grep -q "EmuX" "$HOME/.config/tint2/tint2rc" 2>/dev/null; then
       cp "$HOME/.config/tint2/tint2rc" "$HOME/.config/tint2/tint2rc.emux-bak" 2>/dev/null
     fi
     S="$EMUX_SCALE"
     {
-      echo "# EmuX tint2 panel (v0.2.113) - centred auto-hiding dock: start, apps, windows, tray, clock"
+      echo "# EmuX tint2 panel (v0.2.114) - centred auto-hiding dock: start, apps, windows, tray, clock"
       # bg 1: the dock bubble
       echo "rounded = $((12 * S))"
       echo "border_width = 1"
@@ -1209,11 +1215,89 @@ EOF
       echo "clock_padding = $((8 * S)) 0"
       echo "clock_tooltip = %A %d %B %Y"
     } > "$HOME/.config/tint2/tint2rc" 2>/dev/null
-    echo "$APPS s$EMUX_SCALE v113" > "$STAMP" 2>/dev/null
+    echo "$APPS s$EMUX_SCALE v114" > "$STAMP" 2>/dev/null
   fi
   # v0.2.113: the tray lives inside the dock now - retire the pill config
   # (start_panels and the autostart only launch it when this file exists).
   [ -e "$HOME/.config/tint2/emux-tray.tint2rc" ] && rm -f "$HOME/.config/tint2/emux-tray.tint2rc"
+  # --- v0.2.114: slim left rail (vertical tint2: clock + desktop switcher) ---
+  # Field: the wide (~130 px) vertical tint2 themes the user installed were
+  # liked for the look but carried no taskbar and no start button (no way
+  # to open Settings). This is the slim EmuX-native take (~40 px): clock
+  # at the top, one taskbar section per desktop below (multi_desktop -
+  # click an empty section to switch desktop, drag a task between
+  # sections to move its window). Autohides exactly like the dock (2 px
+  # reveal strip, instant show, 1.5 s grace), reserves nothing.
+  if ! emux_keep tint2rc; then
+    S="$EMUX_SCALE"
+    {
+      echo "# EmuX tint2 rail (v0.2.114) - slim vertical panel, left edge: clock + desktops"
+      # bg 1: the rail bubble
+      echo "rounded = $((8 * S))"
+      echo "border_width = 1"
+      echo "background_color = #1b1f27 100"
+      echo "border_color = #ffffff 14"
+      # bg 2: active window / active desktop
+      echo "rounded = $((6 * S))"
+      echo "border_width = 0"
+      echo "background_color = #ffffff 22"
+      echo "border_color = #ffffff 0"
+      echo "background_color_hover = #ffffff 30"
+      # bg 3: hover on idle items
+      echo "rounded = $((6 * S))"
+      echo "border_width = 0"
+      echo "background_color = #ffffff 0"
+      echo "border_color = #ffffff 0"
+      echo "background_color_hover = #ffffff 14"
+      echo "background_color_pressed = #ffffff 24"
+      echo "panel_items = CT"
+      echo "panel_monitor = all"
+      echo "panel_position = center left vertical"
+      echo "panel_size = $((40 * S)) 100%"
+      echo "panel_margin = 0 0"
+      echo "panel_padding = $((2 * S)) $((4 * S)) $((2 * S))"
+      echo "panel_background_id = 1"
+      echo "panel_layer = top"
+      echo "strut_policy = none"
+      echo "autohide = 1"
+      echo "autohide_show_timeout = 0"
+      echo "autohide_hide_timeout = 1.5"
+      echo "autohide_height = $((2 * S))"
+      echo "panel_window_name = emux-rail"
+      echo "wm_menu = 1"
+      echo "mouse_effects = 1"
+      echo "time1_format = %H:%M"
+      echo "time1_font = sans bold 10"
+      echo "time2_format = %d %b"
+      echo "time2_font = sans 8"
+      echo "clock_font_color = #ffffff 100"
+      echo "clock_padding = $((2 * S)) 0"
+      echo "clock_tooltip = %A %d %B %Y"
+      echo "taskbar_mode = multi_desktop"
+      echo "taskbar_name = 1"
+      echo "taskbar_name_font = sans 8"
+      echo "taskbar_name_font_color = #ffffff 60"
+      echo "taskbar_name_active_font_color = #ffffff 100"
+      echo "taskbar_padding = $((2 * S)) 0 $((2 * S))"
+      echo "taskbar_background_id = 0"
+      echo "taskbar_active_background_id = 2"
+      echo "task_icon = 1"
+      echo "task_text = 0"
+      echo "task_tooltip = 1"
+      echo "task_maximum_size = $((28 * S)) $((28 * S))"
+      echo "task_padding = $((2 * S)) $((2 * S)) 0"
+      echo "task_background_id = 3"
+      echo "task_active_background_id = 2"
+      echo "task_iconified_background_id = 3"
+      echo "mouse_left = toggle_iconify"
+      echo "mouse_middle = close"
+      echo "mouse_right = close"
+      echo "tooltip_font = sans 10"
+      echo "tooltip_font_color = #ffffff 100"
+      echo "tooltip_background_id = 1"
+      echo "tooltip_padding = $((6 * S)) $((4 * S))"
+    } > "$HOME/.config/tint2/emux-rail.tint2rc" 2>/dev/null
+  fi
   # --- v0.2.108: start menu (jgmenu: searchable app list, opens at the pointer) ---
   mkdir -p "$HOME/.local/bin" "$HOME/.config/jgmenu" 2>/dev/null
   cat > "$HOME/.local/bin/emux-startmenu" <<'SMENU'
@@ -1494,7 +1578,7 @@ THEME
     echo "emux-x11: rc.xml audit clean ($RCX_EFF binds no Frame/Client/Desktop context)" >&2
   fi
   # --- tint2 refresh: darker bar, bigger icons (rewrite once per stamp) ---
-  if ! emux_keep tint2rc && [ -e "$HOME/.config/tint2/tint2rc" ] && ! grep -q "EmuX tint2 panel (v0.2.113)" "$HOME/.config/tint2/tint2rc" 2>/dev/null; then
+  if ! emux_keep tint2rc && [ -e "$HOME/.config/tint2/tint2rc" ] && ! grep -q "EmuX tint2 panel (v0.2.114)" "$HOME/.config/tint2/tint2rc" 2>/dev/null; then
     cp "$HOME/.config/tint2/tint2rc" "$HOME/.config/tint2/tint2rc.pre-rice" 2>/dev/null
     rm -f "$HOME/.config/tint2/tint2rc" 2>/dev/null
   fi
@@ -1550,6 +1634,9 @@ THEME
       echo "  tint2 >/tmp/tint2.log 2>&1 </dev/null & echo \$! > /tmp/emux_tint2.pid"
       echo "  if [ -e \"\$HOME/.config/tint2/emux-tray.tint2rc\" ]; then"
       echo "    tint2 -c \"\$HOME/.config/tint2/emux-tray.tint2rc\" >/tmp/tint2-tray.log 2>&1 </dev/null & echo \$! > /tmp/emux_tray.pid"
+      echo "  fi"
+      echo "  if [ -e \"\$HOME/.config/tint2/emux-rail.tint2rc\" ]; then"
+      echo "    tint2 -c \"\$HOME/.config/tint2/emux-rail.tint2rc\" >/tmp/tint2-rail.log 2>&1 </dev/null & echo \$! > /tmp/emux_rail.pid"
       echo "  fi"
       echo "fi"
       echo "if [ -e /tmp/emux_want_picom ] && command -v picom >/dev/null 2>&1; then"
