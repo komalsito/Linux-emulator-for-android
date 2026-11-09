@@ -21,6 +21,21 @@ import java.nio.ByteBuffer
  *    PRIMARY and answers every paste request (TARGETS / UTF8_STRING / TEXT /
  *    STRING) from Linux apps, for as long as nobody copies something else.
  * Nothing is installed or polled in the guest.
+ *
+ * v0.2.117 RELIABILITY (field: "desktop to tablet doesn't work - the tablet
+ * doesn't recognise the new copied items; tablet -> desktop sometimes pastes
+ * stale text"). The XFIXES push is kept, but it is no longer the only road:
+ *  - [resync] asks whoever owns CLIPBOARD right now for its text. When WE own
+ *    the selection it loops back and deliver() suppresses it; when a Linux
+ *    app owns it, the text reaches the tablet even if the XFIXES event was
+ *    never delivered or Android froze us mid-delivery. DesktopService calls
+ *    it on window focus and every 3 s while foreground, so both sides always
+ *    converge.
+ *  - [servedText] lets the push guard in DesktopService tell "the bridge is
+ *    really serving this text" from "we just saw it once" (the stale-paste
+ *    bug: clipLast matched while the bridge served something older/nothing).
+ *  - every crossing is logged through [log], so the desktop status line
+ *    names WHICH side stopped working in the next field report.
  */
 class X11Clipboard(
     /** A CONNECTED client on the live desktop display, or null (retried). */
@@ -35,6 +50,11 @@ class X11Clipboard(
     private val pendingOffer = java.util.concurrent.atomic.AtomicReference<String?>(null)
     @Volatile private var served: ByteArray? = null
     @Volatile private var lastDelivered: String? = null
+    @Volatile private var resyncRequested = false
+
+    /** v0.2.117: the text the bridge is serving to Linux right now, or null
+     *  when a Linux app owns the clipboard (or nothing was ever offered). */
+    val servedText: String? get() = served?.toString(Charsets.UTF_8)
 
     fun start() {
         if (running) return
@@ -55,6 +75,10 @@ class X11Clipboard(
         lastDelivered = text           // never bounce it back to the tablet
         pendingOffer.set(text)
     }
+
+    /** v0.2.117 Linux -> tablet PULL: ask the CURRENT clipboard owner for its
+     *  text now. Consumed by the serve loop (no-op while disconnected). */
+    fun resync() { resyncRequested = true }
 
     private fun loop() {
         var announced = false
@@ -93,6 +117,9 @@ class X11Clipboard(
 
         // A re-connect keeps serving what the tablet offered last.
         served?.let { pendingOffer.compareAndSet(null, String(it, Charsets.UTF_8)) }
+        // v0.2.117: and pulls once, so whatever Linux copied while the
+        // bridge was down reaches the tablet as soon as we are back.
+        resyncRequested = true
 
         while (running && c.connected) {
             pendingOffer.getAndSet(null)?.let { txt ->
@@ -103,14 +130,23 @@ class X11Clipboard(
                 served = b
                 c.setSelectionOwner(win, clipboard)
                 c.setSelectionOwner(win, XA_PRIMARY)
+                log("clipboard bridge: tablet -> linux (${b.size} bytes)")
+            }
+            if (resyncRequested) {
+                resyncRequested = false
+                c.convertSelection(win, clipboard, utf8, prop)
             }
             val ev = c.readEvent(200) ?: continue
             val type = ev.get(0).toInt() and 0x7F
             when (type) {
                 evXfixes -> {
-                    // XFixesSelectionNotify: window@4 owner@8 selection@12
+                    // XFixesSelectionNotify: subtype@1 window@4 owner@8 selection@12
+                    // (v0.2.117: subtype 0 = SetSelectionOwner only - ignore
+                    // WindowDestroy/ClientClose, whose owner field is not a
+                    // live window to convert from.)
+                    val subtype = ev.get(1).toInt()
                     val owner = ev.getInt(8)
-                    if (ev.getInt(12) == clipboard && owner != 0 && owner != win)
+                    if (subtype == 0 && ev.getInt(12) == clipboard && owner != 0 && owner != win)
                         c.convertSelection(win, clipboard, utf8, prop)
                 }
                 X11Client.EV_SELECTION_NOTIFY -> {
@@ -154,6 +190,7 @@ class X11Clipboard(
                     else String(bytes, Charsets.UTF_8)).trimEnd('\u0000')
         if (text.isEmpty() || text == lastDelivered) return
         lastDelivered = text
+        log("clipboard bridge: linux -> tablet (${text.length} chars)")
         onText(text)
     }
 

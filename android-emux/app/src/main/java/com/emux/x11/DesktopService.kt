@@ -4615,6 +4615,9 @@ class DesktopService(
     // direction so nothing echoes (tablet sets -> listener fires -> same text).
     @Volatile private var clipLast: String? = null
     @Volatile private var clipBridge: X11Clipboard? = null
+    // v0.2.117: periodic foreground resync of the Linux clipboard (see
+    // startClipboardBridge) - cancelled in stop().
+    private var clipPollJob: kotlinx.coroutines.Job? = null
 
     private fun clipboardSyncOn(): Boolean = runCatching {
         androidx.preference.PreferenceManager.getDefaultSharedPreferences(ctx).getBoolean("clipboard_sync", true)
@@ -4624,11 +4627,19 @@ class DesktopService(
      *  readable (window focus / clip changed) - Android forbids reading it
      *  in the background. */
     fun pushClipboardToGuest(text: String?) {
-        if (text.isNullOrEmpty() || text == clipLast || !clipboardSyncOn()) return
+        if (text.isNullOrEmpty() || !clipboardSyncOn()) return
         val br = clipBridge ?: return
+        // v0.2.117 STALE-PASTE FIX: clipLast alone skipped the re-offer even
+        // when the bridge was no longer serving that text - a Linux app had
+        // taken CLIPBOARD, or the push landed before the bridge connected and
+        // only clipLast moved. Skip only when Linux can really paste it.
+        if (text == clipLast && text == br.servedText) return
         clipLast = text
         br.offer(text)
     }
+
+    /** v0.2.117: pull whatever Linux's clipboard holds into Android now. */
+    fun resyncClipboardFromGuest() { clipBridge?.resync() }
 
     private fun startClipboardBridge() {
         clipBridge?.stop()
@@ -4658,6 +4669,19 @@ class DesktopService(
         )
         clipBridge = br
         br.start()
+        // v0.2.117: pull the Linux clipboard forward every 3 s while EmuX is
+        // in front. XFIXES reports a copy instantly, but a copy made while
+        // Android had frozen us mid-delivery - or an XFIXES event that never
+        // arrived - used to leave the tablet on stale text forever. The pull
+        // converges both sides; it loops back harmlessly when the bridge
+        // itself owns the selection.
+        clipPollJob?.cancel()
+        clipPollJob = scope.launch {
+            while (true) {
+                kotlinx.coroutines.delay(3_000)
+                if (foreground && screenOn) clipBridge?.resync()
+            }
+        }
         // Seed the new desktop with what the tablet already has copied
         // (readable only while EmuX holds focus - otherwise Android returns
         // nothing, which is fine).
@@ -4667,12 +4691,13 @@ class DesktopService(
                 if (clip != null && clip.itemCount > 0)
                     pushClipboardToGuest(clip.getItemAt(0).coerceToText(ctx)?.toString())
             }
-        }, 4_000)
+        }, 1_500)   // v0.2.117: 4 s was a long blind window for the first paste
     }
 
     fun stop() {
         desktopId = ""   // v0.2.108: the stop sweep kills the whole marked tree
         clipBridge?.stop(); clipBridge = null   // v0.2.113
+        clipPollJob?.cancel(); clipPollJob = null   // v0.2.117
         buttonsHeld = 0
         frameReader?.cancel(); frameReader = null
         runCatching { activeSock?.close() }; activeSock = null   // v0.1.54

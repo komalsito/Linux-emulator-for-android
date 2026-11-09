@@ -1124,7 +1124,12 @@ class MainActivity : AppCompatActivity() {
 
     override fun onWindowFocusChanged(hasFocus: Boolean) {
         super.onWindowFocusChanged(hasFocus)
-        if (hasFocus) pushClipToDesktop()
+        if (hasFocus) {
+            pushClipToDesktop()
+            // v0.2.117: pull a Linux copy that the XFIXES push missed or that
+            // Android dropped when it froze us mid-delivery.
+            desktop.resyncClipboardFromGuest()
+        }
     }
 
     override fun onResume() {
@@ -1146,6 +1151,10 @@ class MainActivity : AppCompatActivity() {
         // the degraded branches; this guard is the one the field report names.
         if (!::b.isInitialized) return
         desktop.foreground = true
+        // v0.2.117: some ROMs resume without a window-focus event; the
+        // clipLast guard makes the double push with onWindowFocusChanged
+        // harmless.
+        pushClipToDesktop()
         b.termContainer.findViewWithTag<VtTerminalView>("term")?.requestFocus()
         // v0.2.79: Settings -> "Restart desktop now" sets this flag instead of
         // tearing down a session it does not own. Consumed here, on the way back
