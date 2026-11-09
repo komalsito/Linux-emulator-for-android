@@ -34,6 +34,13 @@ android {
         // (adb install / GitHub Releases), same distribution model as Termux
         // on F-Droid.
         targetSdk = 28
+        // vc215 (ENV_VERSION 95 -> 96): MATE-PANEL TASKBAR - the real mate-panel is the MATE
+        // taskbar again: full-width always-visible bottom bar (menu bar, window list, tray,
+        // clock; emux.layout, auto-hide off - field: "the normal taskbar (mate center bar)"),
+        // with the tint2 taskbar as the verified fallback (mate-panel/window-list applets
+        // missing or two quick deaths in a session -> tint2 bar). The tint2 config itself
+        // becomes the full-width always-visible taskbar (autohide off, strut on: full-edge
+        // bar = no wallpaper band under maximized windows).
         // vc214 (ENV_VERSION 94 -> 95): SLIM LEFT RAIL - a third tint2 panel joins the centred dock:
         //     emux-rail.tint2rc, a ~40px vertical rail on the left edge (clock at the top,
         //     one switcher section per desktop below: click an empty section to switch
@@ -402,8 +409,8 @@ android {
         //     - copies cross in milliseconds; no xclip/emux-clipd polling.
         //     xterm: selecting no longer overwrites the tablet clipboard;
         //     Ctrl+Shift+C copies, Ctrl+Shift+V / right-click paste.
-        versionCode = 214
-        versionName = "0.2.114"
+        versionCode = 215
+        versionName = "0.2.115"
 
         ndk {
             abiFilters += listOf("arm64-v8a", "armeabi-v7a", "x86_64")
