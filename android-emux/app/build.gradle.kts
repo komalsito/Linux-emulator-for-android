@@ -415,8 +415,15 @@ android {
         //     - copies cross in milliseconds; no xclip/emux-clipd polling.
         //     xterm: selecting no longer overwrites the tablet clipboard;
         //     Ctrl+Shift+C copies, Ctrl+Shift+V / right-click paste.
-        versionCode = 216
-        versionName = "0.2.116"
+        // vc217 (ENV_VERSION 97 -> 98): CLIPBOARD RELIABILITY + SETTINGS MENU.
+        // The clipboard bridge re-offers only when it is really serving the text
+        // (stale-paste fix), pulls the Linux clipboard on focus regain + every 3s
+        // while foreground (desktop -> tablet heals even if the XFIXES push never
+        // fired), seeds 1.5s after start and logs every crossing to the status
+        // line. emux-x11 pins a Settings submenu (prepend.csv) at the top of the
+        // jgmenu start menu so the MATE settings are always visible.
+        versionCode = 217
+        versionName = "0.2.117"
 
         ndk {
             abiFilters += listOf("arm64-v8a", "armeabi-v7a", "x86_64")

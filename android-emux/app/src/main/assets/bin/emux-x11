@@ -1118,13 +1118,13 @@ EOF
   [ -e "$STAMP" ] && OLD_APPS=$(cat "$STAMP" 2>/dev/null)
   if emux_keep tint2rc; then
     echo "emux-x11: keep-tint2rc marker - the user's panel config is NOT rewritten" >&2
-  elif [ ! -e "$HOME/.config/tint2/tint2rc" ] || [ "$APPS s$EMUX_SCALE v116" != "$OLD_APPS" ]; then
+  elif [ ! -e "$HOME/.config/tint2/tint2rc" ] || [ "$APPS s$EMUX_SCALE v117" != "$OLD_APPS" ]; then
     if [ -e "$HOME/.config/tint2/tint2rc" ] && ! grep -q "EmuX" "$HOME/.config/tint2/tint2rc" 2>/dev/null; then
       cp "$HOME/.config/tint2/tint2rc" "$HOME/.config/tint2/tint2rc.emux-bak" 2>/dev/null
     fi
     S="$EMUX_SCALE"
     {
-      echo "# EmuX tint2 panel (v0.2.116) - centred auto-hiding dock: start, apps, windows, tray, clock"
+      echo "# EmuX tint2 panel (v0.2.117) - centred auto-hiding dock: start, apps, windows, tray, clock"
       # bg 1: the dock bubble
       echo "rounded = $((12 * S))"
       echo "border_width = 1"
@@ -1222,7 +1222,7 @@ EOF
       echo "clock_padding = $((8 * S)) 0"
       echo "clock_tooltip = %A %d %B %Y"
     } > "$HOME/.config/tint2/tint2rc" 2>/dev/null
-    echo "$APPS s$EMUX_SCALE v116" > "$STAMP" 2>/dev/null
+    echo "$APPS s$EMUX_SCALE v117" > "$STAMP" 2>/dev/null
   fi
   # v0.2.113: the tray lives inside the dock now - retire the pill config
   # (start_panels and the autostart only launch it when this file exists).
@@ -1238,7 +1238,7 @@ EOF
   if ! emux_keep tint2rc; then
     S="$EMUX_SCALE"
     {
-      echo "# EmuX tint2 rail (v0.2.116) - slim vertical panel, left edge: clock + desktops"
+      echo "# EmuX tint2 rail (v0.2.117) - slim vertical panel, left edge: clock + desktops"
       # bg 1: the rail bubble
       echo "rounded = $((8 * S))"
       echo "border_width = 1"
@@ -1345,6 +1345,27 @@ SMENU
     echo "color_sel_fg = #ffffff 100"
     echo "color_sep_fg = #ffffff 20"
   } > "$HOME/.config/jgmenu/emux-jgmenurc" 2>/dev/null
+
+  # v0.2.117 SETTINGS MENU: jgmenu's flat `apps` list can filter or bury the
+  # MATE capplets (OnlyShowIn rules, alphabetical scatter) - the field never
+  # saw "the mate settings" in the start menu even after apt install.
+  # prepend.csv IS honoured by csv_cmd=apps (jgmenu-apps(1)): a Settings
+  # submenu pinned at the TOP of the start menu, re-generated on every seed
+  # so capplets installed later appear on the next desktop start.
+  {
+    if [ -x /usr/bin/mate-control-center ]; then
+      echo "Settings,^tag(emuxsettings),preferences-system"
+      echo "^tag(emuxsettings)"
+      echo "Control Center,mate-control-center,preferences-system"
+      [ -x /usr/bin/mate-appearance-properties ] && echo "Appearance,mate-appearance-properties,preferences-desktop"
+      [ -x /usr/bin/mate-display-properties ] && echo "Display,mate-display-properties,preferences-desktop-display"
+      [ -x /usr/bin/mate-keyboard-properties ] && echo "Keyboard,mate-keyboard-properties,preferences-desktop-keyboard"
+      [ -x /usr/bin/mate-mouse-properties ] && echo "Mouse,mate-mouse-properties,preferences-desktop-peripherals"
+      [ -x /usr/bin/mate-keybinding-properties ] && echo "Shortcuts,mate-keybinding-properties,preferences-desktop-keyboard-shortcut"
+      echo "^back()"
+    fi
+  } > "$HOME/.config/jgmenu/prepend.csv" 2>/dev/null
+
   # v0.2.111: xclip (clipboard bridge, emux-clipd) rides the same install.
   EXTRA_PKGS=""
   command -v jgmenu >/dev/null 2>&1 || EXTRA_PKGS="$EXTRA_PKGS jgmenu"
@@ -1585,7 +1606,7 @@ THEME
     echo "emux-x11: rc.xml audit clean ($RCX_EFF binds no Frame/Client/Desktop context)" >&2
   fi
   # --- tint2 refresh: darker bar, bigger icons (rewrite once per stamp) ---
-  if ! emux_keep tint2rc && [ -e "$HOME/.config/tint2/tint2rc" ] && ! grep -q "EmuX tint2 panel (v0.2.116)" "$HOME/.config/tint2/tint2rc" 2>/dev/null; then
+  if ! emux_keep tint2rc && [ -e "$HOME/.config/tint2/tint2rc" ] && ! grep -q "EmuX tint2 panel (v0.2.117)" "$HOME/.config/tint2/tint2rc" 2>/dev/null; then
     cp "$HOME/.config/tint2/tint2rc" "$HOME/.config/tint2/tint2rc.pre-rice" 2>/dev/null
     rm -f "$HOME/.config/tint2/tint2rc" 2>/dev/null
   fi
