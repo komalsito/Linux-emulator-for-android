@@ -34,6 +34,12 @@ android {
         // (adb install / GitHub Releases), same distribution model as Termux
         // on F-Droid.
         targetSdk = 28
+        // vc216 (ENV_VERSION 96 -> 97): CENTRED DOCK RESTORED - "mate center bar" meant
+        // the centred EmuX tint2 dock (v0.2.114), not MATE's full-width panel: the mate-panel
+        // taskbar + layout seeding from vc215 are retired, the centred auto-hiding dock is
+        // the taskbar again (bottom-edge poke reveals it), and a Settings launcher
+        // (mate-control-center) joins the dock beside the jgmenu start menu - the
+        // "settings menu from mate" the user missed.
         // vc215 (ENV_VERSION 95 -> 96): MATE-PANEL TASKBAR - the real mate-panel is the MATE
         // taskbar again: full-width always-visible bottom bar (menu bar, window list, tray,
         // clock; emux.layout, auto-hide off - field: "the normal taskbar (mate center bar)"),
@@ -409,8 +415,8 @@ android {
         //     - copies cross in milliseconds; no xclip/emux-clipd polling.
         //     xterm: selecting no longer overwrites the tablet clipboard;
         //     Ctrl+Shift+C copies, Ctrl+Shift+V / right-click paste.
-        versionCode = 215
-        versionName = "0.2.115"
+        versionCode = 216
+        versionName = "0.2.116"
 
         ndk {
             abiFilters += listOf("arm64-v8a", "armeabi-v7a", "x86_64")

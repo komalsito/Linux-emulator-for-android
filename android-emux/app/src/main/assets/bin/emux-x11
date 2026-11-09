@@ -647,78 +647,18 @@ start_wm() {
         #   - no file manager in the REQUIRED set, so a crashing caja can no
         #     longer loop; Files still opens caja as a normal window on demand;
         #   - the background drawn by mate-settings-daemon instead of caja.
-        # v0.2.115: mate-panel is BACK as the MATE taskbar (field: "go back
-        # to the normal taskbar (mate center bar)"). v0.2.108 dropped it
-        # ("cannot centre anything, its applets crashed") when the centred
-        # tint2 dock was the alternative; it returns with a safety net:
-        # start_panels launches + verifies it and falls back to the seeded
-        # tint2 taskbar (mate-panel or its window-list applets missing, or
-        # two quick deaths in a session). Always visible (field: the old
-        # auto-hide was "floppy") - auto-hide off in emux.layout.
+        # v0.2.116: mate-panel retired AGAIN - "mate center bar" turned out
+        # to mean the CENTRED EmuX tint2 dock (v0.2.114), not MATE's
+        # full-width panel. The v0.2.108 arrangement is back: the tint2
+        # dock is the panel under MATE; the jgmenu start menu plus a dock
+        # Settings launcher (mate-control-center) cover the settings
+        # access the user missed.
         gsettings set org.mate.session required-components-list "['windowmanager']" 2>/dev/null
         gsettings set org.mate.interface window-scaling-factor "$EMUX_SCALE" 2>/dev/null
         gsettings set org.mate.background show-desktop-icons false 2>/dev/null
         gsettings set org.mate.background draw-background true 2>/dev/null
-        # v0.2.115: seed the EmuX mate-panel layout (single bottom bar:
-        # menu bar, show-desktop, window list, notification area, clock -
-        # no pager, the EmuX left rail owns desktop switching) and adopt it
-        # ONCE per marker; after that the panel layout is the user's.
-        if command -v mate-panel >/dev/null 2>&1; then
-          mkdir -p /usr/share/mate-panel/layouts 2>/dev/null
-          S2="${EMUX_SCALE:-1}"
-          {
-            echo "[Toplevel bottom]"
-            echo "expand=true"
-            echo "orientation=bottom"
-            echo "size=$((36 * S2))"
-            echo "auto-hide=false"
-            echo ""
-            echo "[Object menu-bar]"
-            echo "object-type=menu-bar"
-            echo "toplevel-id=bottom"
-            echo "pack-index=0"
-            echo "locked=true"
-            echo ""
-            echo "[Object show-desktop]"
-            echo "object-type=applet"
-            echo "applet-iid=WnckletFactory::ShowDesktopApplet"
-            echo "toplevel-id=bottom"
-            echo "pack-index=1"
-            echo "locked=true"
-            echo ""
-            echo "[Object window-list]"
-            echo "object-type=applet"
-            echo "applet-iid=WnckletFactory::WindowListApplet"
-            echo "toplevel-id=bottom"
-            echo "pack-index=2"
-            echo "locked=true"
-            echo ""
-            echo "[Object notification-area]"
-            echo "object-type=applet"
-            echo "applet-iid=NotificationAreaAppletFactory::NotificationArea"
-            echo "toplevel-id=bottom"
-            echo "pack-type=end"
-            echo "pack-index=1"
-            echo "locked=true"
-            echo ""
-            echo "[Object clock]"
-            echo "object-type=applet"
-            echo "applet-iid=ClockAppletFactory::ClockApplet"
-            echo "toplevel-id=bottom"
-            echo "pack-type=end"
-            echo "pack-index=0"
-            echo "locked=true"
-          } > /usr/share/mate-panel/layouts/emux.layout 2>/dev/null
-          if [ ! -e "$HOME/.config/emux/matepanel-v115" ]; then
-            # fresh rootfs OR a pre-v0.2.108 panel config ("floppy" old
-            # setup): clear it and let mate-panel build the EmuX bar.
-            gsettings reset-recursively org.mate.panel 2>/dev/null
-            gsettings set org.mate.panel default-layout 'emux' 2>/dev/null
-            mkdir -p "$HOME/.config/emux" 2>/dev/null
-            : > "$HOME/.config/emux/matepanel-v115" 2>/dev/null
-            echo "emux-x11: mate-panel EmuX layout adopted (bottom taskbar)" >&2
-          fi
-        fi
+        # v0.2.116: no mate-panel layout seeding - mate-panel is retired
+        # again; the centred EmuX dock is the panel (see start_panels).
         if [ -x /usr/bin/openbox ]; then
           write_rc_xml
           mkdir -p /usr/share/applications 2>/dev/null
@@ -794,61 +734,19 @@ pid_alive() {
   read -r PA_PID < "$1" 2>/dev/null || return 1
   [ -n "$PA_PID" ] && kill -0 "$PA_PID" 2>/dev/null
 }
-# v0.2.115 ONE TASKBAR: under MATE the real mate-panel owns the bottom
-# (fallback: this tint2 taskbar when mate-panel or its window-list applets
-# are missing, or it dies twice in a session); everywhere else this tint2
-# taskbar IS the panel: full-width, always visible, start button, pinned
-# apps, open windows, tray, clock. The slim left rail stays (start_panels).
+# v0.2.116 CENTRED TASKBAR: the EmuX dock (v0.2.114 arrangement) is the
+# taskbar under MATE and everywhere else: centred, auto-hiding, start
+# button (jgmenu), pinned apps (incl. a Settings launcher when the MATE
+# control center is installed), open windows, tray, clock. The slim left
+# rail stays (see start_panels).
 start_panels() {
-  # v0.2.115: exactly ONE taskbar. Under MATE the REAL mate-panel is the
-  # taskbar (field: "back to the normal taskbar (mate center bar)") - a
-  # full-width always-visible bottom bar (menu bar + window list + tray
-  # + clock, emux.layout, no auto-hide). The seeded tint2 taskbar is its
-  # FALLBACK: mate-panel or its window-list applets missing, or two quick
-  # deaths in a session, and the tint2 bar owns the bottom for the rest
-  # of the session. Everywhere else the tint2 taskbar is the panel.
-  EMUX_PANEL_MODE=openbox
-  [ -r /tmp/emux_wm_mode ] && read -r EMUX_PANEL_MODE < /tmp/emux_wm_mode 2>/dev/null
-  EMUX_TINT2BAR=1
-  if [ "$EMUX_PANEL_MODE" = mate-session ] || [ "$EMUX_PANEL_MODE" = mate-session-binary ]; then
-    MPS0=$(cat /tmp/emux_matepanel_strikes 2>/dev/null || echo 0)
-    if pid_alive /tmp/emux_matepanel.pid; then
-      EMUX_TINT2BAR=0
-    elif [ "$MPS0" -ge 2 ]; then
-      echo "emux-x11: mate-panel gave up (2 strikes) - tint2 taskbar for this session" >&2
-    elif ! command -v mate-panel >/dev/null 2>&1 || ! ls /usr/share/mate-panel/applets/ 2>/dev/null | grep -qi wncklet; then
-      echo "emux-x11: mate-panel or its window-list applets absent - tint2 taskbar" >&2
-    else
-      echo "emux-x11: starting mate-panel (MATE taskbar)" >&2
-      nohup /usr/bin/mate-panel >/tmp/mate-panel.log 2>&1 </dev/null &
-      MPID=$!
-      echo "$MPID" > /tmp/emux_matepanel.pid 2>/dev/null
-      sleep 1
-      if kill -0 "$MPID" 2>/dev/null; then
-        echo "emux-x11: mate-panel alive (pid $MPID)" >&2
-        EMUX_TINT2BAR=0
-        # exactly one taskbar: retire a fallback tint2 started earlier
-        if pid_alive /tmp/emux_tint2.pid; then
-          read -r T2K < /tmp/emux_tint2.pid 2>/dev/null && kill "$T2K" 2>/dev/null
-          rm -f /tmp/emux_tint2.pid
-          echo "emux-x11: mate-panel owns the taskbar - fallback tint2 stopped" >&2
-        fi
-      else
-        MPS=$(( $(cat /tmp/emux_matepanel_strikes 2>/dev/null || echo 0) + 1 ))
-        echo "$MPS" > /tmp/emux_matepanel_strikes 2>/dev/null
-        echo "emux-x11: mate-panel DIED within 1s of launch (strike $MPS) - mate-panel.log tail:" >&2
-        tail -4 /tmp/mate-panel.log >&2 2>/dev/null
-        # v0.2.113 lesson: a death while X is not answering yet is not the
-        # panel's fault - don't count it; retry on a later tick.
-        if command -v xdpyinfo >/dev/null 2>&1 && ! xdpyinfo >/dev/null 2>&1; then
-          MPS=$((MPS - 1)); echo "$MPS" > /tmp/emux_matepanel_strikes 2>/dev/null
-          rm -f /tmp/emux_matepanel.pid
-        fi
-      fi
-    fi
-  fi
-  if [ -x /usr/bin/tint2 ] && [ "$EMUX_TINT2BAR" = 1 ] && ! pid_alive /tmp/emux_tint2.pid; then
-    echo "emux-x11: starting tint2 taskbar (full-width)" >&2
+  # v0.2.116: the centred auto-hiding dock (v0.2.114) is the taskbar again
+  # under MATE and everywhere else - mate-panel (v0.2.115's full-width
+  # experiment) is retired; the jgmenu start menu + a Settings launcher on
+  # the dock (mate-control-center) cover the "settings menu from mate"
+  # the user actually missed.
+  if [ -x /usr/bin/tint2 ] && ! pid_alive /tmp/emux_tint2.pid; then
+    echo "emux-x11: starting tint2 dock (centred taskbar)" >&2
     nohup /usr/bin/tint2 >/tmp/tint2.log 2>&1 </dev/null &
     T2PID=$!
     echo "$T2PID" > /tmp/emux_tint2.pid 2>/dev/null
@@ -938,7 +836,7 @@ CLIPD
 seed_if_changed() {
   SEED_SIG=""
   for SB in xterm pcmanfm mousepad galculator gnome-calculator firefox firefox-esr \
-            chromium chromium-browser jgmenu tint2 xclip openbox picom; do
+            chromium chromium-browser jgmenu tint2 xclip openbox picom mate-control-center; do
     [ -x "/usr/bin/$SB" ] && SEED_SIG="$SEED_SIG$SB,"
   done
   SEED_OLD=""
@@ -966,9 +864,9 @@ start_furniture() {
   [ -r /tmp/emux_wm_mode ] && read -r SF_MODE < /tmp/emux_wm_mode 2>/dev/null
   case "${SF_MODE:-openbox}" in
     mate-session|mate-session-binary)
-      # v0.2.115: the real mate-panel is the MATE taskbar (start_panels
-      # launches + verifies it; the tint2 taskbar is the automatic
-      # fallback). No pcmanfm desktop: MATE draws its own background.
+      # v0.2.116: the centred EmuX tint2 dock is the MATE panel again
+      # (mate-panel retired - see start_wm). No pcmanfm desktop: MATE
+      # draws its own background.
       seed_if_changed
       start_panels
       return 0 ;;
@@ -1139,6 +1037,18 @@ Categories=Utility;Calculator;
 EOF
     APPS="$APPS calculator"
   fi
+  if [ -x /usr/bin/mate-control-center ]; then
+    cat > "$HOME/.local/share/applications/emux-settings.desktop" <<'EOF'
+[Desktop Entry]
+Type=Application
+Name=Settings
+Comment=MATE control center - appearance, display, keyboard, sound and more
+Exec=mate-control-center
+Icon=preferences-system
+Categories=Settings;
+EOF
+    APPS="$APPS settings"
+  fi
   BROWSER=""
   # v0.2.94 FIELD FIX (browser icon never opened / never appeared):
   # (1) firefox-esr was missing from the scan, so a rootfs with ONLY
@@ -1208,13 +1118,13 @@ EOF
   [ -e "$STAMP" ] && OLD_APPS=$(cat "$STAMP" 2>/dev/null)
   if emux_keep tint2rc; then
     echo "emux-x11: keep-tint2rc marker - the user's panel config is NOT rewritten" >&2
-  elif [ ! -e "$HOME/.config/tint2/tint2rc" ] || [ "$APPS s$EMUX_SCALE v115" != "$OLD_APPS" ]; then
+  elif [ ! -e "$HOME/.config/tint2/tint2rc" ] || [ "$APPS s$EMUX_SCALE v116" != "$OLD_APPS" ]; then
     if [ -e "$HOME/.config/tint2/tint2rc" ] && ! grep -q "EmuX" "$HOME/.config/tint2/tint2rc" 2>/dev/null; then
       cp "$HOME/.config/tint2/tint2rc" "$HOME/.config/tint2/tint2rc.emux-bak" 2>/dev/null
     fi
     S="$EMUX_SCALE"
     {
-      echo "# EmuX tint2 panel (v0.2.115) - full-width always-visible taskbar: start, apps, windows, tray, clock (mate-panel fallback under MATE)"
+      echo "# EmuX tint2 panel (v0.2.116) - centred auto-hiding dock: start, apps, windows, tray, clock"
       # bg 1: the dock bubble
       echo "rounded = $((12 * S))"
       echo "border_width = 1"
@@ -1239,22 +1149,24 @@ EOF
       echo "panel_items = PLTSC"
       echo "panel_monitor = all"
       echo "panel_position = bottom center horizontal"
-      echo "panel_size = 100% $((48 * S))"
-      echo "panel_shrink = 0"
-      # v0.2.115 CLASSIC TASKBAR (field: "go back to the normal taskbar"):
-      # the centred auto-hiding dock is retired; this config is now the
-      # full-width ALWAYS-VISIBLE taskbar - under MATE it is the FALLBACK
-      # for the real mate-panel (start_panels), everywhere else it is the
-      # panel. Auto-hide is off (hiding/showing was the complaint), and
-      # the strut is back ON below: the bar spans the whole bottom edge
-      # opaque, so maximized windows end exactly at its top - none of
-      # the wallpaper band the old FLOATING dock left (v0.2.110 field).
+      echo "panel_size = 94% $((52 * S))"
+      echo "panel_shrink = 1"
+      # v0.2.116 CENTRED DOCK RESTORED (field: "i want the centered taskbar
+      # back because it had the settings menu from mate" - the v0.2.115
+      # full-width mate-panel bar was the wrong reading of "mate center
+      # bar"). Exactly the v0.2.114 dock again: centred, auto-hiding
+      # (reveals via the app's bottom-edge poke, show timeout 0, 1.5 s
+      # grace, 2 px reveal strip), no strut - maximized windows run to
+      # the true screen edge.
       echo "panel_margin = 0 0"
-      echo "autohide = 0"
+      echo "autohide = 1"
+      echo "autohide_show_timeout = 0"
+      echo "autohide_hide_timeout = 1.5"
+      echo "autohide_height = $((2 * S))"
       echo "panel_padding = $((8 * S)) $((4 * S)) $((6 * S))"
       echo "panel_background_id = 1"
       echo "panel_layer = top"
-      echo "strut_policy = follow_size"
+      echo "strut_policy = none"
       echo "wm_menu = 1"
       echo "mouse_effects = 1"
       echo "button = new"
@@ -1277,6 +1189,7 @@ EOF
           editor) echo "launcher_item_app = $HOME/.local/share/applications/emux-editor.desktop" ;;
           calculator) echo "launcher_item_app = $HOME/.local/share/applications/emux-calculator.desktop" ;;
           browser) echo "launcher_item_app = $HOME/.local/share/applications/emux-browser.desktop" ;;
+          settings) echo "launcher_item_app = $HOME/.local/share/applications/emux-settings.desktop" ;;
         esac
       done
       echo "taskbar_mode = single_desktop"
@@ -1309,7 +1222,7 @@ EOF
       echo "clock_padding = $((8 * S)) 0"
       echo "clock_tooltip = %A %d %B %Y"
     } > "$HOME/.config/tint2/tint2rc" 2>/dev/null
-    echo "$APPS s$EMUX_SCALE v115" > "$STAMP" 2>/dev/null
+    echo "$APPS s$EMUX_SCALE v116" > "$STAMP" 2>/dev/null
   fi
   # v0.2.113: the tray lives inside the dock now - retire the pill config
   # (start_panels and the autostart only launch it when this file exists).
@@ -1325,7 +1238,7 @@ EOF
   if ! emux_keep tint2rc; then
     S="$EMUX_SCALE"
     {
-      echo "# EmuX tint2 rail (v0.2.115) - slim vertical panel, left edge: clock + desktops"
+      echo "# EmuX tint2 rail (v0.2.116) - slim vertical panel, left edge: clock + desktops"
       # bg 1: the rail bubble
       echo "rounded = $((8 * S))"
       echo "border_width = 1"
@@ -1672,7 +1585,7 @@ THEME
     echo "emux-x11: rc.xml audit clean ($RCX_EFF binds no Frame/Client/Desktop context)" >&2
   fi
   # --- tint2 refresh: darker bar, bigger icons (rewrite once per stamp) ---
-  if ! emux_keep tint2rc && [ -e "$HOME/.config/tint2/tint2rc" ] && ! grep -q "EmuX tint2 panel (v0.2.115)" "$HOME/.config/tint2/tint2rc" 2>/dev/null; then
+  if ! emux_keep tint2rc && [ -e "$HOME/.config/tint2/tint2rc" ] && ! grep -q "EmuX tint2 panel (v0.2.116)" "$HOME/.config/tint2/tint2rc" 2>/dev/null; then
     cp "$HOME/.config/tint2/tint2rc" "$HOME/.config/tint2/tint2rc.pre-rice" 2>/dev/null
     rm -f "$HOME/.config/tint2/tint2rc" 2>/dev/null
   fi
