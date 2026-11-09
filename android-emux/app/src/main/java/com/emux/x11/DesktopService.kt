@@ -4293,6 +4293,10 @@ class DesktopService(
     fun injectClick(xInXSpace: Int, yInXSpace: Int, button: Int = 1, press: Boolean) {
         injectCount++
         notePointer(xInXSpace, yInXSpace, press)
+        // v0.2.113: track held buttons - the dock poke must never drag
+        // something through the middle of the screen.
+        buttonsHeld = if (press) buttonsHeld or (1 shl button) else buttonsHeld and (1 shl button).inv()
+        lastMotionX = xInXSpace; lastMotionY = yInXSpace
         if (xtest() != null) {
             // v0.2.83: queued, not written here - see the XTEST PUMP comment.
             // fakeButton() emits its own motion first, so the click still lands
@@ -4305,15 +4309,50 @@ class DesktopService(
         inputLine(if (press) "D $button 0 0" else "U $button 0 0")
     }
 
+    // v0.2.113 DOCK REVEAL. The EmuX dock auto-hides into a strip exactly as
+    // wide as itself at the bottom centre, and tint2 only shows it when the
+    // pointer ENTERS that strip - so reaching the bottom edge anywhere else
+    // did nothing ("the taskbar doesn't show"). When the pointer arrives on
+    // the bottom rows, the pump briefly passes the X pointer through the
+    // strip's centre and straight back: tint2 sees Enter -> shows the dock
+    // (show timeout 0) -> Leave -> keeps it up 1.5 s, long enough to reach
+    // it. Verified against tint2 17 on Xvfb. Re-armed at most once a second
+    // while the pointer travels along the edge.
+    @Volatile private var lastMotionX = -1
+    @Volatile private var lastMotionY = -1
+    private var lastDockPokeMs = 0L
+    @Volatile private var buttonsHeld = 0
+
+    private fun maybePokeDock(x: Int, y: Int, prevY: Int) {
+        if (buttonsHeld != 0) return   // mid-drag: never
+        val f = currentFrame ?: return
+        val fh = f.height; val fw = f.width
+        if (y < fh - 2) return
+        val now = android.os.SystemClock.uptimeMillis()
+        val entering = prevY in 0 until fh - 2
+        if (!entering && now - lastDockPokeMs < 1_000L) return
+        lastDockPokeMs = now
+        postXtest(motion = false) { c ->
+            c.fakeMotion(fw / 2, fh - 1)
+            runCatching { Thread.sleep(40) }   // Enter must be seen before Leave
+            val rx = lastMotionX.takeIf { it >= 0 } ?: x
+            val ry = lastMotionY.takeIf { it >= 0 } ?: y
+            c.fakeMotion(rx, ry)
+        }
+    }
+
     fun injectMotion(x: Int, y: Int) {
         injectCount++
         notePointer(x, y, null)
+        val prevY = lastMotionY
+        lastMotionX = x; lastMotionY = y
         if (xtest() != null) {
             // The hot path of a drag: O(1) enqueue, coalesced with any motion
             // still waiting, written on the pump thread. The UI thread never
             // touches the socket, so a full send buffer can no longer stall
             // touch dispatch (v0.2.83).
             postXtest(motion = true) { c -> c.fakeMotion(x, y) }
+            maybePokeDock(x, y, prevY)
             return
         }
         ensureInputWriter(); inputLine("M $x $y 0")
@@ -4321,6 +4360,7 @@ class DesktopService(
 
     /** Drag ended outside a click: just release button 1 at position. */
     fun fakeButtonReleaseOnly(x: Int, y: Int) {
+        buttonsHeld = buttonsHeld and (1 shl 1).inv()   // v0.2.113
         injectCount++
         notePointer(x, y, false)
         if (xtest() != null) {
@@ -4566,77 +4606,74 @@ class DesktopService(
 
     // -------------------------------------------------------------------- stop
     // ------------------------------------------------------------------
-    // v0.2.111 CLIPBOARD BRIDGE (field: "copy outside, paste on the desktop -
-    // and copy on the desktop, paste on the tablet"). Two files in the shared
-    // rootfs /tmp carry text between the Android clipboard and the X
-    // CLIPBOARD/PRIMARY selections, the guest side being emux-clipd (xclip),
-    // started by emux-x11 with the desktop:
-    //   tmp/emux_clip_in   Android -> X  (written here, applied + deleted by clipd)
-    //   tmp/emux_clip_out  X -> Android  (written by clipd, read + deleted here)
-    // clipLast is the last text that crossed in EITHER direction, so a copy
-    // never echoes back (Android sets -> listener fires -> same text -> stop).
+    // ------------------------------------------------------------------
+    // v0.2.113 CLIPBOARD BRIDGE - see X11Clipboard. The app owns/reads the X
+    // selections over its own X connection (XFIXES change events), so a copy
+    // inside Linux reaches the tablet in milliseconds and a tablet copy is
+    // pasteable in any Linux app at once. Replaces the v0.2.111 xclip/file
+    // polling bridge. clipLast is the last text that crossed in EITHER
+    // direction so nothing echoes (tablet sets -> listener fires -> same text).
     @Volatile private var clipLast: String? = null
-    private var clipJob: Job? = null
+    @Volatile private var clipBridge: X11Clipboard? = null
 
     private fun clipboardSyncOn(): Boolean = runCatching {
         androidx.preference.PreferenceManager.getDefaultSharedPreferences(ctx).getBoolean("clipboard_sync", true)
     }.getOrDefault(true)
 
-    /** Android -> X. Called on the UI side when the tablet clipboard is readable
-     *  (window focus / clip-changed): reading it in the background is not allowed. */
+    /** Tablet -> Linux. Called on the UI side while the tablet clipboard is
+     *  readable (window focus / clip changed) - Android forbids reading it
+     *  in the background. */
     fun pushClipboardToGuest(text: String?) {
         if (text.isNullOrEmpty() || text == clipLast || !clipboardSyncOn()) return
-        if (state.value == State.IDLE || state.value == State.ERROR) return
+        val br = clipBridge ?: return
         clipLast = text
-        scope.launch {
-            runCatching {
-                val dir = java.io.File(com.emux.core.FsLayout.linuxRoot(ctx), "tmp")
-                val part = java.io.File(dir, "emux_clip_in.part")
-                part.writeText(text.take(1_000_000))
-                part.renameTo(java.io.File(dir, "emux_clip_in"))   // atomic hand-over
-            }
-        }
+        br.offer(text)
     }
 
-    /** X -> Android: pick up what emux-clipd saw on the X CLIPBOARD. */
     private fun startClipboardBridge() {
-        clipJob?.cancel()
-        clipJob = scope.launch {
-            val f = java.io.File(com.emux.core.FsLayout.linuxRoot(ctx), "tmp/emux_clip_out")
-            runCatching { f.delete() }   // never replay a previous session's copy
-            // Seed the new desktop with what the tablet already has copied
-            // (readable here only while EmuX holds focus - Android returns
-            // nothing otherwise, which is fine). clipLast is cleared so the
-            // fresh X server gets it even if it crossed in a past session.
-            delay(4_000)
-            clipLast = null
-            android.os.Handler(android.os.Looper.getMainLooper()).post {
-                runCatching {
-                    val clip = ctx.getSystemService(android.content.ClipboardManager::class.java)?.primaryClip
-                    if (clip != null && clip.itemCount > 0)
-                        pushClipboardToGuest(clip.getItemAt(0).coerceToText(ctx)?.toString())
-                }
-            }
-            while (isActive) {
-                delay(500)
-                if (!f.isFile) continue
-                val txt = runCatching { f.readText() }.getOrNull()
-                runCatching { f.delete() }
-                if (txt.isNullOrEmpty() || txt == clipLast || !clipboardSyncOn()) continue
-                clipLast = txt
-                android.os.Handler(android.os.Looper.getMainLooper()).post {
-                    runCatching {
-                        ctx.getSystemService(android.content.ClipboardManager::class.java)
-                            ?.setPrimaryClip(android.content.ClipData.newPlainText("Linux desktop", txt))
+        clipBridge?.stop()
+        clipLast = null
+        val br = X11Clipboard(
+            connect = {
+                // follow the server the capture streams (display rotation)
+                val dn = nativeClient?.takeIf { it.connected }?.displayNum ?: displayNum
+                X11Client(
+                    display = dn,
+                    unixSocketPath = java.io.File(
+                        com.emux.core.FsLayout.linuxRoot(ctx), "tmp/.X11-unix/X$dn").absolutePath,
+                ).also { it.connect() }
+            },
+            onText = { txt ->
+                if (clipboardSyncOn() && txt != clipLast) {
+                    clipLast = txt
+                    android.os.Handler(android.os.Looper.getMainLooper()).post {
+                        runCatching {
+                            ctx.getSystemService(android.content.ClipboardManager::class.java)
+                                ?.setPrimaryClip(android.content.ClipData.newPlainText("Linux desktop", txt))
+                        }
                     }
                 }
+            },
+            log = { noteInfo(it) },
+        )
+        clipBridge = br
+        br.start()
+        // Seed the new desktop with what the tablet already has copied
+        // (readable only while EmuX holds focus - otherwise Android returns
+        // nothing, which is fine).
+        android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({
+            runCatching {
+                val clip = ctx.getSystemService(android.content.ClipboardManager::class.java)?.primaryClip
+                if (clip != null && clip.itemCount > 0)
+                    pushClipboardToGuest(clip.getItemAt(0).coerceToText(ctx)?.toString())
             }
-        }
+        }, 4_000)
     }
 
     fun stop() {
         desktopId = ""   // v0.2.108: the stop sweep kills the whole marked tree
-        clipJob?.cancel(); clipJob = null   // v0.2.111
+        clipBridge?.stop(); clipBridge = null   // v0.2.113
+        buttonsHeld = 0
         frameReader?.cancel(); frameReader = null
         runCatching { activeSock?.close() }; activeSock = null   // v0.1.54
         runCatching { listener?.close() }; listener = null

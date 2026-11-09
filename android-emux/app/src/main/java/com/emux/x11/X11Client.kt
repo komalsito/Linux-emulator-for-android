@@ -112,6 +112,14 @@ class X11Client(
         const val OP_INTERN_ATOM = 16
         const val OP_GET_PROPERTY = 20
         const val OP_SEND_EVENT = 25
+        const val OP_CHANGE_PROPERTY = 18          // v0.2.113: clipboard bridge
+        const val OP_SET_SELECTION_OWNER = 22
+        const val OP_CONVERT_SELECTION = 24
+        const val EV_SELECTION_CLEAR = 29
+        const val EV_SELECTION_REQUEST = 30
+        const val EV_SELECTION_NOTIFY = 31
+        const val EV_PROPERTY_NOTIFY = 28
+        const val MASK_PROPERTY_CHANGE = 0x400000
         const val OP_QUERY_POINTER = 38            // v0.2.65: the input self-test
         const val OP_SET_INPUT_FOCUS = 42          // v0.2.78: focus follows the probe
         const val OP_GET_INPUT_FOCUS = 43          // the real XSync round-trip
@@ -925,6 +933,103 @@ class X11Client(
             }
         }
         return out
+    }
+
+    // =====================================================================
+    // v0.2.113 SELECTIONS - the clipboard bridge (see X11Clipboard). Plain
+    // core-protocol + XFIXES, so the bridge needs nothing installed in the
+    // guest and hears about a copy the instant it happens.
+
+    /** An unmapped InputOnly window to own selections and receive conversions. */
+    fun createSelectionWindow(): Int {
+        val wid = newResourceId()
+        val body = ByteBuffer.allocate(32).order(order)
+        body.putInt(wid); body.putInt(rootWindow)
+        body.putShort((-10).toShort()); body.putShort((-10).toShort())
+        body.putShort(1); body.putShort(1)
+        body.putShort(0)                       // border-width
+        body.putShort(2)                       // class InputOnly
+        body.putInt(0)                         // visual CopyFromParent
+        body.putInt(CW_EVENT_MASK)
+        body.putInt(MASK_PROPERTY_CHANGE)
+        sendNoReply(OP_CREATE_WINDOW, 0, body.array())
+        return wid
+    }
+
+    /** XFIXES init + SelectSelectionInput(SetSelectionOwner) on [selections].
+     *  @return the XFixesSelectionNotify event code, or -1. */
+    fun watchSelections(win: Int, selections: IntArray): Int {
+        val x = queryExtension("XFIXES")
+        if (!x.first) return -1
+        val v = ByteBuffer.allocate(8).order(order); v.putInt(5); v.putInt(0)
+        requestReply(x.second, 0, v.array()) ?: return -1          // QueryVersion
+        for (sel in selections) {
+            val b = ByteBuffer.allocate(12).order(order)
+            b.putInt(win); b.putInt(sel); b.putInt(1)               // SetSelectionOwnerNotifyMask
+            sendNoReply(x.second, 2, b.array())                     // SelectSelectionInput
+        }
+        return if (sync(2_000)) x.third else -1
+    }
+
+    fun setSelectionOwner(win: Int, selection: Int) {
+        val b = ByteBuffer.allocate(12).order(order)
+        b.putInt(win); b.putInt(selection); b.putInt(0)             // time CurrentTime
+        sendNoReply(OP_SET_SELECTION_OWNER, 0, b.array())
+    }
+
+    fun convertSelection(requestor: Int, selection: Int, target: Int, property: Int) {
+        val b = ByteBuffer.allocate(20).order(order)
+        b.putInt(requestor); b.putInt(selection); b.putInt(target); b.putInt(property); b.putInt(0)
+        sendNoReply(OP_CONVERT_SELECTION, 0, b.array())
+    }
+
+    /** ChangeProperty(Replace). [format] 8 = bytes, 32 = CARD32 list in [data]. */
+    fun changeProperty(win: Int, prop: Int, type: Int, format: Int, data: ByteArray) {
+        val units = if (format == 32) data.size / 4 else data.size
+        val b = ByteBuffer.allocate(20 + pad(data.size)).order(order)
+        b.putInt(win); b.putInt(prop); b.putInt(type)
+        b.put(format.toByte()); b.put(0); b.put(0); b.put(0)
+        b.putInt(units)
+        b.put(data)
+        sendNoReply(OP_CHANGE_PROPERTY, 0 /* Replace */, b.array())
+    }
+
+    fun int32s(vararg v: Int): ByteArray {
+        val b = ByteBuffer.allocate(v.size * 4).order(order)
+        for (i in v) b.putInt(i)
+        return b.array()
+    }
+
+    /** Answer a SelectionRequest: SendEvent(SelectionNotify) to [requestor]. */
+    fun sendSelectionNotify(requestor: Int, selection: Int, target: Int, property: Int, time: Int) {
+        // destination(4) + event-mask(4) + the 32-byte event = 40 bytes
+        val b = ByteBuffer.allocate(40).order(order)
+        b.putInt(requestor)                    // destination
+        b.putInt(0)                            // event-mask: none (sent to the creator)
+        val ev = ByteBuffer.allocate(32).order(order)
+        ev.put(EV_SELECTION_NOTIFY.toByte()); ev.put(0); ev.putShort(0)
+        ev.putInt(time); ev.putInt(requestor); ev.putInt(selection)
+        ev.putInt(target); ev.putInt(property)
+        b.put(ev.array())
+        sendNoReply(OP_SEND_EVENT, 0 /* propagate False */, b.array())
+    }
+
+    /** GetProperty returning raw bytes: (type, bytes-after, data); deletes on read
+     *  when [delete] (the ICCCM requestor's duty). null on failure. */
+    fun getPropertyBytes(win: Int, prop: Int, delete: Boolean, maxBytes: Int = 4 * 1024 * 1024): Triple<Int, Int, ByteArray>? {
+        val body = ByteBuffer.allocate(20).order(order)
+        body.putInt(win); body.putInt(prop); body.putInt(0)        // AnyPropertyType
+        body.putInt(0); body.putInt((maxBytes + 3) / 4)
+        val r = requestReply(OP_GET_PROPERTY, if (delete) 1 else 0, body.array(), 5_000) ?: return null
+        if (r[0].toInt() != PKT_REPLY) return null
+        val rb = ByteBuffer.wrap(r).order(order)
+        val format = rb.get(1).toInt() and 0xFF
+        val type = rb.getInt(8)
+        val after = rb.getInt(12)
+        val n = rb.getInt(16)
+        val bytes = when (format) { 32 -> n * 4; 16 -> n * 2; else -> n }
+        val len = bytes.coerceIn(0, maxOf(0, r.size - 32))
+        return Triple(type, after, r.copyOfRange(32, 32 + len))
     }
 
     /** True when a window manager owns the screen (EWMH). */

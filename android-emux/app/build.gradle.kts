@@ -378,8 +378,23 @@ android {
         //  Per-event diagnostics only with the badge on. Bottom-edge reach:
         //  leaving the pane downwards parks the X pointer on the last row so
         //  the auto-hidden dock reveals.
-        versionCode = 212
-        versionName = "0.2.112"
+        // v0.2.113 vc213: DOCK THAT SHOWS + CLIPBOARD ON THE X PROTOCOL
+        // (ENV_VERSION 94). Verified on tint2 17 / Xvfb / xterm in a sandbox.
+        //  1. Dock: one centred unit (start, apps, windows, tray, clock).
+        //     tint2 17 has no intellihide (autohide=2 meant always-hidden) and
+        //     the hidden strip is only dock-wide at bottom centre: the app now
+        //     passes the pointer through that strip whenever it reaches the
+        //     bottom edge anywhere (show 0 s, hide 1.5 s after leaving).
+        //  2. The 2-strike tint2 fallback no longer retires the config forever
+        //     (tint2 also dies when X is not answering yet); one-session
+        //     fallback only, and the automatic keep marker is undone.
+        //  3. Clipboard: X11Clipboard owns/reads X selections over its own
+        //     connection (XFIXES change events, UTF8/STRING/TARGETS, INCR in)
+        //     - copies cross in milliseconds; no xclip/emux-clipd polling.
+        //     xterm: selecting no longer overwrites the tablet clipboard;
+        //     Ctrl+Shift+C copies, Ctrl+Shift+V / right-click paste.
+        versionCode = 213
+        versionName = "0.2.113"
 
         ndk {
             abiFilters += listOf("arm64-v8a", "armeabi-v7a", "x86_64")

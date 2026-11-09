@@ -544,13 +544,16 @@ apply_scale() {
   command -v xrdb >/dev/null 2>&1 || return 0
   # v0.2.111 xterm that behaves like a modern terminal (field: "on the
   # terminal inside the desktop I cannot copy nor paste"): a scalable font
-  # (bitmap fonts ignore Xft.dpi - unreadable at Retina), selecting text
-  # copies it to CLIPBOARD (which the bridge hands to the tablet), Ctrl+Shift+C
-  # / Ctrl+Shift+V copy and paste, right-click (= long-press) pastes.
+  # (bitmap fonts ignore Xft.dpi - unreadable at Retina), Ctrl+Shift+C /
+  # Ctrl+Shift+V copy and paste through CLIPBOARD (which the app shares with
+  # the tablet), right-click (= long-press) pastes.
+  # v0.2.113: selecting no longer copies by itself - every accidental drag
+  # replaced the tablet clipboard ("copy-paste is weird"). Selection stays
+  # PRIMARY (middle-click paste inside Linux), Ctrl+Shift+C is the copy.
   cat > /tmp/emux-xterm.ad <<'XTAD'
 XTerm*faceName: Monospace
 XTerm*faceSize: 11
-XTerm*selectToClipboard: true
+XTerm*selectToClipboard: false
 XTerm*scrollBar: false
 XTerm*saveLines: 5000
 XTerm*VT100.translations: #override \n\
@@ -750,13 +753,20 @@ start_panels() {
       else
         echo "emux-x11: tint2 DIED within 1s of launch (strike $T2S, tail already shown)" >&2
       fi
-      if [ "$T2S" = 2 ]; then
-        mkdir -p "$HOME/.config/emux" 2>/dev/null
-        if [ -e "$HOME/.config/tint2/tint2rc" ] && ! emux_keep tint2rc; then
-          mv -f "$HOME/.config/tint2/tint2rc" "$HOME/.config/tint2/tint2rc.crashed" 2>/dev/null
-          touch "$HOME/.config/emux/keep-tint2rc" 2>/dev/null
-          echo "emux-x11: seeded tint2rc moved aside (.crashed) + keep-tint2rc marker set - next launch uses the distro default panel" >&2
-        fi
+      # v0.2.113 (field: the dock was replaced by the distro's default
+      # bar for good). Two quick deaths used to move the EmuX config aside
+      # and set the PERMANENT keep-tint2rc opt-out - but tint2 also dies
+      # instantly when the display is not answering yet (early in a session,
+      # mid display rotation), so a perfectly good config got retired
+      # forever. Now: a death only counts while X answers, and the fallback
+      # is the distro panel for THIS session only - the config is untouched.
+      if command -v xdpyinfo >/dev/null 2>&1 && ! xdpyinfo >/dev/null 2>&1; then
+        T2S=$((T2S - 1)); echo "$T2S" > /tmp/emux_tint2_strikes 2>/dev/null
+        rm -f /tmp/emux_tint2.pid   # retry on a later tick, once X answers
+      elif [ "$T2S" -ge 2 ] && [ -r /etc/xdg/tint2/tint2rc ]; then
+        nohup /usr/bin/tint2 -c /etc/xdg/tint2/tint2rc >/tmp/tint2-fallback.log 2>&1 </dev/null &
+        echo "$!" > /tmp/emux_tint2.pid 2>/dev/null
+        echo "emux-x11: EmuX dock keeps dying - distro default panel for this session (config kept)" >&2
       fi
     fi
   fi
@@ -821,7 +831,13 @@ seed_if_changed() {
   echo "$SEED_SIG" > /tmp/emux_seed_sig 2>/dev/null
 }
 start_furniture() {
-  start_clipd
+  # v0.2.113: no guest clipboard helper any more - the app owns the X
+  # selections itself (X11Clipboard). Stop a v0.2.111/112 emux-clipd if one
+  # survived from before the update.
+  if pid_alive /tmp/emux_clipd.pid; then
+    read -r OLDCLIPD < /tmp/emux_clipd.pid 2>/dev/null && kill "$OLDCLIPD" 2>/dev/null
+    rm -f /tmp/emux_clipd.pid
+  fi
   # v0.2.101: paint the root FIRST so a black pane stays unambiguous even
   # while a full session is taking over, then keep the EmuX furniture OFF the
   # session's desktop - a session manager (gnome-session / startxfce4 via
@@ -932,6 +948,14 @@ start_furniture() {
 # rc.xml audit always runs and `doctor` always reports what it found.
 emux_keep() { [ -e "$HOME/.config/emux/keep-$1" ]; }
 seed_desktop_config() {
+  # v0.2.113 MIGRATION: the old 2-strike fallback left keep-tint2rc next to a
+  # tint2rc.crashed and NO tint2rc - that is the automatic marker, not a user
+  # opt-out (a user who keeps their own panel has a tint2rc). Undo it once.
+  if [ -e "$HOME/.config/emux/keep-tint2rc" ] && [ -e "$HOME/.config/tint2/tint2rc.crashed" ] && \
+     [ ! -e "$HOME/.config/tint2/tint2rc" ]; then
+    rm -f "$HOME/.config/emux/keep-tint2rc" "$HOME/.config/tint2/tint2rc.crashed"
+    echo "emux-x11: removed the automatic keep-tint2rc marker - the EmuX dock is back" >&2
+  fi
   mkdir -p "$HOME/.local/share/applications" "$HOME/Desktop" \
     "$HOME/.config/tint2" "$HOME/.config/openbox" "$HOME/.config/pcmanfm/default" 2>/dev/null
   # v0.2.66 FIX (input-dead audit): on a phone, opening things must not depend
@@ -1067,13 +1091,13 @@ EOF
   [ -e "$STAMP" ] && OLD_APPS=$(cat "$STAMP" 2>/dev/null)
   if emux_keep tint2rc; then
     echo "emux-x11: keep-tint2rc marker - the user's panel config is NOT rewritten" >&2
-  elif [ ! -e "$HOME/.config/tint2/tint2rc" ] || [ "$APPS s$EMUX_SCALE v111" != "$OLD_APPS" ]; then
+  elif [ ! -e "$HOME/.config/tint2/tint2rc" ] || [ "$APPS s$EMUX_SCALE v113" != "$OLD_APPS" ]; then
     if [ -e "$HOME/.config/tint2/tint2rc" ] && ! grep -q "EmuX" "$HOME/.config/tint2/tint2rc" 2>/dev/null; then
       cp "$HOME/.config/tint2/tint2rc" "$HOME/.config/tint2/tint2rc.emux-bak" 2>/dev/null
     fi
     S="$EMUX_SCALE"
     {
-      echo "# EmuX tint2 panel (v0.2.111) - centred dock: start, pinned apps, windows"
+      echo "# EmuX tint2 panel (v0.2.113) - centred auto-hiding dock: start, apps, windows, tray, clock"
       # bg 1: the dock bubble
       echo "rounded = $((12 * S))"
       echo "border_width = 1"
@@ -1092,7 +1116,10 @@ EOF
       echo "border_color = #ffffff 0"
       echo "background_color_hover = #ffffff 14"
       echo "background_color_pressed = #ffffff 24"
-      echo "panel_items = PLT"
+      # v0.2.113: ONE centred unit - start, pinned apps, windows, tray, clock.
+      # The separate tray pill had its own 2 px reveal strip at the far right
+      # and the two hid/showed independently.
+      echo "panel_items = PLTSC"
       echo "panel_monitor = all"
       echo "panel_position = bottom center horizontal"
       echo "panel_size = 94% $((52 * S))"
@@ -1109,13 +1136,19 @@ EOF
       # peeking while hidden: tint2 unhides on pointer-enter, a fully
       # off-screen panel window would be unreachable.
       echo "panel_margin = 0 0"
-      echo "autohide = 2"
+      # v0.2.113: tint2 17 has no intellihide - autohide is a boolean, so
+      # the v0.2.110 "2" simply meant "hidden unless the pointer is on it".
+      # The hidden dock is a strip as wide as the dock itself (bottom centre);
+      # the app pokes the pointer through it whenever the pointer reaches the
+      # bottom edge ANYWHERE (DesktopService.injectMotion), so it shows at
+      # once (show timeout 0) and stays 1.5 s after the pointer leaves it.
+      echo "autohide = 1"
       # v0.2.111 (field: "the dock hides too fast" + interactions felt
       # twitchy): stays 1.5 s after the pointer leaves - enough to come back
       # to it or reach the start menu - and reveals after a deliberate
       # 0.3 s at the edge instead of popping on every pass. The reveal strip
       # scales with the UI (1 px was unreachable-feeling at Retina).
-      echo "autohide_show_timeout = 0.3"
+      echo "autohide_show_timeout = 0"
       echo "autohide_hide_timeout = 1.5"
       echo "autohide_height = $((2 * S))"
       echo "panel_padding = $((8 * S)) $((4 * S)) $((6 * S))"
@@ -1164,60 +1197,23 @@ EOF
       echo "tooltip_font_color = #ffffff 100"
       echo "tooltip_background_id = 1"
       echo "tooltip_padding = $((6 * S)) $((4 * S))"
-    } > "$HOME/.config/tint2/tint2rc" 2>/dev/null
-    echo "$APPS s$EMUX_SCALE v111" > "$STAMP" 2>/dev/null
-  fi
-  # --- v0.2.108: tray bar (full width, bottom layer, tray + clock right) ---
-  if ! emux_keep tint2rc; then
-    S="$EMUX_SCALE"
-    {
-      echo "# EmuX tint2 tray (v0.2.110) - floating pill, bottom right"
-      # v0.2.109: the full-width bar is gone (field: "erase the green bar" -
-      # without a compositor its translucency showed the wallpaper through as
-      # a tinted strip). Tray + clock float as a pill matching the dock.
-      echo "rounded = $((12 * S))"
-      echo "border_width = 1"
-      echo "background_color = #1b1f27 100"
-      echo "border_color = #ffffff 14"
-      echo "panel_items = SC"
-      echo "panel_monitor = all"
-      echo "panel_position = bottom right horizontal"
-      echo "panel_size = 30% $((52 * S))"
-      echo "panel_shrink = 1"
-      # v0.2.110: the pill gets the same dynamic-dock treatment (flush
-      # bottom + intellihide) so both bars behave as one unit - visible
-      # together on the desktop, sliding away together when a maximized
-      # window covers them, back together when the pointer hits the
-      # bottom edge.
-      echo "panel_margin = $((8 * S)) 0"
-      echo "autohide = 2"
-      # v0.2.111 (field: "the dock hides too fast" + interactions felt
-      # twitchy): stays 1.5 s after the pointer leaves - enough to come back
-      # to it or reach the start menu - and reveals after a deliberate
-      # 0.3 s at the edge instead of popping on every pass. The reveal strip
-      # scales with the UI (1 px was unreachable-feeling at Retina).
-      echo "autohide_show_timeout = 0.3"
-      echo "autohide_hide_timeout = 1.5"
-      echo "autohide_height = $((2 * S))"
-      echo "panel_padding = $((10 * S)) $((4 * S)) $((8 * S))"
-      echo "panel_background_id = 1"
-      echo "panel_layer = top"
-      echo "strut_policy = none"
-      echo "panel_window_name = emux-tray"
-      echo "wm_menu = 1"
       echo "systray = 1"
-      echo "systray_padding = $((4 * S)) 0 $((6 * S))"
+      echo "systray_padding = $((6 * S)) 0 $((6 * S))"
       echo "systray_background_id = 0"
       echo "systray_icon_size = $((22 * S))"
       echo "time1_format = %H:%M"
-      echo "time1_font = sans 11"
-      echo "time2_format = %a %d %b"
+      echo "time1_font = sans bold 10"
+      echo "time2_format = %d %b"
       echo "time2_font = sans 8"
       echo "clock_font_color = #ffffff 100"
-      echo "clock_padding = $((6 * S)) 0"
+      echo "clock_padding = $((8 * S)) 0"
       echo "clock_tooltip = %A %d %B %Y"
-    } > "$HOME/.config/tint2/emux-tray.tint2rc" 2>/dev/null
+    } > "$HOME/.config/tint2/tint2rc" 2>/dev/null
+    echo "$APPS s$EMUX_SCALE v113" > "$STAMP" 2>/dev/null
   fi
+  # v0.2.113: the tray lives inside the dock now - retire the pill config
+  # (start_panels and the autostart only launch it when this file exists).
+  [ -e "$HOME/.config/tint2/emux-tray.tint2rc" ] && rm -f "$HOME/.config/tint2/emux-tray.tint2rc"
   # --- v0.2.108: start menu (jgmenu: searchable app list, opens at the pointer) ---
   mkdir -p "$HOME/.local/bin" "$HOME/.config/jgmenu" 2>/dev/null
   cat > "$HOME/.local/bin/emux-startmenu" <<'SMENU'
@@ -1261,7 +1257,6 @@ SMENU
   # v0.2.111: xclip (clipboard bridge, emux-clipd) rides the same install.
   EXTRA_PKGS=""
   command -v jgmenu >/dev/null 2>&1 || EXTRA_PKGS="$EXTRA_PKGS jgmenu"
-  command -v xclip >/dev/null 2>&1 || EXTRA_PKGS="$EXTRA_PKGS xclip"
   # v0.2.112: a failed attempt (offline, unknown package) used to retry at
   # EVERY desktop start - a full apt/dpkg run under proot competing with the
   # desktop for minutes. Once a day now, at the lowest CPU priority.
@@ -1499,7 +1494,7 @@ THEME
     echo "emux-x11: rc.xml audit clean ($RCX_EFF binds no Frame/Client/Desktop context)" >&2
   fi
   # --- tint2 refresh: darker bar, bigger icons (rewrite once per stamp) ---
-  if ! emux_keep tint2rc && [ -e "$HOME/.config/tint2/tint2rc" ] && ! grep -q "EmuX tint2 panel (v0.2.111)" "$HOME/.config/tint2/tint2rc" 2>/dev/null; then
+  if ! emux_keep tint2rc && [ -e "$HOME/.config/tint2/tint2rc" ] && ! grep -q "EmuX tint2 panel (v0.2.113)" "$HOME/.config/tint2/tint2rc" 2>/dev/null; then
     cp "$HOME/.config/tint2/tint2rc" "$HOME/.config/tint2/tint2rc.pre-rice" 2>/dev/null
     rm -f "$HOME/.config/tint2/tint2rc" 2>/dev/null
   fi
