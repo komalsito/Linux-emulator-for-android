@@ -457,8 +457,14 @@ android {
         // entry at all. obconf now installs with the other extras and a Window
         // Manager entry is pinned in the Settings submenu and the openbox
         // right-click menu; MATE Appearance is relabelled Appearance (themes).
-        versionCode = 222
-        versionName = "0.2.122"
+        // vc223: SINGLE-SNAPSHOT PRESENT. The damage tick still grabbed its
+        // pending bands one by one, so during a fast scroll / window move the
+        // content shifted between grabs and one presented frame mixed bands from
+        // different offsets - the small self-correcting glitches the field still
+        // saw on v0.2.121. The tick now grabs the union box of all pending bands
+        // in one memcpy and diffs/uploads from that single instant.
+        versionCode = 223
+        versionName = "0.2.123"
 
         ndk {
             abiFilters += listOf("arm64-v8a", "armeabi-v7a", "x86_64")

@@ -720,56 +720,51 @@ class DesktopService(
                                 } else dirtyBands.sortBy { it[1] }
                                 var painted = false
                                 var failed = false
-                                var bands = 0
-                                // A damage tick may not own the connection for
-                                // longer than its budget; unpainted bands stay
-                                // pending and resume next tick (immediately -
-                                // the drain above does not block when bands are
-                                // waiting). This is what keeps continuous damage
-                                // (video) from starving a drag, and a drag from
-                                // starving the healer.
-                                while (dirtyBands.isNotEmpty() && !failed && bands < 6 &&
-                                    System.currentTimeMillis() - t0 < 120L) {
+                                // v0.2.123 SINGLE-SNAPSHOT PRESENT: the tick's pending
+                                // bands used to be grabbed one by one, each grab a few
+                                // ms after the previous one. During a fast scroll or a
+                                // window move the content shifted BETWEEN grabs, so one
+                                // presented frame mixed bands captured at different
+                                // scroll offsets - the small self-correcting glitches
+                                // that stayed after v0.2.119 ("croppy" edges). Now the
+                                // union box of ALL pending bands is grabbed in ONE
+                                // pass (fbdir map memcpy) and diffed/uploaded from that
+                                // single instant: every pixel of the presented frame
+                                // comes from the same moment. Unchanged rows inside
+                                // the box are dropped by the v0.2.84 row diff for
+                                // free; the 32-row slice diff, the mirror update and
+                                // the healer sweep below are unchanged.
+                                var ux0 = w; var uy0 = h; var ux1 = 0; var uy1 = 0
+                                while (dirtyBands.isNotEmpty()) {
                                     val b = dirtyBands.removeAt(0)
-                                    val bw = (b[2] - b[0]).coerceIn(1, w)
-                                    var by = b[1]
-                                    while (by < b[3]) {
-                                        val rows = minOf(chunkRows, b[3] - by)
-                                        val gt = System.currentTimeMillis()
-                                        val n = fbRegion(b[0], by, bw, rows, partBytes).takeIf { it > 0 }
-                                            ?: runCatching {
-                                                c.grabRegion565(b[0], by, bw, rows, bandTimeout, partBytes, pB)
-                                            }.getOrDefault(-1)
-                                        if (n <= 0) {
-                                            addDirty(b[0], by, b[0] + bw, b[3])  // keep the rest pending
-                                            failed = true
-                                            break
-                                        }
-                                        nativeProofAtMs = System.currentTimeMillis()
-                                        lastSourceProofAtMs = nativeProofAtMs
-                                        // v0.2.84: upload only the 32-row
-                                        // slices that actually differ from the
-                                        // mirror. DAMAGE says the server
-                                        // touched these rows; the diff says
-                                        // which of them the USER will see
-                                        // change (a cursor blink back to the
-                                        // same pixels, an expose of unchanged
-                                        // wallpaper - all free now).
-                                        if (diffUpload(b[0], by, bw, rows, partBytes, 0, w, h, pB) > 0) {
-                                            frameId++
-                                            // v0.2.119: no per-chunk present. During a fast
-                                            // scroll these bands were grabbed at different
-                                            // offsets; presenting each one mid-grab showed
-                                            // torn / cropped frames.
-                                            painted = true
-                                        }
-                                        val bms = (System.currentTimeMillis() - gt).coerceAtLeast(1)
-                                        val bkb = (bw.toLong() * rows * pB) / bms
-                                        kbEwma = if (kbEwma <= 0) bkb else (kbEwma * 3 + bkb) / 4
-                                        if (nativeKbPerS <= 0) nativeKbPerS = kbEwma
-                                        by += rows
+                                    if (b[0] < ux0) ux0 = b[0]
+                                    if (b[1] < uy0) uy0 = b[1]
+                                    if (b[2] > ux1) ux1 = b[2]
+                                    if (b[3] > uy1) uy1 = b[3]
+                                }
+                                val bw = (ux1 - ux0).coerceIn(1, w)
+                                val bh = (uy1 - uy0).coerceIn(1, h)
+                                val snap = fbCheckBuf(bw * bh * pB)
+                                val n = fbRegion(ux0, uy0, bw, bh, snap).takeIf { it > 0 }
+                                    ?: runCatching {
+                                        c.grabRegion565(ux0, uy0, bw, bh, bandTimeout, snap, pB)
+                                    }.getOrDefault(-1)
+                                if (n <= 0) {
+                                    addDirty(ux0, uy0, ux0 + bw, uy0 + bh)   // keep it pending
+                                    failed = true
+                                } else {
+                                    nativeProofAtMs = System.currentTimeMillis()
+                                    lastSourceProofAtMs = nativeProofAtMs
+                                    // v0.2.84: upload only the 32-row slices that
+                                    // actually differ from the mirror.
+                                    if (diffUpload(ux0, uy0, bw, bh, snap, 0, w, h, pB) > 0) {
+                                        frameId++
+                                        painted = true
                                     }
-                                    bands++
+                                    val bms = (System.currentTimeMillis() - t0).coerceAtLeast(1)
+                                    val bkb = (bw.toLong() * bh * pB) / bms
+                                    kbEwma = if (kbEwma <= 0) bkb else (kbEwma * 3 + bkb) / 4
+                                    if (nativeKbPerS <= 0) nativeKbPerS = kbEwma
                                 }
                                 if (failed) {
                                     dmgMisses++
@@ -785,7 +780,7 @@ class DesktopService(
                                 } else {
                                     dmgMisses = 0
                                     if (painted) {
-                                        onUiInvalidated()   // v0.2.119: ONE coherent present per tick
+                                        onUiInvalidated()   // v0.2.123: ONE present per tick, all pixels from one snapshot
                                         lastAnyFrameAtMs = System.currentTimeMillis()
                                         nativeGrabMs = System.currentTimeMillis() - t0
                                         nativeFrames++
