@@ -451,8 +451,14 @@ android {
         // selection overlay used `top` before it was declared, so it resolved to
         // View.top (0) and the blue highlight painted at the top row of the view
         // instead of on the selected text.
-        versionCode = 221
-        versionName = "0.2.121"
+        // vc222 (ENV_VERSION 100 -> 101): OBCONF - the desktop WM is openbox, so
+        // the MATE Appearance capplet (which edits marco's titlebar) could never
+        // change the window buttons, and there was no working window-settings
+        // entry at all. obconf now installs with the other extras and a Window
+        // Manager entry is pinned in the Settings submenu and the openbox
+        // right-click menu; MATE Appearance is relabelled Appearance (themes).
+        versionCode = 222
+        versionName = "0.2.122"
 
         ndk {
             abiFilters += listOf("arm64-v8a", "armeabi-v7a", "x86_64")

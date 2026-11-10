@@ -1429,22 +1429,35 @@ FXUP
   # submenu pinned at the TOP of the start menu, re-generated on every seed
   # so capplets installed later appear on the next desktop start.
   {
-    if [ -x /usr/bin/mate-control-center ]; then
-      echo "Settings,^tag(emuxsettings),preferences-system"
-      echo "^tag(emuxsettings)"
-      echo "Control Center,mate-control-center,preferences-system"
-      [ -x /usr/bin/mate-appearance-properties ] && echo "Appearance,mate-appearance-properties,preferences-desktop"
-      [ -x /usr/bin/mate-display-properties ] && echo "Display,mate-display-properties,preferences-desktop-display"
-      [ -x /usr/bin/mate-keyboard-properties ] && echo "Keyboard,mate-keyboard-properties,preferences-desktop-keyboard"
-      [ -x /usr/bin/mate-mouse-properties ] && echo "Mouse,mate-mouse-properties,preferences-desktop-peripherals"
-      [ -x /usr/bin/mate-keybinding-properties ] && echo "Shortcuts,mate-keybinding-properties,preferences-desktop-keyboard-shortcut"
-      echo "^back()"
-    fi
+    echo "Settings,^tag(emuxsettings),preferences-system"
+    echo "^tag(emuxsettings)"
+    [ -x /usr/bin/mate-control-center ] && echo "Control Center,mate-control-center,preferences-system"
+    # v0.2.122: relabelled - this MATE capplet themes marco's titlebar, and
+    # marco never runs on this desktop (openbox is the WM). Themes and fonts
+    # still work here; the window-button layout does NOT - that is the
+    # Window Manager (obconf) entry below.
+    [ -x /usr/bin/mate-appearance-properties ] && echo "Appearance (themes),mate-appearance-properties,preferences-desktop"
+    [ -x /usr/bin/mate-display-properties ] && echo "Display,mate-display-properties,preferences-desktop-display"
+    [ -x /usr/bin/mate-keyboard-properties ] && echo "Keyboard,mate-keyboard-properties,preferences-desktop-keyboard"
+    [ -x /usr/bin/mate-mouse-properties ] && echo "Mouse,mate-mouse-properties,preferences-desktop-peripherals"
+    [ -x /usr/bin/mate-keybinding-properties ] && echo "Shortcuts,mate-keybinding-properties,preferences-desktop-keyboard-shortcut"
+    # v0.2.122: obconf - openbox's own configuration manager. THE tool for the
+    # titlebar button layout (which buttons sit top-left vs top-right) and the
+    # window behaviour settings on this desktop.
+    [ -x /usr/bin/obconf ] && echo "Window Manager,obconf,preferences-system-windows"
+    echo "^back()"
   } > "$HOME/.config/jgmenu/prepend.csv" 2>/dev/null
 
   # v0.2.111: xclip (clipboard bridge, emux-clipd) rides the same install.
   EXTRA_PKGS=""
   command -v jgmenu >/dev/null 2>&1 || EXTRA_PKGS="$EXTRA_PKGS jgmenu"
+  # v0.2.122: obconf - the WM here is openbox, so the titlebar button layout
+  # and window behaviour live in obconf, NOT in the MATE capplets (their
+  # Appearance edits marco, which never runs). Installed with the other
+  # extras; the Settings submenu picks it up on the next desktop start.
+  if [ -x /usr/bin/openbox ] && ! command -v obconf >/dev/null 2>&1; then
+    EXTRA_PKGS="$EXTRA_PKGS obconf"
+  fi
   # v0.2.112: a failed attempt (offline, unknown package) used to retry at
   # EVERY desktop start - a full apt/dpkg run under proot competing with the
   # desktop for minutes. Once a day now, at the lowest CPU priority.
@@ -1492,6 +1505,7 @@ FXUP
       [ -x /usr/bin/xterm ] && echo '  <item label="Terminal"><action name="Execute"><command>xterm</command></action></item>'
       [ -x /usr/bin/pcmanfm ] && echo '  <item label="Files"><action name="Execute"><command>pcmanfm</command></action></item>'
       [ -x /usr/bin/mousepad ] && echo "  <item label=\"Desktop Help\"><action name=\"Execute\"><command>mousepad $HOME/Desktop/Welcome.txt</command></action></item>"
+      [ -x /usr/bin/obconf ] && echo '  <item label="Window Manager Settings"><action name="Execute"><command>obconf</command></action></item>'
       echo '  <separator/>'
       echo '  <item label="Restart Openbox"><action name="Restart"/></item>'
       echo '  <item label="Reconfigure Openbox"><action name="Reconfigure"/></item>'
@@ -1510,6 +1524,7 @@ FXUP
       [ -x /usr/bin/mousepad ] && echo '  <item label="Text Editor"><action name="Execute"><command>mousepad</command></action></item>'
       [ -x /usr/bin/galculator ] && echo '  <item label="Calculator"><action name="Execute"><command>galculator</command></action></item>'
       [ -n "$BROWSER" ] && echo "  <item label=\"Web Browser\"><action name=\"Execute\"><command>$HOME/.local/bin/emux-browser</command></action></item>"
+      [ -x /usr/bin/obconf ] && echo '  <item label="Window Manager Settings"><action name="Execute"><command>obconf</command></action></item>'
       echo '  <separator/>'
       echo '  <item label="Restart Openbox"><action name="Restart"/></item>'
       echo '</menu>'
