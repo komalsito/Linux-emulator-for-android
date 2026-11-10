@@ -773,17 +773,24 @@ class VtTerminalView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attr
             // grid of <=40 runs/row is trivially cheap per frame).
             val v = vTop + y
             val row = if (v < hsize) history[v] else screen[v - hsize]
+            val rcols = row.chars.size      // rows keep their birth width across resizes
+            // v0.2.121 SELECTION FIX: `top` must exist BEFORE the overlay below.
+            // It used to be declared after it, so the overlay's bare `top`
+            // silently resolved to View.top (= 0): the blue selection band was
+            // painted at the TOP ROW of the view no matter which rows were
+            // selected (field: "the selection shows at the top but text is not
+            // accurately selected" - copying still worked, only the highlight
+            // was drawn in the wrong place).
+            val top = y * cellH
             // v0.1.98: selection overlay for this row
             if (selA >= 0 && selB >= 0) {
                 val ns = normSel()
                 if (v in ns[0]..ns[2]) {
                     val cs = if (v == ns[0]) ns[1] else 0
                     val ce = if (v == ns[2]) ns[3] + 1 else row.chars.size
-                    if (cs < ce) canvas.drawRect(cs * cellW, top.toFloat(), ce * cellW, (top + cellH).toFloat(), selPaint)
+                    if (cs < ce) canvas.drawRect(cs * cellW, top, ce * cellW, top + cellH, selPaint)
                 }
             }
-            val rcols = row.chars.size      // rows keep their birth width across resizes
-            val top = y * cellH
             var x = 0
             while (x < rcols) {
                 val st = stylePool.getOrElse(row.styles[x].toInt() and 0xFF) { defStyle }

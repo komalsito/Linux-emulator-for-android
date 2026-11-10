@@ -34,6 +34,16 @@
             android:layout_width="wrap_content" android:layout_height="wrap_content"
             android:textColor="#8A93A0" android:textSize="12sp"
             android:paddingEnd="12dp" android:paddingStart="0dp" />
+
+        <!-- v0.2.121: Close = full app shutdown (sessions + desktop + process),
+             the in-app equivalent of Android Settings > Force stop. -->
+        <TextView android:id="@+id/btnClose"
+            android:layout_width="wrap_content" android:layout_height="match_parent"
+            android:gravity="center"
+            android:text="✕"
+            android:textColor="#E8E8E8" android:textSize="16sp"
+            android:paddingStart="14dp" android:paddingEnd="14dp"
+            android:background="?android:attr/selectableItemBackground" />
     </LinearLayout>
 
     <!-- bootstrap banner: v0.1.28 — hidden by default. Previously VISIBLE with

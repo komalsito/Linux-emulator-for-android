@@ -444,8 +444,15 @@ android {
         // A seeded emux-browser wrapper now resolves the browser at CLICK time
         // (/opt/firefox tarball first), stale browser launchers are removed when no
         // browser is installed, and the dock + right-click menu stamps reseed once.
-        versionCode = 220
-        versionName = "0.2.120"
+        // vc221: CLOSE BUTTON + TERMINAL SELECTION FIX. The top bar gains a Close
+        // (x) button that works like Android Settings > Force stop: desktop stop
+        // sweep, every terminal session stopped, foreground service stopped, then
+        // the process exits - no stale sessions on reopen. VtTerminalView's
+        // selection overlay used `top` before it was declared, so it resolved to
+        // View.top (0) and the blue highlight painted at the top row of the view
+        // instead of on the selected text.
+        versionCode = 221
+        versionName = "0.2.121"
 
         ndk {
             abiFilters += listOf("arm64-v8a", "armeabi-v7a", "x86_64")

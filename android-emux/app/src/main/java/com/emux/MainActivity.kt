@@ -446,7 +446,32 @@ class MainActivity : AppCompatActivity() {
         b.tabSettings.setOnClickListener {
             startActivity(Intent(this, SettingsActivity::class.java))
         }
+        b.btnClose.setOnClickListener { closeEverything() }
         showTerminal()
+    }
+
+    /**
+     * v0.2.121 CLOSE BUTTON: the user kept going to Android Settings > Force
+     * stop because reopening the app kept finding stale sessions. This is the
+     * same outcome from inside the app: the desktop stop sweep kills the whole
+     * marked guest tree (Xvfb, capture, WM, desktop guests, clipboard bridge),
+     * every terminal session's PTY is closed (guest shells die with it), the
+     * foreground service is stopped, and after a short grace period - so the
+     * async kill sweeps can land - our own process exits. Nothing survives.
+     */
+    private fun closeEverything() {
+        runCatching { desktop.stop() }
+        lifecycleScope.launch {
+            com.emux.terminal.TerminalService.sessions().value.forEach { s ->
+                runCatching { s.stop() }
+            }
+        }
+        runCatching { stopService(Intent(this, TerminalService::class.java)) }
+        b.root.postDelayed({
+            runCatching { finishAffinity() }
+            android.os.Process.killProcess(android.os.Process.myPid())
+            kotlin.system.exitProcess(0)
+        }, 1_500)
     }
 
     private fun showTerminal() {
