@@ -1063,10 +1063,20 @@ EOF
   for b in firefox-esr firefox chromium chromium-browser google-chrome; do
     if command -v "$b" >/dev/null 2>&1; then BROWSER="$b"; break; fi
   done
+  # v0.2.118 TARBALL-FIRST: the official Mozilla ARM64 build (see the new
+  # emux-firefox-upgrade helper) installs to /opt/firefox and is not always
+  # linked onto PATH - but it is the NEWEST browser on the system, so it
+  # beats anything the scan found. The field upgrade flow was:
+  # emux-firefox-upgrade + apt remove firefox-esr - and every launcher
+  # (dock, start menu, right-click menu) kept pointing at the REMOVED
+  # firefox-esr until manually re-seeded. Detecting the tarball first makes
+  # the whole launcher set switch the moment it appears.
+  [ -x /opt/firefox/firefox ] && BROWSER="/opt/firefox/firefox"
   if [ -n "$BROWSER" ]; then
     BNAME="Web Browser"; BICON=web-browser
     case "$BROWSER" in
       firefox-esr) BNAME="Firefox ESR"; BICON=firefox-esr ;;
+      /opt/firefox/firefox) BNAME="Firefox"; BICON=web-browser ;;
     esac
     cat > "$HOME/.local/share/applications/emux-browser.desktop" <<EOF
 [Desktop Entry]
@@ -1319,6 +1329,34 @@ fi
 exec x-terminal-emulator 2>/dev/null || exec xterm
 SMENU
   chmod +x "$HOME/.local/bin/emux-startmenu" 2>/dev/null
+  # v0.2.118: one-command Firefox upgrades. Ubuntu noble offers only the
+  # snap stub (dead inside proot) or an aging firefox-esr; Mozilla publishes
+  # official Linux ARM64 tarballs, and the newest release is what makes the
+  # AI sidebar usable. The seed's tarball-first scan picks the result up on
+  # the next desktop start (dock + start menu + right-click menu).
+  cat > "$HOME/.local/bin/emux-firefox-upgrade" <<'FXUP'
+#!/bin/sh
+# emux-firefox-upgrade (v0.2.118): install or refresh the OFFICIAL Mozilla
+# Linux ARM64 (aarch64) build into /opt/firefox and link it as firefox.
+# Close Firefox first (its files are replaced). Re-run any time to move to
+# the newest release; restart the EmuX desktop afterwards so the launchers
+# point at it.
+set -e
+command -v curl >/dev/null 2>&1 || {
+  echo "emux-firefox-upgrade: installing curl first..." >&2
+  DEBIAN_FRONTEND=noninteractive apt-get update
+  DEBIAN_FRONTEND=noninteractive apt-get install -y curl
+}
+mkdir -p /opt && cd /opt
+echo "emux-firefox-upgrade: downloading the newest official ARM64 Firefox..." >&2
+curl -L -o firefox-new.tar.bz2 "https://download.mozilla.org/?product=firefox-latest-ssl&os=linux64-aarch64&lang=en-US"
+tar xjf firefox-new.tar.bz2
+rm -f firefox-new.tar.bz2
+ln -sf /opt/firefox/firefox /usr/local/bin/firefox
+echo "emux-firefox-upgrade: done - restart the EmuX desktop so the dock + start menu point at it" >&2
+/opt/firefox/firefox --version || true
+FXUP
+  chmod +x "$HOME/.local/bin/emux-firefox-upgrade" 2>/dev/null
   S="$EMUX_SCALE"
   {
     echo "# EmuX jgmenu (v0.2.108)"
@@ -1386,10 +1424,17 @@ SMENU
     fi
   fi
   # --- Openbox right-click menu (same apps, plus WM controls) ---
-  if [ ! -e "$HOME/.config/openbox/menu.xml" ] || ! grep -q "EmuX v0.2.94" "$HOME/.config/openbox/menu.xml" 2>/dev/null; then
+  # v0.2.118: the marker now includes the browser binary, so the menu
+  # re-seeds when the browser CHANGES (apt removed firefox-esr, /opt/firefox
+  # tarball took over) instead of pointing at a dead binary until the next
+  # version bump. Field: "firefox is not visible from right clicking the
+  # desktop and is not executable from the desktop shortcut".
+  OB_MENU_MARKER="EmuX v0.2.94 menu browser=$BROWSER"
+  if [ ! -e "$HOME/.config/openbox/menu.xml" ] || ! grep -qF "$OB_MENU_MARKER" "$HOME/.config/openbox/menu.xml" 2>/dev/null; then
     {
       echo '<?xml version="1.0" encoding="UTF-8"?>'
       echo '<openbox_menu xmlns="http://openbox.org/3.4/menu">'
+      echo "<!-- $OB_MENU_MARKER -->"
       echo '<menu id="root-menu" label="EmuX v0.2.94">'
       echo '  <menu id="cat-apps" label="Applications">'
       echo '    <menu id="cat-net" label="Internet">'

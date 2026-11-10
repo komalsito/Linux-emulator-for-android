@@ -422,8 +422,14 @@ android {
         // fired), seeds 1.5s after start and logs every crossing to the status
         // line. emux-x11 pins a Settings submenu (prepend.csv) at the top of the
         // jgmenu start menu so the MATE settings are always visible.
-        versionCode = 217
-        versionName = "0.2.117"
+        // vc218 (ENV_VERSION 98 -> 99): FIREFOX UPGRADE SELF-HEALING. The launcher
+        // scan detects the official Mozilla ARM64 tarball at /opt/firefox first, the
+        // openbox right-click menu re-seeds when the browser binary changes (field:
+        // dead menu entries after apt removed firefox-esr), and the seeded
+        // emux-firefox-upgrade helper installs/refreshes the newest release in one
+        // command.
+        versionCode = 218
+        versionName = "0.2.118"
 
         ndk {
             abiFilters += listOf("arm64-v8a", "armeabi-v7a", "x86_64")
