@@ -428,8 +428,16 @@ android {
         // dead menu entries after apt removed firefox-esr), and the seeded
         // emux-firefox-upgrade helper installs/refreshes the newest release in one
         // command.
-        versionCode = 218
-        versionName = "0.2.118"
+        // vc219: CAPTURE BATTERY + SCROLL-TEAR FIXES. The damage capture loop was
+        // paced at 8 ms (up to ~125 paint attempts/s), presented every partial band
+        // mid-grab (consecutive bands at different scroll offsets showed as torn /
+        // cropped frames while scrolling Firefox), and had no visibility gate - it
+        // painted at full speed while the app was backgrounded or the desktop pane was
+        // hidden (Terminal tab). Now: one coherent present per tick at the 30 fps
+        // ceiling, and zero paint while the desktop tab is hidden, the app is
+        // backgrounded or the screen is off.
+        versionCode = 219
+        versionName = "0.2.119"
 
         ndk {
             abiFilters += listOf("arm64-v8a", "armeabi-v7a", "x86_64")

@@ -452,6 +452,7 @@ class MainActivity : AppCompatActivity() {
     private fun showTerminal() {
         b.paneDesktop.visibility = android.view.View.GONE
         b.desktopStatus.visibility = android.view.View.GONE
+        desktop.paneVisible = false   // v0.2.119: capture paints nothing while the pane is hidden
         b.termContainer.visibility = android.view.View.VISIBLE
         b.tabTerm.isSelected = true; b.tabX11.isSelected = false
         ensureSessionAttached()
@@ -482,6 +483,7 @@ class MainActivity : AppCompatActivity() {
     private fun showDesktop() {
         b.termContainer.visibility = android.view.View.GONE
         b.paneDesktop.visibility = android.view.View.VISIBLE
+        desktop.paneVisible = true   // v0.2.119: first visible tick repaints accumulated bands
         // v0.1.100: desktopStatus is visibility="gone" in the layout
         // and was never made visible anywhere — its text was updated
         // into a view nobody could see. The pane canvas was the only

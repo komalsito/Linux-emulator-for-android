@@ -238,6 +238,11 @@ class DesktopService(
 
     @Volatile var foreground = true
     @Volatile var screenOn = true
+    // v0.2.119: desktop tab visible in THIS activity. The damage capture loop
+    // paints nothing while this is false, the app is backgrounded or the
+    // screen is off; dirty bands accumulate and the first visible tick
+    // repaints everything in one shot.
+    @Volatile var paneVisible = true
 
     /** Monotonic id handed to the View so it invalidates only on real new data. */
     @Volatile var frameId = 0; private set
@@ -661,6 +666,23 @@ class DesktopService(
                             retireMailPipelines()
                         if (dmgOk) {
                             ticks++
+                            // v0.2.119 BATTERY: no paint at all while the desktop
+                            // pane is hidden (Terminal tab), the app is backgrounded
+                            // or the screen is off. Damage events are still drained
+                            // into the dirty-band accumulator so the first visible
+                            // tick repaints in one shot; refreshes > 0 keeps the very
+                            // first proof sweep (full-framebuffer seed) unconditional.
+                            if (refreshes > 0 && (!foreground || !screenOn || !paneVisible)) {
+                                val hidden = c.drainDamageRects(0)
+                                for (r in hidden) {
+                                    addDirty(
+                                        r[0].coerceIn(0, w), r[1].coerceIn(0, h),
+                                        (r[0] + r[2]).coerceIn(0, w),
+                                        (r[1] + r[3]).coerceIn(0, h))
+                                }
+                                kotlinx.coroutines.delay(500L)
+                                continue
+                            }
                             // ~every 5 s a full sweep anyway: the healer, for
                             // anything DAMAGE cannot see (server-side sprite
                             // draws, a missed event, our own bookkeeping).
@@ -735,7 +757,10 @@ class DesktopService(
                                         // wallpaper - all free now).
                                         if (diffUpload(b[0], by, bw, rows, partBytes, 0, w, h, pB) > 0) {
                                             frameId++
-                                            onUiInvalidated()      // progressive paint per chunk
+                                            // v0.2.119: no per-chunk present. During a fast
+                                            // scroll these bands were grabbed at different
+                                            // offsets; presenting each one mid-grab showed
+                                            // torn / cropped frames.
                                             painted = true
                                         }
                                         val bms = (System.currentTimeMillis() - gt).coerceAtLeast(1)
@@ -760,6 +785,7 @@ class DesktopService(
                                 } else {
                                     dmgMisses = 0
                                     if (painted) {
+                                        onUiInvalidated()   // v0.2.119: ONE coherent present per tick
                                         lastAnyFrameAtMs = System.currentTimeMillis()
                                         nativeGrabMs = System.currentTimeMillis() - t0
                                         nativeFrames++
@@ -770,12 +796,14 @@ class DesktopService(
                                         healerEvery = HEALER_TICKS; cleanHealers = 0
                                         if (state.value == State.AWAITING_FRAMES)
                                             state.value = State.CONNECTED
-                                        // damage mode paces at 8 ms, not the
-                                        // sweep ceiling: the grab of a small
-                                        // strip is cheap, and this is what
-                                        // makes a drag follow the finger
-                                        // instead of the sweep.
-                                        if (nativeGrabMs < 8L) kotlinx.coroutines.delay(8L - nativeGrabMs)
+                                        // v0.2.119 BATTERY + TEAR: damage mode paced
+                                        // itself at 8 ms - up to ~125 paint attempts
+                                        // per second, each a ptrace round trip plus a
+                                        // UI redraw. Now one coherent present per
+                                        // tick at the same 30 fps ceiling the socket
+                                        // path uses; bands accumulate between ticks.
+                                        val dmgCapMs = 1_000L / MAX_FPS_FOREGROUND
+                                        if (nativeGrabMs < dmgCapMs) kotlinx.coroutines.delay(dmgCapMs - nativeGrabMs)
                                     }
                                     continue
                                 }
@@ -956,7 +984,7 @@ class DesktopService(
                         // 30 ms so the UI can breathe - so this raises the
                         // ceiling without ever demanding more than the pipe
                         // measured it can carry.
-                        val minFrameMs = if (foreground && screenOn)
+                        val minFrameMs = if (foreground && screenOn && paneVisible)
                             1_000L / MAX_FPS_NATIVE_FOREGROUND else 1_000L / MAX_FPS_IDLE
                         if (nativeGrabMs < minFrameMs) kotlinx.coroutines.delay(minFrameMs - nativeGrabMs)
                         else kotlinx.coroutines.delay(30L)   // let the UI breathe under proot load
