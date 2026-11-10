@@ -436,8 +436,16 @@ android {
         // hidden (Terminal tab). Now: one coherent present per tick at the 30 fps
         // ceiling, and zero paint while the desktop tab is hidden, the app is
         // backgrounded or the screen is off.
-        versionCode = 219
-        versionName = "0.2.119"
+        // vc220 (ENV_VERSION 99 -> 100): TASKBAR FIREFOX FIX. Every seeded browser
+        // launcher (dock icon, desktop icon, right-click menu) exec'd the binary
+        // detected at the LAST desktop restart, so a browser changed between
+        // restarts left the taskbar Firefox pointing at a dead or outdated binary
+        // (field: taskbar Firefox crashed on every page, apps-menu Firefox worked).
+        // A seeded emux-browser wrapper now resolves the browser at CLICK time
+        // (/opt/firefox tarball first), stale browser launchers are removed when no
+        // browser is installed, and the dock + right-click menu stamps reseed once.
+        versionCode = 220
+        versionName = "0.2.120"
 
         ndk {
             abiFilters += listOf("arm64-v8a", "armeabi-v7a", "x86_64")
