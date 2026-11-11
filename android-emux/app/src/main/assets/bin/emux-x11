@@ -1105,6 +1105,35 @@ echo "emux-browser: no browser found - install one (apt install firefox-esr) or 
 exit 1
 EMUXBR
   chmod +x "$HOME/.local/bin/emux-browser" 2>/dev/null
+  # v0.2.125 DISTRO-LAUNCHER FIX: the distro ships its own browser .desktop
+  # (the Mozilla Team PPA firefox-esr.desktop - menu name "Firefox Web
+  # Browser" - or Ubuntu firefox.desktop) whose Exec line launches Firefox
+  # WITHOUT MOZ_DISABLE_CONTENT_SANDBOX=1, so under proot the seccomp
+  # content sandbox kills it right after launch. Field: "the one that says
+  # Firefox just crashes, the one that says Web Browser works" - the EmuX
+  # wrapper entry works only because IT sets the env var. Override each
+  # distro Mozilla launcher with a same-ID file in ~/.local/share/applications
+  # (local entries beat /usr/share ones and survive apt upgrades) whose Exec
+  # is the emux-browser wrapper, and make that wrapper the xdg default for
+  # text/html and http/https so double-clicked HTML pages and links stop
+  # opening the crashing entry.
+  if [ -n "$BROWSER" ]; then
+    for DF in /usr/share/applications/*.desktop \
+              "$HOME"/.local/share/applications/*.desktop; do
+      [ -f "$DF" ] || continue
+      case "$(basename "$DF")" in emux-*) continue ;; esac
+      grep -qi "^Categories=.*WebBrowser" "$DF" 2>/dev/null || continue
+      grep -qi "^Exec=.*firefox" "$DF" 2>/dev/null || continue
+      grep -q "emux-browser" "$DF" 2>/dev/null && continue
+      sed "s|^Exec=.*|Exec=$HOME/.local/bin/emux-browser %u|" "$DF" \
+        > "$HOME/.local/share/applications/$(basename "$DF")" 2>/dev/null
+    done
+    if command -v xdg-mime >/dev/null 2>&1; then
+      xdg-mime default emux-browser.desktop text/html 2>/dev/null || true
+      xdg-mime default emux-browser.desktop x-scheme-handler/http 2>/dev/null || true
+      xdg-mime default emux-browser.desktop x-scheme-handler/https 2>/dev/null || true
+    fi
+  fi
   if [ -n "$BROWSER" ]; then
     BNAME="Web Browser"; BICON=web-browser
     case "$BROWSER" in

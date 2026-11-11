@@ -470,8 +470,15 @@ android {
         // down or a wheel burst landed within the last second the damage tick
         // now runs at up to 60 fps (half the latency, half the jump); at rest
         // the 30 fps ceiling and all battery gating are unchanged.
-        versionCode = 224
-        versionName = "0.2.124"
+        // vc225: DISTRO BROWSER LAUNCHER FIX. The menu entry "Firefox Web
+        // Browser" is the distro's own .desktop: its Exec launches Firefox
+        // without MOZ_DISABLE_CONTENT_SANDBOX=1, which dies instantly under
+        // proot, while the EmuX-seeded "Web Browser" wrapper works. emux-x11
+        // now overrides distro Mozilla launchers with same-ID local copies
+        // exec'ing the wrapper and sets the xdg default browser (text/html,
+        // http, https) to it, so default HTML files and links open working.
+        versionCode = 225
+        versionName = "0.2.125"
 
         ndk {
             abiFilters += listOf("arm64-v8a", "armeabi-v7a", "x86_64")
