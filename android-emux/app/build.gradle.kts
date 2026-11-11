@@ -477,8 +477,17 @@ android {
         // now overrides distro Mozilla launchers with same-ID local copies
         // exec'ing the wrapper and sets the xdg default browser (text/html,
         // http, https) to it, so default HTML files and links open working.
-        versionCode = 225
-        versionName = "0.2.125"
+        // vc226: SESSION MULTIPLICATION FIX. A shell death (the field SIGSEGV
+        // on first pasted command) respawned the session THREE times: every
+        // ensureSessionAttached call had added another eternal registry
+        // collector (tab switches, bootstrap paths - never cancelled), each
+        // stale one saw the emptied registry and called startSession, plus
+        // the service's own death-watcher respawn. The attach collector is
+        // now single (previous cancelled, as desktopStatusJob since v0.2.112),
+        // the UI-side replacement spawn re-checks the registry after 800 ms,
+        // and the service collapses identical start requests within 700 ms.
+        versionCode = 226
+        versionName = "0.2.126"
 
         ndk {
             abiFilters += listOf("arm64-v8a", "armeabi-v7a", "x86_64")

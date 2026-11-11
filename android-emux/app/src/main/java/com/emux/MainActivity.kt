@@ -595,12 +595,22 @@ class MainActivity : AppCompatActivity() {
             .getString("desktop_session", "auto") ?: "auto"
 
     /** Attach a live TerminalService session to the view, creating one if needed. */
+    // v0.2.126 DUPLICATE-COLLECTOR FIX: every call used to launch ANOTHER
+    // eternal repeatOnLifecycle collector (showTerminal on every tab switch,
+    // bootstrap completion, distro switch) and never cancelled the last one -
+    // the exact bug desktopStatusJob got in v0.2.112, missed here. On a
+    // session death each stale collector saw the emptied registry and called
+    // startSession: field - pasting the first command killed the shell once
+    // and the badge jumped 1 -> 3 (2 stale collectors + the service respawn).
+    // One collector, ever.
+    private var sessionAttachJob: kotlinx.coroutines.Job? = null
     private fun ensureSessionAttached() {
         val view = termView ?: VtTerminalView(this).also {
             b.termContainer.addView(it, android.widget.FrameLayout.LayoutParams(-1, -1))
             termView = it
         }
-        lifecycleScope.launch {
+        sessionAttachJob?.cancel()
+        sessionAttachJob = lifecycleScope.launch {
             repeatOnLifecycle(Lifecycle.State.STARTED) {
                 TerminalService.sessions().collect { list ->
                     val s = list.firstOrNull { it.id < 9000 && it.state.value != com.emux.terminal.TerminalSession.State.DEAD }
@@ -619,8 +629,21 @@ class MainActivity : AppCompatActivity() {
                             // spawned; pumpOutput prints the exit notice instead.
                             if (list.any { it.id < 9000 && it.state.value == com.emux.terminal.TerminalSession.State.DEAD }) {
                                 view.feedText("\n[emux] previous shell exited — starting a new one…\n")
+                                // v0.2.126 RACE HARDENING: the service's own
+                                // death watcher respawns abnormal deaths a
+                                // moment later. Wait briefly and re-check
+                                // before spawning here too, or both sides
+                                // spawn and sessions multiply.
+                                launch {
+                                    kotlinx.coroutines.delay(800)
+                                    val live = TerminalService.sessions().value.firstOrNull {
+                                        it.id < 9000 && it.state.value != com.emux.terminal.TerminalSession.State.DEAD
+                                    }
+                                    if (live == null) TerminalService.startSession(this@MainActivity, "bash -l")
+                                }
+                            } else {
+                                TerminalService.startSession(this@MainActivity, "bash -l")
                             }
-                            TerminalService.startSession(this@MainActivity, "bash -l")
                             return@collect
                         }
                     // v0.1.31 BUGFIX (the persistent "terminal does not let me

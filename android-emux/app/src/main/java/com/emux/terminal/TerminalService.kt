@@ -175,7 +175,22 @@ class TerminalService : LifecycleService() {
         try {
             super.onStartCommand(intent, flags, startId)
             when (intent?.action) {
-                ACTION_NEW_SESSION -> newSession(intent.getStringExtra(EXTRA_COMMAND) ?: "bash -l")
+                ACTION_NEW_SESSION -> {
+                    // v0.2.126 DOUBLE-SPAWN GUARD: the service death watcher,
+                    // UI session collectors and bootstrap callbacks can all
+                    // request a replacement shell within the same second one
+                    // dies. Identical commands arriving back-to-back collapse
+                    // to one spawn; deliberate new sessions are seconds apart
+                    // and never hit this window.
+                    val cmd = intent.getStringExtra(EXTRA_COMMAND) ?: "bash -l"
+                    val now = System.currentTimeMillis()
+                    if (cmd == lastSpawnCmd && now - lastSpawnAtMs < 700) {
+                        com.emux.EmuXLog.i("new-session request collapsed (duplicate within 700 ms)")
+                    } else {
+                        lastSpawnCmd = cmd; lastSpawnAtMs = now
+                        newSession(cmd)
+                    }
+                }
                 ACTION_STOP_SESSION -> {
                     val id = intent.getIntExtra(EXTRA_SESSION_ID, -1)
                     sessions.find { it.id == id }?.let { s ->
@@ -323,6 +338,9 @@ class TerminalService : LifecycleService() {
 
     private var autoRestarts = 0
     private var lastAutoRestartMs = 0L   // v0.2.55: windowed restart budget
+    // v0.2.126: back-to-back duplicate spawn collapse (see onStartCommand)
+    private var lastSpawnCmd = ""
+    private var lastSpawnAtMs = 0L
 
     private fun refresh() {
         registry.value = sessions.toList()
