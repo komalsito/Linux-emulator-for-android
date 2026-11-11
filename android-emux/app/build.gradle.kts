@@ -463,8 +463,15 @@ android {
         // different offsets - the small self-correcting glitches the field still
         // saw on v0.2.121. The tick now grabs the union box of all pending bands
         // in one memcpy and diffs/uploads from that single instant.
-        versionCode = 223
-        versionName = "0.2.123"
+        // vc224: 60 FPS INTERACTION CAP. The single-snapshot present fixed the
+        // mixed-band glitches, but the tick still paced at 30 fps at all times,
+        // so a fast Firefox scroll showed a frame up to 33 ms old and then
+        // jumped ahead - "delayed, then crops to catch up". While the pointer is
+        // down or a wheel burst landed within the last second the damage tick
+        // now runs at up to 60 fps (half the latency, half the jump); at rest
+        // the 30 fps ceiling and all battery gating are unchanged.
+        versionCode = 224
+        versionName = "0.2.124"
 
         ndk {
             abiFilters += listOf("arm64-v8a", "armeabi-v7a", "x86_64")

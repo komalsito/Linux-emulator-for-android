@@ -797,7 +797,20 @@ class DesktopService(
                                         // UI redraw. Now one coherent present per
                                         // tick at the same 30 fps ceiling the socket
                                         // path uses; bands accumulate between ticks.
-                                        val dmgCapMs = 1_000L / MAX_FPS_FOREGROUND
+                                        // v0.2.124 SCROLL LATENCY: while the user is
+                                        // actually driving the pointer - a finger held
+                                        // down (drag / drag-scroll) or a wheel burst
+                                        // within the last second (notePointer stamps
+                                        // ptrAtMs on every injectScroll burst) - the
+                                        // ceiling lifts to 60 fps: half the present
+                                        // latency and half the catch-up jump in fast
+                                        // Firefox scrolls. Self-limiting - a heavy tick
+                                        // just runs long and skips the delay - and free
+                                        // at rest, where the 30 fps ceiling still holds.
+                                        val interacting = ptrDown ||
+                                            System.currentTimeMillis() - ptrAtMs < 1_000L
+                                        val dmgCapMs = 1_000L /
+                                            (if (interacting) 60 else MAX_FPS_FOREGROUND)
                                         if (nativeGrabMs < dmgCapMs) kotlinx.coroutines.delay(dmgCapMs - nativeGrabMs)
                                     }
                                     continue
