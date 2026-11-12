@@ -486,8 +486,16 @@ android {
         // now single (previous cancelled, as desktopStatusJob since v0.2.112),
         // the UI-side replacement spawn re-checks the registry after 800 ms,
         // and the service collapses identical start requests within 700 ms.
-        versionCode = 226
-        versionName = "0.2.126"
+        // vc227: TERMINAL COLOR SETTINGS. The Terminal tab colors were hard
+        // -coded constants (DEFAULT_FG / BG_COLOR / CURSOR_COLOR / PALETTE).
+        // Settings now has a Terminal colors section in BOTH tiers: a scheme
+        // preset (EmuX Dark, Dracula, Solarized Dark/Light, Nord, Gruvbox
+        // Dark, Termux) plus 19 per-color hex overrides (foreground,
+        // background, cursor, ANSI 0-15). VtTerminalView.applyTheme reloads
+        // the theme and remaps every attached view's interned styles IN
+        // PLACE (cells store style indices), so changes apply live.
+        versionCode = 227
+        versionName = "0.2.127"
 
         ndk {
             abiFilters += listOf("arm64-v8a", "armeabi-v7a", "x86_64")

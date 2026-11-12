@@ -40,6 +40,76 @@ private fun qualityPrediction(ctx: android.content.Context): String {
     return sb.toString()
 }
 
+/**
+ * v0.2.127 TERMINAL COLORS: a scheme preset plus per-color hex overrides for
+ * the Terminal tab (VtTerminalView). Shared by BOTH settings tiers - called
+ * from Prefs (appended to the inflated XML screen) and CodePrefs
+ * (programmatic screen) - so the rows exist whichever tier the device runs.
+ * Every change applies LIVE: VtTerminalView.applyTheme re-points the
+ * interned styles of attached views; no session or desktop restart needed.
+ */
+private fun addTerminalColorPrefs(screen: androidx.preference.PreferenceScreen, ctx: android.content.Context) {
+    val app = ctx.applicationContext
+    val apply: () -> Unit = {
+        // posted: preference change listeners run BEFORE the new value is
+        // persisted, so the reload must happen after it lands.
+        android.os.Handler(android.os.Looper.getMainLooper()).post {
+            com.emux.terminal.VtTerminalView.applyTheme(app)
+        }
+    }
+    val cat = androidx.preference.PreferenceCategory(ctx).apply {
+        key = "term_colors_cat"; title = "Terminal colors"
+        isIconSpaceReserved = false
+    }
+    screen.addPreference(cat)
+    cat.addPreference(androidx.preference.ListPreference(ctx).apply {
+        key = "term_theme"; title = "Color scheme"
+        entries = arrayOf("EmuX Dark (default)", "Dracula", "Solarized Dark",
+            "Solarized Light", "Nord", "Gruvbox Dark", "Termux")
+        entryValues = arrayOf("default", "dracula", "solarized_dark",
+            "solarized_light", "nord", "gruvbox_dark", "termux")
+        setDefaultValue("default")
+        summaryProvider = androidx.preference.ListPreference.SimpleSummaryProvider.getInstance()
+        setOnPreferenceChangeListener { _, _ -> apply(); true }
+    })
+    cat.addPreference(androidx.preference.Preference(ctx).apply {
+        key = "term_colors_help"; title = "Per-color overrides (hex #RRGGBB)"
+        summary = "Leave a field empty to use the scheme color. Overrides apply\n" +
+            "to the Terminal tab immediately - no restart needed."
+        isEnabled = false
+    })
+    val names = arrayOf("Black", "Red", "Green", "Yellow", "Blue", "Magenta", "Cyan", "White")
+    val fields = mutableListOf(
+        "term_color_fg" to "Foreground",
+        "term_color_bg" to "Background",
+        "term_color_cursor" to "Cursor",
+    )
+    for (i in 0..15) fields.add("term_color_$i" to
+        "ANSI " + (if (i < 8) names[i] else "Bright " + names[i - 8]))
+    for ((key, label) in fields) {
+        cat.addPreference(androidx.preference.EditTextPreference(ctx).apply {
+            this.key = key; title = label
+            dialogTitle = label + " - hex color (#RRGGBB)"
+            setDefaultValue("")
+            summaryProvider =
+                androidx.preference.Preference.SummaryProvider<androidx.preference.EditTextPreference> { p ->
+                    val v = p.text?.trim() ?: ""
+                    if (v.isEmpty()) "Scheme default" else v
+                }
+            setOnPreferenceChangeListener { _, nv ->
+                val v = (nv as? String)?.trim() ?: ""
+                val ok = v.isEmpty() || (v.length == 7 && v.startsWith("#") &&
+                    runCatching { android.graphics.Color.parseColor(v) }.isSuccess)
+                if (ok) apply()
+                else android.widget.Toast.makeText(app,
+                    "Use #RRGGBB (e.g. #5AA7FF) or leave empty",
+                    android.widget.Toast.LENGTH_LONG).show()
+                ok
+            }
+        })
+    }
+}
+
 class SettingsActivity : AppCompatActivity() {
 
     companion object {
@@ -382,6 +452,9 @@ class SettingsActivity : AppCompatActivity() {
                 }
             // v0.2.88 SETTINGS ROUND 2: explicit selector dispatch - see
             // attachFrameworkDialogDispatch.
+            // v0.2.127: terminal colors - same rows as CodePrefs, appended
+            // to the inflated XML screen.
+            preferenceScreen?.let { addTerminalColorPrefs(it, requireContext()) }
             attachFrameworkDialogDispatch(this)
             } catch (t: Throwable) {
                 SettingsActivity.degradeFromBind(this, t)
@@ -578,6 +651,8 @@ class SettingsActivity : AppCompatActivity() {
                     .getString("mirror", com.emux.core.BootstrapManager.MIRROR)
                     ?: com.emux.core.BootstrapManager.MIRROR
             })
+            // v0.2.127: terminal colors (scheme + per-color hex overrides)
+            addTerminalColorPrefs(screen, ctx)
             preferenceScreen = screen
             // v0.2.88 SETTINGS ROUND 2: same explicit-listener dispatch as the
             // XML tier - this is the tier the field ROM runs, and the v0.2.87

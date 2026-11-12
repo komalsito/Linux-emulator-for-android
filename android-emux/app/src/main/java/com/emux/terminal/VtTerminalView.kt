@@ -182,6 +182,13 @@ class VtTerminalView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attr
 
     override fun onAttachedToWindow() {
         super.onAttachedToWindow()
+        // v0.2.127: join the live theme-update list FIRST (so the applyTheme
+        // call below remaps this view from any older theme), then load the
+        // persisted theme from Settings. Idempotent when nothing changed.
+        synchronized(VtTerminalView.themeViews) {
+            VtTerminalView.themeViews.add(java.lang.ref.WeakReference(this@VtTerminalView))
+        }
+        runCatching { VtTerminalView.applyTheme(context) }
         // v0.1.56: start the parser thread (see feed())
         if (parserThread == null) {
             parserThread = Thread({
@@ -881,6 +888,28 @@ class VtTerminalView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attr
         removeCallbacks(invalidateRunnable)
     }
 
+    /**
+     * v0.2.127: re-point interned styles at the new theme colors IN PLACE -
+     * cells store style INDICES into [stylePool], so the pool must be edited,
+     * never cleared (clearing would orphan every cell's color until the app
+     * repaints it, which never happens for static screen content).
+     */
+    private fun remapTheme(oldFg: Int, oldBg: Int, oldPal: IntArray) = synchronized(modelLock) {
+        fun remap(c: Int): Int = when {
+            c == oldFg -> DEFAULT_FG
+            c == oldBg -> BG_COLOR
+            else -> { val i = oldPal.indexOf(c); if (i >= 0) PALETTE[i] else c }
+        }
+        for (st in stylePool) {
+            st.fg = remap(st.fg)
+            if (st.bg != Color.TRANSPARENT) st.bg = remap(st.bg)
+        }
+        pen.fg = remap(pen.fg)
+        if (pen.bg != Color.TRANSPARENT) pen.bg = remap(pen.bg)
+        allDirty = true
+        postInvalidate()
+    }
+
     override fun onWindowFocusChanged(hasFocus: Boolean) {
         super.onWindowFocusChanged(hasFocus)
         if (hasFocus) { scheduleBlink(); post { showKeyboard() } }
@@ -1324,10 +1353,14 @@ class VtTerminalView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attr
 
     companion object {
         const val BLINK_MS = 530L
-        val DEFAULT_FG = Color.parseColor("#E8E8E8")
-        val BG_COLOR = Color.parseColor("#101216")
-        val CURSOR_COLOR = Color.parseColor("#5AA7FF")
-        val PALETTE = intArrayOf(
+        // v0.2.127 THEME ENGINE: mutable now - Settings writes them via
+        // [applyTheme] (scheme preset + per-color hex overrides) and every
+        // attached view remaps its interned styles in place (cells store
+        // style indices, so the pool is edited, never cleared).
+        var DEFAULT_FG = Color.parseColor("#E8E8E8")
+        var BG_COLOR = Color.parseColor("#101216")
+        var CURSOR_COLOR = Color.parseColor("#5AA7FF")
+        var PALETTE = intArrayOf(
             Color.parseColor("#000000"), Color.parseColor("#CC3333"), Color.parseColor("#33AA33"),
             Color.parseColor("#CCCC33"), Color.parseColor("#3355CC"), Color.parseColor("#CC33CC"),
             Color.parseColor("#33AAAA"), Color.parseColor("#CCCCCC"), Color.parseColor("#555555"),
@@ -1335,5 +1368,105 @@ class VtTerminalView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attr
             Color.parseColor("#5588FF"), Color.parseColor("#FF55FF"), Color.parseColor("#55FFFF"),
             Color.parseColor("#FFFFFF"),
         )
+
+        // ---- v0.2.127 TERMINAL THEME ENGINE ------------------------------
+        // Pristine values, snapshotted before any theme is applied.
+        private val INIT_FG = DEFAULT_FG
+        private val INIT_BG = BG_COLOR
+        private val INIT_CUR = CURSOR_COLOR
+        private val INIT_PAL = PALETTE.copyOf()
+
+        private class Scheme(val fg: Int, val bg: Int, val cur: Int, val pal: IntArray)
+
+        private fun scheme(name: String?): Scheme = when (name) {
+            "dracula" -> Scheme(
+                Color.parseColor("#F8F8F2"), Color.parseColor("#282A36"), Color.parseColor("#FF79C6"),
+                intArrayOf(
+                    Color.parseColor("#21222C"), Color.parseColor("#FF5555"), Color.parseColor("#50FA7B"),
+                    Color.parseColor("#F1FA8C"), Color.parseColor("#BD93F9"), Color.parseColor("#FF79C6"),
+                    Color.parseColor("#8BE9FD"), Color.parseColor("#F8F8F2"), Color.parseColor("#6272A4"),
+                    Color.parseColor("#FF6E6E"), Color.parseColor("#69FF94"), Color.parseColor("#FFFFA5"),
+                    Color.parseColor("#D6ACFF"), Color.parseColor("#FF92DF"), Color.parseColor("#A4FFFF"),
+                    Color.parseColor("#FFFFFF")))
+            "solarized_dark" -> Scheme(
+                Color.parseColor("#93A1A1"), Color.parseColor("#002B36"), Color.parseColor("#93A1A1"),
+                intArrayOf(
+                    Color.parseColor("#073642"), Color.parseColor("#DC322F"), Color.parseColor("#859900"),
+                    Color.parseColor("#B58900"), Color.parseColor("#268BD2"), Color.parseColor("#D33682"),
+                    Color.parseColor("#2AA198"), Color.parseColor("#EEE8D5"), Color.parseColor("#002B36"),
+                    Color.parseColor("#CB4B16"), Color.parseColor("#586E75"), Color.parseColor("#657B83"),
+                    Color.parseColor("#839496"), Color.parseColor("#6C71C4"), Color.parseColor("#93A1A1"),
+                    Color.parseColor("#FDF6E3")))
+            "solarized_light" -> Scheme(
+                Color.parseColor("#586E75"), Color.parseColor("#FDF6E3"), Color.parseColor("#586E75"),
+                intArrayOf(
+                    Color.parseColor("#EEE8D5"), Color.parseColor("#DC322F"), Color.parseColor("#859900"),
+                    Color.parseColor("#B58900"), Color.parseColor("#268BD2"), Color.parseColor("#D33682"),
+                    Color.parseColor("#2AA198"), Color.parseColor("#073642"), Color.parseColor("#FDF6E3"),
+                    Color.parseColor("#CB4B16"), Color.parseColor("#586E75"), Color.parseColor("#657B83"),
+                    Color.parseColor("#839496"), Color.parseColor("#6C71C4"), Color.parseColor("#93A1A1"),
+                    Color.parseColor("#002B36")))
+            "nord" -> Scheme(
+                Color.parseColor("#D8DEE9"), Color.parseColor("#2E3440"), Color.parseColor("#D8DEE9"),
+                intArrayOf(
+                    Color.parseColor("#3B4252"), Color.parseColor("#BF616A"), Color.parseColor("#A3BE8C"),
+                    Color.parseColor("#EBCB8B"), Color.parseColor("#81A1C1"), Color.parseColor("#B48EAD"),
+                    Color.parseColor("#88C0D0"), Color.parseColor("#E5E9F0"), Color.parseColor("#4C566A"),
+                    Color.parseColor("#BF616A"), Color.parseColor("#A3BE8C"), Color.parseColor("#EBCB8B"),
+                    Color.parseColor("#81A1C1"), Color.parseColor("#B48EAD"), Color.parseColor("#8FBCBB"),
+                    Color.parseColor("#ECEFF4")))
+            "gruvbox_dark" -> Scheme(
+                Color.parseColor("#EBDBB2"), Color.parseColor("#282828"), Color.parseColor("#EBDBB2"),
+                intArrayOf(
+                    Color.parseColor("#282828"), Color.parseColor("#CC241D"), Color.parseColor("#98971A"),
+                    Color.parseColor("#D79921"), Color.parseColor("#458588"), Color.parseColor("#B16286"),
+                    Color.parseColor("#689D6A"), Color.parseColor("#A89984"), Color.parseColor("#928374"),
+                    Color.parseColor("#FB4934"), Color.parseColor("#B8BB26"), Color.parseColor("#FABD2F"),
+                    Color.parseColor("#83A598"), Color.parseColor("#D3869B"), Color.parseColor("#8EC07C"),
+                    Color.parseColor("#EBDBB2")))
+            "termux" -> Scheme(
+                Color.parseColor("#FFFFFF"), Color.parseColor("#000000"), Color.parseColor("#FFFFFF"),
+                intArrayOf(
+                    Color.parseColor("#000000"), Color.parseColor("#CC0000"), Color.parseColor("#00CC00"),
+                    Color.parseColor("#CCCC00"), Color.parseColor("#4444CC"), Color.parseColor("#CC44CC"),
+                    Color.parseColor("#44CCCC"), Color.parseColor("#CCCCCC"), Color.parseColor("#555555"),
+                    Color.parseColor("#FF5555"), Color.parseColor("#55FF55"), Color.parseColor("#FFFF55"),
+                    Color.parseColor("#5555FF"), Color.parseColor("#FF55FF"), Color.parseColor("#55FFFF"),
+                    Color.parseColor("#FFFFFF")))
+            else -> Scheme(INIT_FG, INIT_BG, INIT_CUR, INIT_PAL.copyOf())
+        }
+
+        /** Attached views get live theme updates (weak refs; self-cleaning). */
+        private val themeViews = ArrayList<java.lang.ref.WeakReference<VtTerminalView>>()
+
+        /**
+         * v0.2.127: (re)load the terminal theme from Settings - a scheme preset
+         * (term_theme) plus per-color hex overrides (term_color_fg / _bg /
+         * _cursor / _0.._15, empty = scheme value) - and live-update every
+         * attached view. Safe from any thread; no session or desktop restart.
+         */
+        fun applyTheme(ctx: android.content.Context) {
+            val sp = androidx.preference.PreferenceManager
+                .getDefaultSharedPreferences(ctx.applicationContext)
+            val sch = scheme(sp.getString("term_theme", "default"))
+            fun hex(key: String, def: Int): Int =
+                sp.getString(key, null)?.trim()?.takeIf { it.isNotEmpty() }?.let { v ->
+                    runCatching { Color.parseColor(v) }.getOrNull()
+                } ?: def
+            val nfg = hex("term_color_fg", sch.fg)
+            val nbg = hex("term_color_bg", sch.bg)
+            val ncur = hex("term_color_cursor", sch.cur)
+            val npal = IntArray(16) { i -> hex("term_color_$i", sch.pal[i]) }
+            synchronized(themeViews) {
+                val oldFg = DEFAULT_FG; val oldBg = BG_COLOR; val oldPal = PALETTE.copyOf()
+                DEFAULT_FG = nfg; BG_COLOR = nbg; CURSOR_COLOR = ncur
+                PALETTE = npal
+                val it = themeViews.iterator()
+                while (it.hasNext()) {
+                    val v = it.next().get()
+                    if (v == null) it.remove() else v.remapTheme(oldFg, oldBg, oldPal)
+                }
+            }
+        }
     }
 }
