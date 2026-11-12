@@ -494,8 +494,15 @@ android {
         // background, cursor, ANSI 0-15). VtTerminalView.applyTheme reloads
         // the theme and remaps every attached view's interned styles IN
         // PLACE (cells store style indices), so changes apply live.
-        versionCode = 227
-        versionName = "0.2.127"
+        // vc228: LAST DUPLICATE-SESSION PATH. The attach collector's PTY
+        // upgrade fired for respawned sessions still in STARTING (health
+        // gate running): restart() -> start() spawned the child early, the
+        // gate's own s.start() spawned a second one, one child later
+        // published DEAD and the watcher respawned - one death, two
+        // sessions. Upgrades now wait for RUNNING, and start() is
+        // idempotent per generation as a second guard.
+        versionCode = 228
+        versionName = "0.2.128"
 
         ndk {
             abiFilters += listOf("arm64-v8a", "armeabi-v7a", "x86_64")

@@ -656,7 +656,17 @@ class MainActivity : AppCompatActivity() {
                     // re-arms the probe when the components appear; if a PTY
                     // engine exists NOW and this session lacks it, restart the
                     // child in-place (same session object + scrollback).
-                    if (!s.ptyWrapped) {
+                    // v0.2.128: only upgrade sessions that actually STARTED.
+                    // A respawned session sits in STARTING while its health
+                    // gate runs (seconds); restart() here started the child
+                    // prematurely, the gate's own s.start() spawned a second
+                    // one, and when one child died the watcher respawned -
+                    // the "one death, two sessions" report. Waiting is also
+                    // more correct: the gate start already picks up the
+                    // guest PTY when available, and later collector runs
+                    // (bootstrap paths re-call ensureSessionAttached) still
+                    // upgrade a raw-pipe session once one is needed.
+                    if (!s.ptyWrapped && s.state.value == com.emux.terminal.TerminalSession.State.RUNNING) {
                         // Re-arm the wrapper probe first: sessions born before
                         // bootstrap cached a "no wrapper" verdict; setDistro-
                         // Candidates resets it now that script(1) may exist.

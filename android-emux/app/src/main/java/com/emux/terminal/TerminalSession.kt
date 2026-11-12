@@ -207,6 +207,15 @@ class TerminalSession(
     @Volatile private var generation = 0
 
     /**
+     * v0.2.128: generation whose start() already launched its pump job. The
+     * health gate AND an in-place PTY upgrade could both call start() for
+     * the same generation, double-spawning the child - one of the two later
+     * published DEAD and the service watcher respawned (field: "one death,
+     * two sessions"). start() is now once-per-generation.
+     */
+    @Volatile private var startedGen = -1
+
+    /**
      * v0.1.45: sessions born while helpers were still seeding fall back to the
      * pipe shell; once proot+script exist, upgrade in-place on demand (called
      * when bootstrap reports success) instead of waiting for a registry emit.
@@ -238,6 +247,12 @@ class TerminalSession(
 
     fun start() {
         val gen = generation
+        // v0.2.128 DOUBLE-START GUARD: the health gate (newSession) and the
+        // attach collector's PTY-upgrade restart could both reach start()
+        // for the same generation - two children in one session, one later
+        // publishing DEAD and triggering a watcher respawn.
+        if (startedGen == gen) return
+        startedGen = gen
         job = scope.launch {
             try {
                 val env = FsLayout.sessionEnv(ctx).toMutableMap()
