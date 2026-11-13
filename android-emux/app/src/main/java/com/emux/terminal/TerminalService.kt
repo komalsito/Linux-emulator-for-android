@@ -209,6 +209,14 @@ class TerminalService : LifecycleService() {
      *  cascade uses for the same lock ("up to 90 s"). */
     private val APT_LOCK_WAIT_MS = 90_000L
 
+    /** v0.2.130: hard ceiling for ONE ensureGuestHealthy attempt. A damaged
+     *  rootfs can hang the repair itself (a dpkg/apt child that never
+     *  exits); the LOCK_BUSY loop below never gets a verdict then, and the
+     *  session sat in STARTING forever ("pty=false (pending)" - no prompt,
+     *  no echo, no respawn: the child was never even started).
+     */
+    private val GATE_HARD_BUDGET_MS = 120_000L
+
     /**
      * v0.2.64: push host-side text onto the terminal screen. The gate below can
      * hold a session for up to ~90 s while dpkg repairs; without this the user
@@ -242,10 +250,22 @@ class TerminalService : LifecycleService() {
         var h = GuestHealth.HEALTHY
         var waitedMs = 0L
         var announcedLock = false
+        var timedOut = false
         while (true) {
+            // v0.2.130 HARD BUDGET: withTimeoutOrNull cannot interrupt
+            // blocking code, so the repair runs on a worker thread and we
+            // wait with a real timeout. On timeout we fail OPEN - a damaged
+            // shell still beats no shell at all - and leave the worker
+            // finishing (or hanging) in the background; it holds no UI
+            // hostage anymore.
             h = runCatching {
-                bootstrap.ensureGuestHealthy("terminal") { m -> banner(s, m) }
-            }.getOrElse { GuestHealth.HEALTHY }
+                java.util.concurrent.CompletableFuture
+                    .supplyAsync { bootstrap.ensureGuestHealthy("terminal") { m -> banner(s, m) } }
+                    .get(GATE_HARD_BUDGET_MS, java.util.concurrent.TimeUnit.MILLISECONDS)
+            }.getOrElse {
+                if (it is java.util.concurrent.TimeoutException) timedOut = true
+                GuestHealth.REPAIR_FAILED
+            }
             if (h != GuestHealth.LOCK_BUSY || waitedMs >= APT_LOCK_WAIT_MS) break
             if (!announcedLock) {
                 announcedLock = true
@@ -257,7 +277,10 @@ class TerminalService : LifecycleService() {
         // Always fail OPEN: a damaged shell still beats no shell at all.
         when (h) {
             GuestHealth.REPAIR_FAILED ->
-                banner(s, "terminal: the rootfs could not be repaired automatically - the log tail (Settings > About) has the reason")
+                banner(s, if (timedOut)
+                    "terminal: the rootfs repair did not finish in ${GATE_HARD_BUDGET_MS / 1000}s - starting the shell anyway; if commands keep crashing, reinstall the distro from Settings (home data survives)"
+                else
+                    "terminal: the rootfs could not be repaired automatically - the log tail (Settings > About) has the reason")
             GuestHealth.NOT_READY ->
                 banner(s, "terminal: the Linux rootfs is not installed yet - starting in degraded mode until bootstrap finishes")
             GuestHealth.LOCK_BUSY ->

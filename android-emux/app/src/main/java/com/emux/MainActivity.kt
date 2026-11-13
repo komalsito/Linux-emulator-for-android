@@ -656,17 +656,18 @@ class MainActivity : AppCompatActivity() {
                     // re-arms the probe when the components appear; if a PTY
                     // engine exists NOW and this session lacks it, restart the
                     // child in-place (same session object + scrollback).
-                    // v0.2.128: only upgrade sessions that actually STARTED.
-                    // A respawned session sits in STARTING while its health
-                    // gate runs (seconds); restart() here started the child
-                    // prematurely, the gate's own s.start() spawned a second
-                    // one, and when one child died the watcher respawned -
-                    // the "one death, two sessions" report. Waiting is also
-                    // more correct: the gate start already picks up the
-                    // guest PTY when available, and later collector runs
-                    // (bootstrap paths re-call ensureSessionAttached) still
-                    // upgrade a raw-pipe session once one is needed.
-                    if (!s.ptyWrapped && s.state.value == com.emux.terminal.TerminalSession.State.RUNNING) {
+                    // v0.2.130: upgrade regardless of state again. The
+                    // v0.2.128 RUNNING gate broke this path: the collector
+                    // fires when the session is ADDED (STARTING, health gate
+                    // still running) and the registry never re-emits on state
+                    // changes, so on a device whose gate hangs the session sat
+                    // at "pty=false (pending)" forever - no start, no echo.
+                    // The early in-place start WAS the working path; the
+                    // v0.2.128 startedGen guard inside TerminalSession.start()
+                    // now makes the gate's own later s.start() a no-op, so
+                    // the duplicate child (and with it the "one death, two
+                    // sessions" bug) stays fixed WITHOUT this gate.
+                    if (!s.ptyWrapped) {
                         // Re-arm the wrapper probe first: sessions born before
                         // bootstrap cached a "no wrapper" verdict; setDistro-
                         // Candidates resets it now that script(1) may exist.
