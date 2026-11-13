@@ -110,8 +110,8 @@
     <SwitchPreferenceCompat
         app:key="mouse_natural_scroll"
         app:title="Natural scrolling (mouse / trackpad)"
-        app:summary="On: content follows the two fingers / wheel like a touchscreen (scroll down moves the page down). Off: classic wheel direction. Applies to the external pointer only - the on-screen two-finger gesture is unchanged."
-        app:defaultValue="false" />
+        app:summary="On (default): content follows the fingers / wheel, like a touchscreen. Off: classic wheel direction. Applies to the mouse, the trackpad and the on-screen two-finger gesture alike."
+        app:defaultValue="true" />
 
     <EditTextPreference
         app:key="mirror"

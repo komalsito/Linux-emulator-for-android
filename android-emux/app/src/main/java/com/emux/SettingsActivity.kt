@@ -395,7 +395,7 @@ class SettingsActivity : AppCompatActivity() {
                     row("Mouse / trackpad scroll speed",
                         (sp.getString("mouse_scroll_scale", "3") ?: "3") + " lines per notch")
                     row("Natural scrolling (mouse)",
-                        if (sp.getBoolean("mouse_natural_scroll", false)) "ON" else "OFF")
+                        if (sp.getBoolean("mouse_natural_scroll", true)) "ON" else "OFF")
                     row("Mirror", sp.getString("mirror", com.emux.core.BootstrapManager.MIRROR) ?: "")
                     addView(android.widget.TextView(this@SettingsActivity).apply {
                         text = "\n(fallback view — detail error: ${err?.javaClass?.name}: ${err?.message})"
@@ -610,10 +610,10 @@ class SettingsActivity : AppCompatActivity() {
             })
             screen.addPreference(androidx.preference.SwitchPreferenceCompat(ctx).apply {
                 key = "mouse_natural_scroll"; title = "Natural scrolling (mouse / trackpad)"
-                summary = "On: content follows the two fingers / wheel like a touchscreen. " +
-                    "Off: classic wheel direction. External pointer only - the on-screen " +
-                    "two-finger gesture is unchanged."
-                setDefaultValue(false)
+                summary = "On (default): content follows the fingers / wheel, like a " +
+                    "touchscreen. Off: classic wheel direction. Applies to the mouse, the " +
+                    "trackpad and the on-screen two-finger gesture alike."
+                setDefaultValue(true)
             })
             // v0.1.53: manual dpkg/apt repair (programmatic screen mirror).
             screen.addPreference(androidx.preference.Preference(ctx).apply {

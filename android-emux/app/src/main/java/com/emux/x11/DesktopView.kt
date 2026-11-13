@@ -1305,8 +1305,12 @@ class DesktopView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attrs) 
         settingsPrefs?.getString("mouse_scroll_scale", "3")?.toFloatOrNull()
             ?.coerceIn(0.1f, 16f) ?: 3f
 
+    // v0.2.131: natural is the DEFAULT now - on a touchscreen-first device
+    // the content must follow the fingers; the old classic-wheel default is
+    // exactly what the "scrolling is backwards" field report hit. Turn the
+    // switch OFF in Settings for the classic wheel direction.
     private fun mouseNaturalScroll(): Boolean =
-        settingsPrefs?.getBoolean("mouse_natural_scroll", false) ?: false
+        settingsPrefs?.getBoolean("mouse_natural_scroll", true) ?: true
 
     /** v0.2.96: average position of the first pointers - the centroid a
      *  two-finger trackpad scroll is measured from. */
@@ -2139,13 +2143,20 @@ class DesktopView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attrs) 
                         var n = (scrollAccumY / SCROLL_STEP_PX).toInt()
                         if (n != 0) {
                             scrollAccumY -= n * SCROLL_STEP_PX
-                            // fingers travel DOWN (dy>0) => content scrolls down => button 5
-                            desktop?.injectScroll(x, y, if (n > 0) 5 else 4, abs(n))
+                            // v0.2.131 NATURAL TOUCH SCROLL: fingers travel DOWN
+                            // (dy>0) => the content follows the fingers (moves
+                            // down, like every touchscreen) => wheel up = button
+                            // 4. The old hard-coded mapping was mouse-wheel
+                            // semantics and felt backwards on the pad; it now
+                            // follows the same natural-scroll setting as every
+                            // other wheel path (classic setting = old mapping).
+                            val touchDir = if (mouseNaturalScroll()) 1f else -1f
+                            desktop?.injectScroll(x, y, if (n * touchDir > 0) 4 else 5, abs(n))
                         }
                         n = (scrollAccumX / SCROLL_STEP_PX).toInt()
                         if (n != 0) {
                             scrollAccumX -= n * SCROLL_STEP_PX
-                            desktop?.injectScroll(x, y, if (n > 0) 7 else 6, abs(n))
+                            desktop?.injectScroll(x, y, if (n * touchDir > 0) 6 else 7, abs(n))
                         }
                     }
                     return true
