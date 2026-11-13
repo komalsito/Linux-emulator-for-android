@@ -130,6 +130,21 @@ class DesktopView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attrs) 
     override fun onKeyDown(keyCode: Int, event: android.view.KeyEvent): Boolean {
         val d = desktop
         if (d != null) {
+            // v0.2.133 PASTE FIX: Ctrl+V (and KEYCODE_PASTE) pastes the
+            // ANDROID clipboard into the focused X app by TYPING the text
+            // through the normal input pipeline. Before this the combo fell
+            // through to injectChar(0x16): keysym 0x16 has no server keymap
+            // encoding, the event was dropped with "no keymap encoding",
+            // and Ctrl+V on the Desktop tab did nothing - paste only worked
+            // through an app's own right-click menu, and only while the
+            // clipboard bridge was up. Typing works in every app, needs no
+            // selection negotiation, and works even with clipboard sync off.
+            if ((keyCode == android.view.KeyEvent.KEYCODE_V &&
+                    event.isCtrlPressed && !event.isAltPressed && !event.isMetaPressed) ||
+                keyCode == android.view.KeyEvent.KEYCODE_PASTE) {
+                pasteAndroidClipboard()
+                return true
+            }
             val ks = when (keyCode) {
                 android.view.KeyEvent.KEYCODE_ENTER,
                 android.view.KeyEvent.KEYCODE_NUMPAD_ENTER -> 0xFF0D
@@ -204,6 +219,12 @@ class DesktopView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attrs) 
                             sendKeysym(0xFF08)
                         event.keyCode == android.view.KeyEvent.KEYCODE_ENTER ->
                             sendKeysym(0xFF0D)
+                        // v0.2.133: Ctrl+V routed through the IME's
+                        // sendKeyEvent (hardware-style keyboards) pastes too,
+                        // before the unicodeChar path turns it into a
+                        // droppable 0x16.
+                        event.keyCode == android.view.KeyEvent.KEYCODE_V &&
+                            event.isCtrlPressed -> pasteAndroidClipboard()
                         event.unicodeChar != 0 -> {
                             val uc = event.unicodeChar
                             if (stickyCtrl || stickyAlt || stickyMeta) {
@@ -2141,16 +2162,21 @@ class DesktopView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attrs) 
                         val (x, y) = mapToX(cx, cy)
                         scrollAccumY += dy; scrollAccumX += dx
                         var n = (scrollAccumY / SCROLL_STEP_PX).toInt()
+                        // v0.2.131 NATURAL TOUCH SCROLL: fingers travel DOWN
+                        // (dy>0) => the content follows the fingers (moves
+                        // down, like every touchscreen) => wheel up = button
+                        // 4. The old hard-coded mapping was mouse-wheel
+                        // semantics and felt backwards on the pad; it now
+                        // follows the same natural-scroll setting as every
+                        // other wheel path (classic setting = old mapping).
+                        // v0.2.133 SCOPE FIX: touchDir was declared INSIDE
+                        // the vertical if-block below but referenced by the
+                        // horizontal one after it - an unresolved reference
+                        // that failed the whole build, so v0.2.131/.132
+                        // never produced an APK.
+                        val touchDir = if (mouseNaturalScroll()) 1f else -1f
                         if (n != 0) {
                             scrollAccumY -= n * SCROLL_STEP_PX
-                            // v0.2.131 NATURAL TOUCH SCROLL: fingers travel DOWN
-                            // (dy>0) => the content follows the fingers (moves
-                            // down, like every touchscreen) => wheel up = button
-                            // 4. The old hard-coded mapping was mouse-wheel
-                            // semantics and felt backwards on the pad; it now
-                            // follows the same natural-scroll setting as every
-                            // other wheel path (classic setting = old mapping).
-                            val touchDir = if (mouseNaturalScroll()) 1f else -1f
                             desktop?.injectScroll(x, y, if (n * touchDir > 0) 4 else 5, abs(n))
                         }
                         n = (scrollAccumX / SCROLL_STEP_PX).toInt()
@@ -2361,6 +2387,33 @@ class DesktopView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attrs) 
     }
 
     /** Inject a keysym, spending any sticky modifiers on it. */
+    /**
+     * v0.2.133: Android clipboard -> focused X app, typed through the same
+     * pipeline the keyboard uses (XTEST batch or FIFO agent; both map
+     * '\n' to Return). Reading the clipboard is allowed while the desktop
+     * has window focus - exactly when a key event can arrive. Capped:
+     * XTEST types one keystroke per character, so a megabyte clip would
+     * take minutes; larger clips are truncated with a toast instead of
+     * silently hanging the input queue.
+     */
+    private fun pasteAndroidClipboard() {
+        val d = desktop ?: return
+        val txt = runCatching {
+            val cm = context.getSystemService(android.content.ClipboardManager::class.java)
+            cm?.primaryClip?.takeIf { it.itemCount > 0 }
+                ?.getItemAt(0)?.coerceToText(context)?.toString()
+        }.getOrNull()
+        if (txt.isNullOrEmpty()) return
+        if (txt.length > PASTE_MAX_CHARS) {
+            d.injectText(txt.substring(0, PASTE_MAX_CHARS))
+            android.widget.Toast.makeText(context,
+                "pasted the first $PASTE_MAX_CHARS of ${txt.length} characters (clip too large to type)",
+                android.widget.Toast.LENGTH_LONG).show()
+        } else {
+            d.injectText(txt)
+        }
+    }
+
     private fun sendKeysym(ks: Int) {
         val d = desktop ?: return
         if (stickyCtrl || stickyAlt || stickyMeta) {
@@ -2531,6 +2584,9 @@ class DesktopView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attrs) 
         const val HINT_MS = 11_000L
         const val FADE_TICK_MS = 200L
         const val KEY_INTRO_SEEN = "gesture_intro_seen"
+        // v0.2.133: typing a clip through XTEST costs one keystroke per
+        // character - past this cap the paste is truncated with a toast.
+        const val PASTE_MAX_CHARS = 8_000
     }
 }
 
