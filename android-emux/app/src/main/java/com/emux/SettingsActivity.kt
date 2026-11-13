@@ -431,6 +431,13 @@ class SettingsActivity : AppCompatActivity() {
                     com.emux.core.BootstrapManager(app).startupRepairAsync(force = true)
                     true
                 }
+            // v0.2.132: full rootfs reset - the only alternative used to be
+            // uninstalling the whole app. Confirmation dialog inside.
+            findPreference<androidx.preference.Preference>("reset_rootfs")
+                ?.setOnPreferenceClickListener {
+                    activity?.let { resetRootfs(it) }
+                    true
+                }
             // v0.2.79: capture quality only takes effect when Xvfb starts, so
             // give the user the restart instead of making them hunt for one.
             // The flag is consumed by MainActivity.onResume - Settings must not
@@ -626,6 +633,16 @@ class SettingsActivity : AppCompatActivity() {
                     true
                 }
             })
+            // v0.2.132: full rootfs reset - the only alternative used to be
+            // uninstalling the whole app. Confirmation dialog inside.
+            screen.addPreference(androidx.preference.Preference(ctx).apply {
+                key = "reset_rootfs"; title = "Reset Linux rootfs"
+                summary = "Deletes every installed Linux system (packages and system changes included; your home folder is kept) and lets you Install a fresh copy. All sessions and the desktop stop."
+                setOnPreferenceClickListener {
+                    activity?.let { resetRootfs(it) }
+                    true
+                }
+            })
             screen.addPreference(androidx.preference.EditTextPreference(ctx).apply {
                 key = "mirror"; title = "Mirror / custom rootfs URL"
                 setDefaultValue(com.emux.core.BootstrapManager.MIRROR)
@@ -680,5 +697,95 @@ class SettingsActivity : AppCompatActivity() {
                         "Could not open this setting", android.widget.Toast.LENGTH_LONG).show()
                 }
         }
+    }
+}
+
+/**
+ * v0.2.132 RESET ROOTFS: deletes every installed Linux system (files/distros
+ * trees + the .env_version stamp + the legacy tree) and returns to the main
+ * screen, whose startup check then shows the Install pane - so a fresh
+ * distro is one tap away WITHOUT uninstalling the whole app. files/home is
+ * OUTSIDE the deleted trees, so the user's terminal home folder survives.
+ * All sessions (terminal AND desktop) are stopped first: their proot guest
+ * processes die with the session (destroyTree), and the wipe runs on a
+ * worker thread after a short grace period - never on the main looper.
+ */
+internal fun resetRootfs(activity: android.app.Activity) {
+    // framework dialog on an Activity context - the dialog path the field
+    // ROM reliably renders (see attachFrameworkDialogDispatch)
+    var actCtx: android.content.Context = activity
+    while (actCtx !is android.app.Activity && actCtx is android.content.ContextWrapper)
+        actCtx = actCtx.baseContext
+    val app = activity.applicationContext
+    runCatching {
+        val dlg = android.app.AlertDialog.Builder(actCtx,
+            android.R.style.Theme_DeviceDefault_Dialog_Alert)
+            .setTitle("Reset Linux rootfs?")
+            .setMessage("Every installed Linux system is deleted and downloaded again.\n\n" +
+                "DELETED: the system itself - installed packages, apt/apk state, " +
+                "everything you changed outside your home.\n" +
+                "KEPT: your home folder - files you saved in the terminal survive.\n\n" +
+                "All sessions and the desktop stop now. Afterwards, tap Install on " +
+                "the main screen to download a fresh copy.")
+            .setPositiveButton("Reset", null)
+            .setNegativeButton(android.R.string.cancel, null)
+            .create()
+        dlg.show()
+        dlg.getButton(android.app.AlertDialog.BUTTON_POSITIVE).setOnClickListener {
+            dlg.dismiss()
+            runCatching {
+                // 1) stop every session - terminal AND desktop children die
+                //    with their session (destroyTree takes the proot guests).
+                for (s in com.emux.terminal.TerminalService.sessions().value.toList()) {
+                    runCatching {
+                        activity.startService(android.content.Intent(activity,
+                            com.emux.terminal.TerminalService::class.java)
+                            .setAction(com.emux.terminal.TerminalService.ACTION_STOP_SESSION)
+                            .putExtra(com.emux.terminal.TerminalService.EXTRA_SESSION_ID, s.id))
+                    }
+                }
+                // 2) wipe on a worker thread (thousands of files - never the
+                //    main looper), after a short grace period so the child
+                //    processes are gone.
+                Thread(Runnable {
+                    runCatching {
+                        Thread.sleep(2_500L)
+                        val distros = com.emux.core.FsLayout.distrosDir(app)
+                        if (distros.isDirectory) distros.deleteRecursively()
+                        com.emux.core.FsLayout.prefixFile(app).delete()
+                        val legacy = java.io.File(com.emux.core.FsLayout.root(app), "linuxroot")
+                        if (legacy.isDirectory) legacy.deleteRecursively()
+                        com.emux.EmuXLog.i("rootfs reset: distro trees + stamp deleted (home kept)")
+                    }.onFailure { t ->
+                        com.emux.EmuXLog.e("rootfs reset delete failed", t)
+                    }
+                    activity.runOnUiThread {
+                        // 3) back to the main screen: its startup check now
+                        //    sees no rootfs and shows the Install pane - the
+                        //    full existing install machinery (WorkManager +
+                        //    in-process fallback + progress UI) takes over.
+                        runCatching {
+                            activity.startActivity(android.content.Intent(activity,
+                                com.emux.MainActivity::class.java)
+                                .addFlags(android.content.Intent.FLAG_ACTIVITY_CLEAR_TOP or
+                                    android.content.Intent.FLAG_ACTIVITY_NEW_TASK))
+                            activity.finish()
+                        }
+                        android.widget.Toast.makeText(app,
+                            "Linux system deleted - tap Install for a fresh copy",
+                            android.widget.Toast.LENGTH_LONG).show()
+                    }
+                }, "emux-rootfs-reset").start()
+            }.onFailure { t ->
+                com.emux.EmuXLog.e("rootfs reset failed", t)
+                android.widget.Toast.makeText(app,
+                    "Reset failed: " + t.javaClass.simpleName,
+                    android.widget.Toast.LENGTH_LONG).show()
+            }
+        }
+    }.onFailure { t ->
+        com.emux.EmuXLog.e("rootfs reset dialog failed", t)
+        android.widget.Toast.makeText(app,
+            "Could not open the reset dialog", android.widget.Toast.LENGTH_LONG).show()
     }
 }

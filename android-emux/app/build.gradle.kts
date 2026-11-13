@@ -501,8 +501,8 @@ android {
         // published DEAD and the watcher respawned - one death, two
         // sessions. Upgrades now wait for RUNNING, and start() is
         // idempotent per generation as a second guard.
-        versionCode = 231
-        versionName = "0.2.131"
+        versionCode = 232
+        versionName = "0.2.132"
 
         ndk {
             abiFilters += listOf("arm64-v8a", "armeabi-v7a", "x86_64")

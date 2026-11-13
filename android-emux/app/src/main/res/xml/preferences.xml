@@ -51,6 +51,13 @@
         app:title="@string/pref_repair_title"
         app:summary="@string/pref_repair_summary" />
 
+    <!-- v0.2.132: full rootfs reset. The click handler is wired in BOTH
+         fragment tiers (see SettingsActivity resetRootfs). -->
+    <Preference
+        app:key="reset_rootfs"
+        app:title="Reset Linux rootfs"
+        app:summary="Deletes every installed Linux system (packages and system changes included; your home folder is kept) and lets you Install a fresh copy. All sessions and the desktop stop." />
+
     <!-- v0.2.79: the frame rate the user actually gets is bytes-per-frame
          divided by a pipe we can only measure, not widen. This is the one knob
          that changes bytes-per-frame. Applied when the desktop next starts (the
