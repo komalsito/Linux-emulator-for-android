@@ -74,8 +74,9 @@ private fun addTerminalColorPrefs(screen: androidx.preference.PreferenceScreen, 
     })
     cat.addPreference(androidx.preference.Preference(ctx).apply {
         key = "term_colors_help"; title = "Per-color overrides (hex #RRGGBB)"
-        summary = "Leave a field empty to use the scheme color. Overrides apply\n" +
-            "to the Terminal tab immediately - no restart needed."
+        summary = "Tap a color to open the color wheel (drag to pick, or type\n" +
+            "hex inside it). Leave empty to use the scheme color. Overrides\n" +
+            "apply to the Terminal tab immediately - no restart needed."
         isEnabled = false
     })
     val names = arrayOf("Black", "Red", "Green", "Yellow", "Blue", "Magenta", "Cyan", "White")
@@ -86,25 +87,21 @@ private fun addTerminalColorPrefs(screen: androidx.preference.PreferenceScreen, 
     )
     for (i in 0..15) fields.add("term_color_$i" to
         "ANSI " + (if (i < 8) names[i] else "Bright " + names[i - 8]))
+    // v0.2.129 COLOR WHEEL: each color row now opens a wheel picker (hue
+    // disc + brightness slider + hex field + "Scheme default") instead of
+    // the hex-only text dialog. Plain Preference rows with explicit click
+    // listeners: attachFrameworkDialogDispatch only intercepts List/EditText
+    // preferences, so these are never touched by it.
     for ((key, label) in fields) {
-        cat.addPreference(androidx.preference.EditTextPreference(ctx).apply {
+        cat.addPreference(androidx.preference.Preference(ctx).apply {
             this.key = key; title = label
-            dialogTitle = label + " - hex color (#RRGGBB)"
-            setDefaultValue("")
-            summaryProvider =
-                androidx.preference.Preference.SummaryProvider<androidx.preference.EditTextPreference> { p ->
-                    val v = p.text?.trim() ?: ""
-                    if (v.isEmpty()) "Scheme default" else v
-                }
-            setOnPreferenceChangeListener { _, nv ->
-                val v = (nv as? String)?.trim() ?: ""
-                val ok = v.isEmpty() || (v.length == 7 && v.startsWith("#") &&
-                    runCatching { android.graphics.Color.parseColor(v) }.isSuccess)
-                if (ok) apply()
-                else android.widget.Toast.makeText(app,
-                    "Use #RRGGBB (e.g. #5AA7FF) or leave empty",
-                    android.widget.Toast.LENGTH_LONG).show()
-                ok
+            isIconSpaceReserved = false
+            val cur = androidx.preference.PreferenceManager
+                .getDefaultSharedPreferences(app).getString(key, "")?.trim() ?: ""
+            summary = if (cur.isEmpty()) "Scheme default" else cur
+            setOnPreferenceClickListener { pref ->
+                showColorWheelDialog(ctx, pref, label, apply)
+                true
             }
         })
     }

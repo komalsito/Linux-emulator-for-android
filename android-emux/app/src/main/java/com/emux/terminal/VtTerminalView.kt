@@ -1440,6 +1440,24 @@ class VtTerminalView(ctx: Context, attrs: AttributeSet? = null) : View(ctx, attr
         private val themeViews = ArrayList<java.lang.ref.WeakReference<VtTerminalView>>()
 
         /**
+         * v0.2.129 COLOR WHEEL: the SCHEME color a Terminal settings key maps
+         * to, ignoring per-color overrides - the picker dialog opens the wheel
+         * on the color the terminal actually shows. -1 for an unknown key.
+         */
+        fun schemeColorOf(ctx: android.content.Context, key: String): Int {
+            val sp = androidx.preference.PreferenceManager
+                .getDefaultSharedPreferences(ctx.applicationContext)
+            val sch = scheme(sp.getString("term_theme", "default"))
+            return when (key) {
+                "term_color_fg" -> sch.fg
+                "term_color_bg" -> sch.bg
+                "term_color_cursor" -> sch.cur
+                else -> key.removePrefix("term_color_").toIntOrNull()
+                    ?.let { sch.pal.getOrNull(it) } ?: -1
+            }
+        }
+
+        /**
          * v0.2.127: (re)load the terminal theme from Settings - a scheme preset
          * (term_theme) plus per-color hex overrides (term_color_fg / _bg /
          * _cursor / _0.._15, empty = scheme value) - and live-update every
