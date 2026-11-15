@@ -513,8 +513,15 @@ android {
         //     titlebar and panel fonts now scale with EMUX_SCALE.
         //  Verified on Xvfb 2800x1594 + Openbox 3.6 + pcmanfm (GDK_SCALE=2) +
         //  tint2 17: menus open at the click point; rail hidden = 4px left strip.
-        versionCode = 234
-        versionName = "0.2.134"
+        // v0.2.135 vc235: ANDROID->LINUX FILE DROP.
+        //  1. ShareReceiverActivity: "Share -> EmuX" from any Android app
+        //     (ACTION_SEND / ACTION_SEND_MULTIPLE / ACTION_VIEW content:) copies
+        //     the stream into files/shared/inbox on the host.
+        //  2. files/shared is bind-mounted into every proot session at
+        //     /root/shared (emux-init.sh + emux-x11 host-mode re-exec), so
+        //     dropped files appear at ~/shared inside the Linux env immediately.
+        versionCode = 235
+        versionName = "0.2.135"
 
         ndk {
             abiFilters += listOf("arm64-v8a", "armeabi-v7a", "x86_64")
@@ -622,4 +629,5 @@ dependencies {
     testImplementation("junit:junit:4.13.2")
     testImplementation("org.robolectric:robolectric:4.12.2")
 }
+
 

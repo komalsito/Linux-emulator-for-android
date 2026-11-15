@@ -150,5 +150,34 @@
                 android:name="android.hardware.usb.action.USB_DEVICE_ATTACHED"
                 android:resource="@xml/usb_device_filter" />
         </activity>
+
+        <!-- v0.2.135 ANDROID->LINUX FILE DROP: the share-sheet receiver. Any
+             Android app can "Share -> EmuX" (SEND / SEND_MULTIPLE) or open a
+             content: URI with us (VIEW); the stream is copied into
+             files/shared/inbox, which proot sessions bind-mount at
+             /root/shared. Translucent + recents-excluded: share, toast, gone.
+             VIEW is restricted to the content scheme so http/mailto links are
+             never hijacked from the browser. -->
+        <activity
+            android:name=".ShareReceiverActivity"
+            android:exported="true"
+            android:launchMode="singleTask"
+            android:excludeFromRecents="true"
+            android:taskAffinity="com.emux.share"
+            android:theme="@style/EmuX.Translucent">
+            <intent-filter>
+                <action android:name="android.intent.action.SEND" />
+                <action android:name="android.intent.action.SEND_MULTIPLE" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="*/*" />
+            </intent-filter>
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:scheme="content" />
+                <data android:mimeType="*/*" />
+            </intent-filter>
+        </activity>
     </application>
 </manifest>
+

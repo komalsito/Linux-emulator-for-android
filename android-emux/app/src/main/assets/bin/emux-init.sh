@@ -33,6 +33,13 @@ CMD="${EMUX_ARGV1:-$*}"
 [ -n "$CMD" ] || CMD="$1"
 NB="${EMUX_NATIVE_BRIDGE:-$(dirname "$HOME")/native-bridge}"
 PROOT="$NB/proot"
+# v0.2.135 FILE DROP: bind the host drop box (FsLayout.shared(), exported as
+# EMUX_SHARED by sessionEnv) into every proot session at /root/shared. Files
+# shared from Android apps via the share sheet (ShareReceiverActivity) land in
+# $EMUX_SHARED/inbox on the host and appear at ~/shared inside the guest.
+# Unquoted $SHB is deliberate: empty when EMUX_SHARED is unset/missing.
+SHB=""
+[ -n "$EMUX_SHARED" ] && [ -d "$EMUX_SHARED" ] && SHB="-b $EMUX_SHARED:/root/shared"
 
 # v0.1.22 (kept): Android toybox sh may print a bogus syntax-error line when
 # handed multi-line code via -c; detect and silence it for THIS launcher stage.
@@ -106,16 +113,16 @@ if [ -x "$PROOT" ]; then
         # geometry). Escaped \$ hands the literal $(tty) to the guest dash,
         # whose stdin IS the pts. The guard keeps a rootfs without the seeded
         # watcher (interrupted bootstrap) from printing a not-found line.
-        exec "$PROOT" --link2symlink -0 -r "$ROOT" -b /dev -b /proc -b /sys -w /root /usr/bin/script -qfc "( [ -x /usr/local/bin/emux-winsize ] && /usr/local/bin/emux-winsize \$(tty) >/dev/null 2>&1 ) & exec /bin/bash -l" /dev/null
+        exec "$PROOT" --link2symlink -0 -r "$ROOT" -b /dev -b /proc -b /sys $SHB -w /root /usr/bin/script -qfc "( [ -x /usr/local/bin/emux-winsize ] && /usr/local/bin/emux-winsize \$(tty) >/dev/null 2>&1 ) & exec /bin/bash -l" /dev/null
       fi
-      exec "$PROOT" --link2symlink -0 -r "$ROOT" -b /dev -b /proc -b /sys -w /root /usr/bin/script -qfc "( [ -x /usr/local/bin/emux-winsize ] && /usr/local/bin/emux-winsize \$(tty) >/dev/null 2>&1 ) & exec /bin/sh -l" /dev/null
+      exec "$PROOT" --link2symlink -0 -r "$ROOT" -b /dev -b /proc -b /sys $SHB -w /root /usr/bin/script -qfc "( [ -x /usr/local/bin/emux-winsize ] && /usr/local/bin/emux-winsize \$(tty) >/dev/null 2>&1 ) & exec /bin/sh -l" /dev/null
     fi
     if [ -f "$ROOT/bin/bash" ]; then
-      exec "$PROOT" --link2symlink -0 -r "$ROOT" -b /dev -b /proc -b /sys -w /root /bin/bash -l
+      exec "$PROOT" --link2symlink -0 -r "$ROOT" -b /dev -b /proc -b /sys $SHB -w /root /bin/bash -l
     fi
-    exec "$PROOT" --link2symlink -0 -r "$ROOT" -b /dev -b /proc -b /sys -w /root /bin/sh -l
+    exec "$PROOT" --link2symlink -0 -r "$ROOT" -b /dev -b /proc -b /sys $SHB -w /root /bin/sh -l
   fi
-  exec "$PROOT" --link2symlink -0 -r "$ROOT" -b /dev -b /proc -b /sys -w /root /bin/sh -l -c "$CMD"
+  exec "$PROOT" --link2symlink -0 -r "$ROOT" -b /dev -b /proc -b /sys $SHB -w /root /bin/sh -l -c "$CMD"
 fi
 
 # --- Path 2: distro loader exec (no proot available) --------------------------
@@ -165,3 +172,4 @@ fi
 echo "emux: distro engine unavailable (no proot at $NB, no loader/busybox in $ROOT) - plain Android shell." >&2
 if [ -n "$CMD" ]; then exec /system/bin/sh -c "$CMD"; fi
 exec /system/bin/sh -l
+
