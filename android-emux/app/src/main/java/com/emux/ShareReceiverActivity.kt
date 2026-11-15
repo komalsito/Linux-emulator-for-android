@@ -6,7 +6,6 @@ import android.net.Uri
 import android.os.Bundle
 import android.provider.OpenableColumns
 import android.widget.Toast
-import com.emux.core.EmuXLog
 import com.emux.core.FsLayout
 import java.io.File
 import java.io.IOException
@@ -58,7 +57,7 @@ class ShareReceiverActivity : Activity() {
             if (!text.isNullOrEmpty() && uris.isEmpty()) {
                 // Shared text with no file: save it as a timestamped .txt.
                 val name = "shared-text-${System.currentTimeMillis() / 1000}.txt"
-                if (writeAtomic(inbox, name) { it.writeText(text) }) ok++ else err++
+                if (writeAtomic(name) { it.writeText(text) }) ok++ else err++
             }
             val msg = when {
                 err == 0 && n > 0 -> "EmuX: $ok file(s) -> ~/shared/inbox"
