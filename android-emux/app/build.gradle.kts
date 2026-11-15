@@ -501,8 +501,20 @@ android {
         // published DEAD and the watcher respawned - one death, two
         // sessions. Upgrades now wait for RUNNING, and start() is
         // idempotent per generation as a second guard.
-        versionCode = 233
-        versionName = "0.2.133"
+        // v0.2.134 vc234: RETINA DESKTOP FIXES (ENV_VERSION 103 re-seed).
+        //  1. The left rail drew as a full-width bar across the middle of the
+        //     screen: tint2 reads a VERTICAL panel_size as length-thickness, and
+        //     the config said "40 100%". Now "100% 40" (x UI scale).
+        //  2. Right-click menu opened at half the pointer position at Retina:
+        //     pcmanfm forwards root clicks in GTK logical coordinates
+        //     (GDK_SCALE=2 -> halved). The Root right-click now presses a key
+        //     bound to ShowMenu, which Openbox places at the real pointer.
+        //  3. Openbox and tint2 render at 96 DPI regardless of Xft.dpi: menu,
+        //     titlebar and panel fonts now scale with EMUX_SCALE.
+        //  Verified on Xvfb 2800x1594 + Openbox 3.6 + pcmanfm (GDK_SCALE=2) +
+        //  tint2 17: menus open at the click point; rail hidden = 4px left strip.
+        versionCode = 234
+        versionName = "0.2.134"
 
         ndk {
             abiFilters += listOf("arm64-v8a", "armeabi-v7a", "x86_64")
@@ -610,3 +622,4 @@ dependencies {
     testImplementation("junit:junit:4.13.2")
     testImplementation("org.robolectric:robolectric:4.12.2")
 }
+
