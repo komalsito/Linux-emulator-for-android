@@ -520,8 +520,12 @@ android {
         //  2. files/shared is bind-mounted into every proot session at
         //     /root/shared (emux-init.sh + emux-x11 host-mode re-exec), so
         //     dropped files appear at ~/shared inside the Linux env immediately.
-        versionCode = 235
-        versionName = "0.2.135"
+        // v0.2.136 vc236: OPENBOX FONT FIX - rc.xml fonts back to a FIXED 10pt:
+        // "10 x EMUX_SCALE" rendered ~27px titlebar/menu text at 96 DPI on the
+        // raw Retina screen (field: pcmanfm titlebar + desktop root menu huge,
+        // GTK apps fine). ENV_VERSION 105 re-seeds emux-x11.
+        versionCode = 236
+        versionName = "0.2.136"
 
         ndk {
             abiFilters += listOf("arm64-v8a", "armeabi-v7a", "x86_64")
@@ -629,5 +633,6 @@ dependencies {
     testImplementation("junit:junit:4.13.2")
     testImplementation("org.robolectric:robolectric:4.12.2")
 }
+
 
 
