@@ -1,3 +1,4 @@
+successfully downloaded text file (SHA: 00dcecc33f9459ef487d121b5e9b1e0df52fa14c)
 package com.emux
 
 import android.app.Activity
@@ -57,7 +58,7 @@ class ShareReceiverActivity : Activity() {
             if (!text.isNullOrEmpty() && uris.isEmpty()) {
                 // Shared text with no file: save it as a timestamped .txt.
                 val name = "shared-text-${System.currentTimeMillis() / 1000}.txt"
-                if (writeAtomic(name) { it.writeText(text) }) ok++ else err++
+                if (writeAtomic(name) { it.write(text.toByteArray()) }) ok++ else err++
             }
             val msg = when {
                 err == 0 && n > 0 -> "EmuX: $ok file(s) -> ~/shared/inbox"
