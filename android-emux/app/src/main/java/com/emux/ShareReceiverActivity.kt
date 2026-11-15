@@ -1,4 +1,3 @@
-successfully downloaded text file (SHA: 00dcecc33f9459ef487d121b5e9b1e0df52fa14c)
 package com.emux
 
 import android.app.Activity
