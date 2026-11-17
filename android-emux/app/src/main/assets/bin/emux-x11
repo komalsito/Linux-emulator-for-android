@@ -593,10 +593,25 @@ XTerm*faceSize: 11
 XTerm*selectToClipboard: false
 XTerm*scrollBar: false
 XTerm*saveLines: 5000
+XTerm*eightBitInput: false
+XTerm*printAttributes: false
+! v0.2.137 xterm clipboard bindings:
+!  - Ctrl+C / Ctrl+V work on the CLIPBOARD selection (which the app bridges
+!    to the Android clipboard). NOTE: xterm actions are unconditional, so a
+!    plain Ctrl+C with no selection sends nothing - it does NOT send SIGINT.
+!    Use Ctrl+Shift+C aliases too; kill a process with Ctrl+D or `q`.
+!  - Right-click now opens xterm's VT Options menu (Copy, Paste...) instead
+!    of pasting immediately; Ctrl+left/middle/right click keep the default
+!    main/VT/font menus that #override would otherwise drop.
 XTerm*VT100.translations: #override \n\
     Ctrl Shift <Key>C: copy-selection(CLIPBOARD) \n\
     Ctrl Shift <Key>V: insert-selection(CLIPBOARD) \n\
-    <Btn3Down>: insert-selection(CLIPBOARD)
+    Ctrl <Key>c: copy-selection(CLIPBOARD) \n\
+    Ctrl <Key>v: insert-selection(CLIPBOARD) \n\
+    <Btn3Down>: popup-menu(vtMenu) \n\
+    Ctrl <Btn1Down>: popup-menu(mainMenu) \n\
+    Ctrl <Btn2Down>: popup-menu(vtMenu) \n\
+    Ctrl <Btn3Down>: popup-menu(fontMenu)
 XTAD
   xrdb -merge /tmp/emux-xterm.ad >/dev/null 2>&1
   printf 'Xft.dpi: %s\nXcursor.size: %s\n' "$((96 * EMUX_SCALE))" "$((24 * EMUX_SCALE))" \
@@ -3342,6 +3357,7 @@ fi
 echo "emux-x11: X server (pid $XPID) exited rc=$RC - log tail:" >&2
 tail -15 /tmp/xvfb.log >&2
 exit $RC
+
 
 
 

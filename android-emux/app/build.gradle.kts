@@ -524,8 +524,14 @@ android {
         // "10 x EMUX_SCALE" rendered ~27px titlebar/menu text at 96 DPI on the
         // raw Retina screen (field: pcmanfm titlebar + desktop root menu huge,
         // GTK apps fine). ENV_VERSION 105 re-seeds emux-x11.
-        versionCode = 236
-        versionName = "0.2.136"
+        // v0.2.137 vc237: XTERM CLIPBOARD KEYMAP - plain Ctrl+C copies to the
+        // CLIPBOARD selection (bridged to the Android clipboard) and Ctrl+V
+        // pastes from it; right-click opens xterm's VT Options menu (Copy,
+        // Paste...) instead of pasting immediately. Trade-off: with no
+        // selection, Ctrl+C sends nothing (it no longer sends SIGINT - use
+        // Ctrl+D or `q` to stop a process). ENV_VERSION 106 re-seeds emux-x11.
+        versionCode = 237
+        versionName = "0.2.137"
 
         ndk {
             abiFilters += listOf("arm64-v8a", "armeabi-v7a", "x86_64")
@@ -633,6 +639,7 @@ dependencies {
     testImplementation("junit:junit:4.13.2")
     testImplementation("org.robolectric:robolectric:4.12.2")
 }
+
 
 
 
