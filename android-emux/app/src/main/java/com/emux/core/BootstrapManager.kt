@@ -3365,7 +3365,7 @@ class BootstrapManager(private val ctx: Context) {
                 // prints them LITERALLY (the raw \\[\\e[38;5;39m\\]emux: prompt the
                 // field screenshots show in the fallback xterm). Prompt per shell.
                 (if (File(dest, "bin/bash").isFile || File(dest, "usr/bin/bash").isFile)
-                    "export PS1='\\[\\e[38;5;39m\\]emux:\\w\\[\\e[0m\\] \\\\$ '\n" +
+                    "export PS1='\\[\\e[38;5;39m\\]emux:\\w\\[\\e[0m\\] \\$ '\n"
                 else
                     "export PS1='emux \\$ '\n") +
                 "alias ll='ls -alF'\n" +
@@ -3445,4 +3445,5 @@ fun java.net.NetworkInterface.stapledDnsServersCompat(): List<String> = try {
         get.invoke(null, "net.dns2") as? String,
     ).filter { it.isNotBlank() }
 } catch (_: Exception) { emptyList() }
+
 
