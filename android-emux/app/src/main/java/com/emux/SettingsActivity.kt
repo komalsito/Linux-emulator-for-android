@@ -454,6 +454,15 @@ class SettingsActivity : AppCompatActivity() {
                     activity?.onBackPressedDispatcher?.onBackPressed()
                     true
                 }
+            // v0.2.138 SETTINGS-WM FIX: validate Desktop picks against the
+            // ACTIVE rootfs. The guest launcher no longer silently substitutes
+            // openbox (see assets/bin/emux-x11 start_wm), so rejecting a pick
+            // that is not installed here is the honest surface - with the
+            // exact install command in the toast.
+            findPreference<androidx.preference.ListPreference>("desktop_session")
+                ?.setOnPreferenceChangeListener { _, newValue ->
+                    wmChoiceValid(this, newValue)
+                }
             // v0.2.88 SETTINGS ROUND 2: explicit selector dispatch - see
             // attachFrameworkDialogDispatch.
             // v0.2.127: terminal colors - same rows as CodePrefs, appended
@@ -516,6 +525,13 @@ class SettingsActivity : AppCompatActivity() {
                 summaryProvider = androidx.preference.ListPreference.SimpleSummaryProvider.getInstance()
             })
             screen.addPreference(androidx.preference.SwitchPreferenceCompat(ctx).apply {
+            // v0.2.138 SETTINGS-WM FIX: same validation as the XML tier -
+            // reject a Desktop pick whose binary is missing from the active
+            // distro instead of letting it silently swap to openbox later.
+            findPreference<androidx.preference.ListPreference>("desktop_session")
+                ?.setOnPreferenceChangeListener { _, newValue ->
+                    wmChoiceValid(this, newValue)
+                }
                 key = "root_accel"; title = "Root acceleration (chroot)"
                 summary = "Use su/Magisk for real chroot when available"
                 setDefaultValue(true)
@@ -788,4 +804,36 @@ internal fun resetRootfs(activity: android.app.Activity) {
         android.widget.Toast.makeText(app,
             "Could not open the reset dialog", android.widget.Toast.LENGTH_LONG).show()
     }
+}
+
+
+/**
+ * v0.2.138 SETTINGS-WM FIX: an explicit Desktop pick that is not installed in
+ * the ACTIVE distro used to reach emux-x11 and silently fall back to openbox,
+ * so switching to Xfce "did nothing" while Openbox kept starting. Auto is
+ * always accepted (DesktopService.defaultWmCommand() only names binaries it
+ * probed). The pick's name matches emux-x11's $1 (mate-session, startxfce4,
+ * startlxqt, lxsession...), so a plain usr/bin check mirrors the launcher.
+ */
+private fun wmChoiceValid(
+    fragment: androidx.preference.PreferenceFragmentCompat,
+    newValue: Any?,
+): Boolean {
+    val v = newValue as? String ?: return false
+    if (v == "auto") return true
+    val ctx = fragment.requireContext().applicationContext
+    val ok = runCatching {
+        java.io.File(com.emux.core.FsLayout.linuxRoot(ctx), "usr/bin/$v").isFile ||
+        java.io.File(com.emux.core.FsLayout.linuxRoot(ctx), "bin/$v").isFile
+    }.getOrDefault(false)
+    if (!ok) {
+        android.widget.Toast.makeText(
+            ctx,
+            "$v is not installed in the Linux system yet. Install it in the terminal first " +
+                "(Debian/Ubuntu: apt install xfce4 | Alpine: apk add xfce4), " +
+                "then use 'Restart desktop now'.",
+            android.widget.Toast.LENGTH_LONG
+        ).show()
+    }
+    return ok
 }
