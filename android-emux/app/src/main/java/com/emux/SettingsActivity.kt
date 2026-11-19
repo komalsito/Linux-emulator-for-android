@@ -524,7 +524,6 @@ class SettingsActivity : AppCompatActivity() {
                 setDefaultValue("auto")
                 summaryProvider = androidx.preference.ListPreference.SimpleSummaryProvider.getInstance()
             })
-            screen.addPreference(androidx.preference.SwitchPreferenceCompat(ctx).apply {
             // v0.2.138 SETTINGS-WM FIX: same validation as the XML tier -
             // reject a Desktop pick whose binary is missing from the active
             // distro instead of letting it silently swap to openbox later.
@@ -532,6 +531,7 @@ class SettingsActivity : AppCompatActivity() {
                 ?.setOnPreferenceChangeListener { _, newValue ->
                     wmChoiceValid(this, newValue)
                 }
+            screen.addPreference(androidx.preference.SwitchPreferenceCompat(ctx).apply {
                 key = "root_accel"; title = "Root acceleration (chroot)"
                 summary = "Use su/Magisk for real chroot when available"
                 setDefaultValue(true)
