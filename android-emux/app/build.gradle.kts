@@ -530,8 +530,17 @@ android {
         // Paste...) instead of pasting immediately. Trade-off: with no
         // selection, Ctrl+C sends nothing (it no longer sends SIGINT - use
         // Ctrl+D or `q` to stop a process). ENV_VERSION 106 re-seeds emux-x11.
-        versionCode = 237
-        versionName = "0.2.137"
+        // v0.2.138 vc238: EXPLICIT-DESKTOP-PICK VALIDATION (host + guest).
+        // 1. DesktopService fails fast with the remedy on the pane when the
+        //    pick (stored before validation existed, or after a distro
+        //    switch) is not installed in the ACTIVE rootfs - previously the
+        //    guest only had a WM-less fallback xterm to show for it.
+        // 2. emux-x11 (ENV_VERSION 107 re-seed): start_wm never silently
+        //    swaps an explicit pick for openbox; the visibility xterm
+        //    prefers bash (dash printed the profile PS1 escapes literally).
+        // 3. BootstrapManager seeds a dash-safe profile PS1 at bootstrap.
+        versionCode = 238
+        versionName = "0.2.138"
 
         ndk {
             abiFilters += listOf("arm64-v8a", "armeabi-v7a", "x86_64")

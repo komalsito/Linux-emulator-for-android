@@ -1193,6 +1193,24 @@ class DesktopService(
         // v0.2.106: "auto" / blank = the installed desktop (Settings default).
         val wm = if (wmCommand.isBlank() || wmCommand == "auto") defaultWmCommand() else wmCommand
         lastWm = wm
+        // v0.2.138 EXPLICIT-PICK GUARD (field 19 Nov: stored startxfce4 + no
+        // xfce4 in the rootfs reached emux-x11, which now errors instead of
+        // silently launching openbox - the leftover path was a WM-less
+        // fallback xterm with a dash-literal prompt that could not be moved
+        // or closed). Mirror it host-side: never launch a pick the active
+        // rootfs cannot run; say so on the pane WITH the remedy.
+        if (wmCommand.isNotBlank() && wmCommand != "auto" &&
+            !java.io.File(com.emux.core.FsLayout.linuxRoot(ctx), "usr/bin/$wm").isFile &&
+            !java.io.File(com.emux.core.FsLayout.linuxRoot(ctx), "bin/$wm").isFile
+        ) {
+            setError(
+                "Desktop '$wm' is not installed in the active Linux system. " +
+                    "In the Terminal tab run: apt install xfce4 (Debian/Ubuntu) or apk add xfce4 (Alpine), " +
+                    "or set Settings > Desktop back to Automatic - then tap Restart desktop now."
+            )
+            state.value = State.ERROR
+            return
+        }
         // v0.1.100: AWAITING_FRAMES is also an in-progress state —
         // a second startDesktop() here would launch a duplicate X/capture
         // pipeline on top of the one already waiting for frames.
@@ -4755,3 +4773,4 @@ class DesktopService(
         state.value = State.IDLE
     }
 }
+

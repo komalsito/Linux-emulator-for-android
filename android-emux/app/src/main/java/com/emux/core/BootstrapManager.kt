@@ -3361,7 +3361,13 @@ class BootstrapManager(private val ctx: Context) {
                                 "# v0.1.28: host-side SHELL=/system/bin/sh (util-linux script(1) needs a host shell);\n" +
                 "# inside the distro, advertise the real shell to child programs.\n" +
                 "if [ -x /bin/bash ]; then export SHELL=/bin/bash; else export SHELL=/bin/sh; fi\n" +
-"export PS1='\\[\\e[38;5;39m\\]emux:\\w\\[\\e[0m\\] \\$ '\n" +
+                // v0.2.138: PS1 backslash escapes are bash-only; /bin/sh (dash)
+                // prints them LITERALLY (the raw \\[\\e[38;5;39m\\]emux: prompt the
+                // field screenshots show in the fallback xterm). Prompt per shell.
+                (if (File(dest, "bin/bash").isFile || File(dest, "usr/bin/bash").isFile)
+                    "export PS1='\\[\\e[38;5;39m\\]emux:\\w\\[\\e[0m\\] \\\\$ '\n" +
+                else
+                    "export PS1='emux \\$ '\n") +
                 "alias ll='ls -alF'\n" +
                 // v0.1.47: package-manager comfort alias per distro family.
                 (when (spec.pkg) {
@@ -3439,3 +3445,4 @@ fun java.net.NetworkInterface.stapledDnsServersCompat(): List<String> = try {
         get.invoke(null, "net.dns2") as? String,
     ).filter { it.isNotBlank() }
 } catch (_: Exception) { emptyList() }
+
