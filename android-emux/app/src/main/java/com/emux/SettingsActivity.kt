@@ -524,13 +524,6 @@ class SettingsActivity : AppCompatActivity() {
                 setDefaultValue("auto")
                 summaryProvider = androidx.preference.ListPreference.SimpleSummaryProvider.getInstance()
             })
-            // v0.2.138 SETTINGS-WM FIX: same validation as the XML tier -
-            // reject a Desktop pick whose binary is missing from the active
-            // distro instead of letting it silently swap to openbox later.
-            findPreference<androidx.preference.ListPreference>("desktop_session")
-                ?.setOnPreferenceChangeListener { _, newValue ->
-                    wmChoiceValid(this, newValue)
-                }
             screen.addPreference(androidx.preference.SwitchPreferenceCompat(ctx).apply {
                 key = "root_accel"; title = "Root acceleration (chroot)"
                 summary = "Use su/Magisk for real chroot when available"
@@ -684,6 +677,15 @@ class SettingsActivity : AppCompatActivity() {
             // v0.2.127: terminal colors (scheme + per-color hex overrides)
             addTerminalColorPrefs(screen, ctx)
             preferenceScreen = screen
+            // v0.2.138 SETTINGS-WM FIX: same validation as the XML tier - a
+            // Desktop pick whose binary is missing from the active distro is
+            // rejected here instead of silently swapping to openbox later.
+            // MUST run after preferenceScreen is set: findPreference walks
+            // the assigned screen, not the local `screen` variable.
+            findPreference<androidx.preference.ListPreference>("desktop_session")
+                ?.setOnPreferenceChangeListener { _, newValue ->
+                    wmChoiceValid(this, newValue)
+                }
             // v0.2.88 SETTINGS ROUND 2: same explicit-listener dispatch as the
             // XML tier - this is the tier the field ROM runs, and the v0.2.87
             // onDisplayPreferenceDialog override alone left its selectors
