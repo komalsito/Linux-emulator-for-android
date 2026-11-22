@@ -539,8 +539,30 @@ android {
         //    swaps an explicit pick for openbox; the visibility xterm
         //    prefers bash (dash printed the profile PS1 escapes literally).
         // 3. BootstrapManager seeds a dash-safe profile PS1 at bootstrap.
-        versionCode = 238
-        versionName = "0.2.138"
+        // v0.2.139 vc239: XFCE DUPLICATE SESSIONS (field 21 Nov 2026).
+        // 1. The governor WM watchdog checked running0 "startxfce4", but
+        //    startxfce4 execs away into xfce4-session, so the check was
+        //    always false and a whole xfce session was relaunched every
+        //    5 s tick - fourteen xfce4-session trees in the field ps, each
+        //    with its own xfconfd + xfce4-panel (slowdown, wallpaper
+        //    flicker, Action Buttons deaths, dead inputs, battery drain
+        //    after close). wm_running() now maps a WM name to the process
+        //    that actually stays alive (startxfce4 -> xfce4-session, and
+        //    the same wrapper mapping for lxqt/gnome/mate); the start_wm
+        //    idempotency guard uses it too, and the visibility has-scan
+        //    counts a live full session as a visible desktop.
+        // 2. New kill_dup_xfce_sessions() (start_furniture top, before
+        //    the full-session early return, + governor tick before any
+        //    relaunch): keeps the oldest live xfce4-session, kills the
+        //    rest, sweeps their orphaned xfwm4/xfce4-panel/xfdesktop by
+        //    PPID and orphan xfconfd by session bus - so a field install
+        //    heals itself on the first tick after the update.
+        // 3. DesktopService killDesktopGuests() pattern sweep gains the
+        //    xfce names (xfce4-session, xfce4-panel, xfdesktop, xfconfd,
+        //    xfwm4, dbus-daemon, tumbler) so the app close can reap them.
+        //    ENV_VERSION 108 re-seeds emux-x11 onto existing rootfs trees.
+        versionCode = 239
+        versionName = "0.2.139"
 
         ndk {
             abiFilters += listOf("arm64-v8a", "armeabi-v7a", "x86_64")

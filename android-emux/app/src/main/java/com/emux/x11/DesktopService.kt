@@ -2575,8 +2575,18 @@ class DesktopService(
             // was not capturing), while fresh sessions streamed an empty
             // root window. Age filter still protects this session's own
             // launches (they start after desktopStartUpTicks).
+            // v0.2.139: the sweep had no xfce names at all, so a full xfce
+            // session (xfce4-session, its panel, desktop, settings daemon,
+            // window manager, session bus, thumbnailer) survived every
+            // restart and every app close - field 2026-11-21: fourteen
+            // xfce4-session trees left by the pre-fix governor. The sweep
+            // is age-filtered (older than this desktop start) and same-uid,
+            // and double-forked daemons (xfconfd, dbus-daemon) lose the
+            // EMUX_DESKTOP_ID marker the first pass keys on, so the name
+            // sweep is the only backstop that can reap them.
             val pat = Regex("Xvfb|Xorg|emux-capture|/xwd|emux-x11|openbox|tint2|pcmanfm|xterm|xclock|xeyes|" +
-                "mate-session|mate-panel|mate-settings-daemon|marco|caja|wnck-applet|notification-area-applet|jgmenu")
+                "mate-session|mate-panel|mate-settings-daemon|marco|caja|wnck-applet|notification-area-applet|jgmenu|" +
+                "xfce4-session|xfce4-panel|xfdesktop|xfconfd|xfwm4|dbus-daemon|tumbler")
             val proc = java.io.File("/proc")
             proc.listFiles()?.forEach { d ->
                 val pid = d.name.toIntOrNull() ?: return@forEach

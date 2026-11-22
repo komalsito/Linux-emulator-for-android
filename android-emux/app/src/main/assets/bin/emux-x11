@@ -186,6 +186,25 @@ running0_slow() {
   done
   return 1
 }
+# v0.2.139 XFCE DUPLICATE SESSIONS: a WM NAME is not always its process
+# name. startxfce4 execs away into xfce4-session, startlxqt into
+# lxqt-session, gnome-session into gnome-session-binary/gnome-shell - so
+# running0 "$WM" is ALWAYS false for a wrapper and the governor (below)
+# relaunched a whole session every 5 s tick: field 2026-11-21, fourteen
+# xfce4-session trees, each with its own xfconfd + xfce4-panel, ~6 s
+# apart. wm_pid() (v0.2.101) already knew the real names - the watchdog
+# just never used it. Map the wrapper to the process that actually stays
+# alive and check that; plain WMs (openbox, xfwm4, ...) are their own
+# process, so the default arm is running0.
+wm_running() {
+  case "$1" in
+    startxfce4|xfce4-session) running_any xfce4-session xfce4-session-binary ;;
+    startlxqt|lxqt-session) running_any lxqt-session ;;
+    gnome-session) running_any gnome-session gnome-session-binary gnome-shell ;;
+    mate-session) running_any mate-session mate-session-binary ;;
+    *) running0 "$1" ;;
+  esac
+}
 # ============================================================================
 # v0.2.78 — THE CLICK-SWALLOW FIX. Field report: "the desktop is visible but I
 # cannot interact with it". Motion and keys were never affected; killing
@@ -646,7 +665,11 @@ start_wm() {
   # two settings daemons, two session buses) fighting over one display. The
   # self-heal path clears /tmp/emux_wm_launched on purpose, so a WM stuck on a
   # dead display still gets relaunched.
-  if [ -e /tmp/emux_wm_launched ] && running0 "$(basename "$WM_BIN")"; then
+  # v0.2.139: the guard checked running0 on the WRAPPER name, which is the
+  # same mistake as the governor watchdog: startxfce4 execs away into
+  # xfce4-session, so the guard never fired and every call launched another
+  # full session. wm_running() checks the process that actually stays alive.
+  if [ -e /tmp/emux_wm_launched ] && wm_running "$(basename "$1")"; then
     echo "emux-x11: $(basename "$WM_BIN") already running - not starting a second one" >&2
     return 0
   fi
@@ -911,7 +934,79 @@ seed_if_changed() {
   seed_desktop_config
   echo "$SEED_SIG" > /tmp/emux_seed_sig 2>/dev/null
 }
+# v0.2.139 XFCE DUPLICATE SESSIONS: kill the extra xfce4-session trees
+# left by the pre-fix governor (every 5 s tick launched another one -
+# field 2026-11-21: fourteen sessions, each with its own xfconfd +
+# xfce4-panel, all fighting over one display, one xfconf and one root
+# window: the slowdown, the wallpaper flipping to default and back, the
+# Action Buttons plugin deaths, the dead inputs). Keeps the OLDEST live
+# session and never kills the last one: with one or zero sessions this
+# is a no-op (one ps + awk). A duplicate session's own children (xfwm4,
+# xfce4-panel, xfdesktop) are orphaned to PID 1 when their session dies,
+# so they are swept by PPID - but only orphans: a child of the KEPT
+# session is left alone. xfconfd daemonises (PPID 1 even for a live
+# session), so it is matched by its session bus instead: an xfconfd
+# whose DBUS_SESSION_BUS_ADDRESS differs from the kept session's is an
+# orphan; if either address cannot be read, that xfconfd is left alone
+# (a wrong kill would take the kept session's settings daemon with it).
+# Called at the top of start_furniture() (before the full-session early
+# return) and in the governor tick before any relaunch decision, so a
+# field install heals itself on the first tick after the update.
+kill_dup_xfce_sessions() {
+  KDXOUT=$(ps -eo pid=,ppid=,stat=,etimes=,args= 2>/dev/null)
+  [ -n "$KDXOUT" ] || return 0
+  # Oldest live session (largest etimes) + the full kill list, in one awk.
+  KDXPLAN=$(printf '%s\n' "$KDXOUT" | awk -v me="$$" '
+    $1 != me && $3 !~ /^Z/ {
+      a = $5; sub(".*/", "", a); b = $6; sub(".*/", "", b)
+      if (a == "xfce4-session" || b == "xfce4-session") {
+        n++
+        if (($4 + 0) > (age + 0)) { age = $4 + 0; keep = $1 }
+        list = list " " $1
+      }
+    }
+    END { if (n > 1) print keep, list }')
+  [ -n "$KDXPLAN" ] || return 0
+  set -- $KDXPLAN
+  KDXKEEP="$1"
+  echo "emux-x11: killing duplicate xfce4-session(s), keeping oldest (pid $KDXKEEP)" >&2
+  shift
+  # NB: the list still carries the kept pid (it is "keep + list") - the
+  # guard below is what actually spares it.
+  for KDXP in "$@"; do [ "$KDXP" != "$KDXKEEP" ] && kill "$KDXP" 2>/dev/null; done
+  sleep 1
+  # TERM ignored: finish them, then sweep what the dead sessions orphaned.
+  KDXOUT=$(ps -eo pid=,ppid=,stat=,args= 2>/dev/null)
+  [ -n "$KDXOUT" ] || return 0
+  KDXORPH=$(printf '%s\n' "$KDXOUT" | awk -v me="$$" -v keep="$KDXKEEP" '
+    $1 != me && $1 != keep && $3 !~ /^Z/ {
+      a = $4; sub(".*/", "", a); b = $5; sub(".*/", "", b)
+      if (a == "xfce4-session" || b == "xfce4-session") { print $1; next }
+      if ($2 == 1 && (a == "xfwm4" || a == "xfce4-panel" || a == "xfdesktop" ||
+                      b == "xfwm4" || b == "xfce4-panel" || b == "xfdesktop")) print $1
+    }')
+  for KDXP in $KDXORPH; do kill -9 "$KDXP" 2>/dev/null; done
+  # xfconfd by session bus: the kept session's bus is the one that survives.
+  KDXBUS=$(tr '\0' '\n' < "/proc/$KDXKEEP/environ" 2>/dev/null | grep '^DBUS_SESSION_BUS_ADDRESS=' 2>/dev/null)
+  [ -n "$KDXBUS" ] || return 0
+  KDXCONF=$(printf '%s\n' "$KDXOUT" | awk -v me="$$" '
+    $1 != me && $3 !~ /^Z/ {
+      a = $4; sub(".*/", "", a); b = $5; sub(".*/", "", b)
+      if (a == "xfconfd" || b == "xfconfd") print $1
+    }')
+  for KDXP in $KDXCONF; do
+    KDXPBUS=$(tr '\0' '\n' < "/proc/$KDXP/environ" 2>/dev/null | grep '^DBUS_SESSION_BUS_ADDRESS=' 2>/dev/null)
+    [ -n "$KDXPBUS" ] && [ "$KDXPBUS" != "$KDXBUS" ] && kill "$KDXP" 2>/dev/null
+  done
+  return 0
+}
 start_furniture() {
+  # v0.2.139: dedup any xfce4-session trees left by the pre-fix governor
+  # FIRST, before the full-session early return below: under startxfce4
+  # this function returns without launching furniture, which is exactly
+  # why the duplicates survived - nothing ever reaped them. A single
+  # session is a no-op; the kept (oldest) session is never touched.
+  kill_dup_xfce_sessions
   # v0.2.113: no guest clipboard helper any more - the app owns the X
   # selections itself (X11Clipboard). Stop a v0.2.111/112 emux-clipd if one
   # survived from before the update.
@@ -3087,7 +3182,14 @@ fi
     # no way to open a terminal from the panel. Relaunch whenever the
     # preferred WM and every fallback is down but a binary exists - which
     # also covers "the governor just installed openbox mid-session".
-    if ! running0 "$WM" && ! running0 openbox && ! running0 icewm && ! running0 fluxbox && ! running0 twm \
+    # v0.2.139: the check used to be running0 "$WM", which is ALWAYS false
+    # for a wrapper (startxfce4 execs away into xfce4-session) - so this
+    # relaunched a whole xfce session on EVERY 5 s tick (field 2026-11-21:
+    # fourteen xfce4-session trees). wm_running() checks the process that
+    # actually stays alive. kill_dup_xfce_sessions() runs first so a
+    # pre-fix install heals itself before any relaunch decision is made.
+    kill_dup_xfce_sessions
+    if ! wm_running "$WM" && ! running0 openbox && ! running0 icewm && ! running0 fluxbox && ! running0 twm \
        && { [ -x "/usr/bin/$WM" ] || [ -x /usr/bin/openbox ] || [ -x /usr/bin/icewm ] || [ -x /usr/bin/twm ]; }; then
       echo "emux-x11: governor: no window manager running - (re)launching $WM" >&2
       start_wm "$WM"
@@ -3100,7 +3202,10 @@ fi
     # dead code since v0.2.45, and the reason a client-less black pane never
     # self-healed during first-boot package installs.
     # v0.2.112: one ps + awk (was tr|head per process, every 5 s)
-    running_any openbox tint2 pcmanfm xterm xclock xeyes mate-session && has=1
+    # v0.2.139: the has-scan lists full sessions too (mate-session was
+    # already there): a live xfce/gnome/lxqt session IS a visible desktop,
+    # so the watchdog must not force a stray xterm onto it every tick.
+    running_any openbox tint2 pcmanfm xterm xclock xeyes mate-session xfce4-session gnome-session lxqt-session lxsession && has=1
     if [ "$has" = 0 ]; then
       for vc in /usr/bin/xterm /usr/bin/xclock /usr/bin/xeyes; do
         if [ -x "$vc" ]; then
