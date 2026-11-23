@@ -8,15 +8,39 @@
 # shared host<->guest) on every view resize; this watcher applies it with stty
 # on the controlling tty.
 #
+# v0.2.140 ROOT CAUSE (field 22 Nov 2026: `stty size` stayed 0 0, COLUMNS=80,
+# /tmp/emuxsize correctly "47 164"): the guest dash that launches this watcher
+# inherits the HOST-style sessionEnv PATH (FsLayout.sessionEnv:
+# <linuxRoot>/usr/bin:...:/system/bin — host-absolute paths that do not exist
+# inside the proot guest). Every bare command this script needs — tty, awk,
+# cat, stty, sleep, head — was therefore unresolvable: the launcher's $(tty)
+# failed ("sh: 1: tty: not found" in the field screenshot) so $1 arrived
+# empty, the in-script `tty` fallback failed the same way, and the
+# /proc/self/stat fallback failed because awk was not found either — so the
+# watcher hit `[ -c "" ] || exit 0` and exited silently on EVERY session start,
+# before ever entering its loop. The size was never applied, on any session.
+# Fix: set a sane GUEST PATH first (before any external command), so all of
+# the watcher's tools resolve inside the guest whatever PATH it inherited.
+# The TTY resolution also retries in the loop instead of exiting, so a
+# transient failure cannot kill the watcher for the whole session.
+#
 # v0.1.39 BUGFIX (verified in sandbox): launched as an asynchronous command from
 # a non-interactive shell (script -qfc "… & exec …"), POSIX gives the background
 # job stdin=/dev/null, so `tty` fails; and `ps -o tty=` proved unreliable for
 # such processes. The launcher now passes its own `tty` (its stdin IS the pts)
 # as $1, with two fallbacks: `tty`, then decoding field 7 (tty_nr) of
 # /proc/self/stat (UNIX98 pts = major 136-143, minor = pts index).
-TTY="$1"
-[ -c "$TTY" ] || TTY=$(tty 2>/dev/null)
-if [ ! -c "$TTY" ]; then
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+export PATH
+
+# resolve_tty [hint] — find the pts to size. $1 is the launcher's $(tty);
+# then `tty` on our own stdin; then field 7 (tty_nr) of /proc/self/stat.
+# Sets TTY and returns 0 on success, 1 (TTY empty) on failure.
+resolve_tty() {
+  TTY="$1"
+  [ -c "$TTY" ] && return 0
+  TTY=$(tty 2>/dev/null)
+  [ -c "$TTY" ] && return 0
   NR=$(awk "{print \$7}" /proc/self/stat 2>/dev/null)
   case "$NR" in *[!0-9]*|"") NR=0 ;; esac
   if [ "$NR" -gt 0 ]; then
@@ -24,12 +48,27 @@ if [ ! -c "$TTY" ]; then
     MIN=$((NR % 256))
     if [ "$MAJ" -ge 136 ] && [ "$MAJ" -le 143 ]; then
       TTY="/dev/pts/$MIN"
+      [ -c "$TTY" ] && return 0
     fi
   fi
-fi
-[ -c "$TTY" ] || exit 0
+  TTY=""
+  return 1
+}
+
+TTY=""
+resolve_tty "$1" || true
 LAST=""
 while :; do
+  if [ ! -c "$TTY" ]; then
+    # No pts resolved yet (or the launch hint was bogus): keep trying instead
+    # of exiting — a dead watcher sizes nothing for the rest of the session.
+    if resolve_tty "$1"; then
+      LAST=""
+    else
+      sleep 1
+      continue
+    fi
+  fi
   SZ=$(cat /tmp/emuxsize 2>/dev/null | head -n 1)
   if [ -n "$SZ" ] && [ "$SZ" != "$LAST" ]; then
     R=${SZ%% *}

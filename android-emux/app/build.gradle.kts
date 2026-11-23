@@ -561,8 +561,29 @@ android {
         //    xfce names (xfce4-session, xfce4-panel, xfdesktop, xfconfd,
         //    xfwm4, dbus-daemon, tumbler) so the app close can reap them.
         //    ENV_VERSION 108 re-seeds emux-x11 onto existing rootfs trees.
-        versionCode = 239
-        versionName = "0.2.139"
+        // v0.2.140 vc240: TERMINAL PTY SIZE NEVER APPLIED (field 22 Nov 2026).
+        // 1. `stty size` stayed 0 0 and COLUMNS=80 while /tmp/emuxsize
+        //    correctly held "47 164": the emux-winsize watcher exited
+        //    silently on EVERY session start, before ever entering its loop.
+        //    Root cause: the guest dash inherits the HOST-style sessionEnv
+        //    PATH (<linuxRoot>/usr/bin:...:/system/bin — host-absolute
+        //    paths that do not exist inside proot), so no bare guest binary
+        //    resolved — `tty`, `awk`, `stty`, `cat`, `sleep` all "not found"
+        //    (field: "sh: 1: tty: not found"). The launcher's $(tty) failed
+        //    so $1 arrived empty, the in-script `tty` fallback failed the
+        //    same way, and the /proc/self/stat fallback failed because awk
+        //    was not found either. emux-winsize now sets a sane GUEST PATH
+        //    first, and its TTY resolution retries in the loop instead of
+        //    exiting.
+        // 2. emux-init.sh resolves the pts by ABSOLUTE path
+        //    (/usr/bin/tty, /bin/tty fallback) and applies the size from
+        //    /tmp/emuxsize directly at shell start (absolute-path stty on
+        //    stdin, which IS the pts), so a shell starting with a
+        //    missing/dead watcher still gets real geometry from the first
+        //    prompt. ENV_VERSION 109 re-seeds emux-winsize + emux-init.sh
+        //    onto existing rootfs trees.
+        versionCode = 240
+        versionName = "0.2.140"
 
         ndk {
             abiFilters += listOf("arm64-v8a", "armeabi-v7a", "x86_64")

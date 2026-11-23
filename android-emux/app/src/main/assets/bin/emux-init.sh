@@ -113,9 +113,26 @@ if [ -x "$PROOT" ]; then
         # geometry). Escaped \$ hands the literal $(tty) to the guest dash,
         # whose stdin IS the pts. The guard keeps a rootfs without the seeded
         # watcher (interrupted bootstrap) from printing a not-found line.
-        exec "$PROOT" --link2symlink -0 -r "$ROOT" -b /dev -b /proc -b /sys $SHB -w /root /usr/bin/script -qfc "( [ -x /usr/local/bin/emux-winsize ] && /usr/local/bin/emux-winsize \$(tty) >/dev/null 2>&1 ) & exec /bin/bash -l" /dev/null
+        # v0.2.140 FIELD FIX: the escaped $(tty) STILL failed in the guest —
+        # the inherited PATH is host-style (FsLayout.sessionEnv), so no bare
+        # guest binary resolves inside proot at this point ("sh: 1: tty: not
+        # found" in the field screenshot), and the watcher then died silently
+        # on its own unresolvable `tty`/`awk` fallbacks, so the size stayed
+        # 0 0 forever. Two fixes here: (a) resolve the pts by ABSOLUTE path
+        # (/usr/bin/tty, /bin/tty fallback) so $1 is correct whatever PATH is
+        # — and capture it in the FOREGROUND first: a $(...) inside the
+        # backgrounded ( ... ) & subshell runs with stdin=/dev/null (POSIX),
+        # so `tty` there prints "not a tty" and the watcher would receive
+        # that literal text as $1; (b) belt-and-braces: before exec'ing the
+        # login shell, apply the size from /tmp/emuxsize directly
+        # (absolute-path stty on stdin, which IS the pts) so a shell that
+        # starts with a missing/dead watcher still gets real geometry from
+        # the first prompt. The watcher itself now also sets a sane guest
+        # PATH first (see emux-winsize) and retries TTY resolution instead
+        # of exiting.
+        exec "$PROOT" --link2symlink -0 -r "$ROOT" -b /dev -b /proc -b /sys $SHB -w /root /usr/bin/script -qfc "_TTY=\$(/usr/bin/tty 2>/dev/null || /bin/tty 2>/dev/null); ( [ -x /usr/local/bin/emux-winsize ] && /usr/local/bin/emux-winsize \"\$_TTY\" >/dev/null 2>&1 ) & if read -r _R _C </tmp/emuxsize 2>/dev/null; then /usr/bin/stty rows \$_R cols \$_C 2>/dev/null || /bin/stty rows \$_R cols \$_C 2>/dev/null; fi; exec /bin/bash -l" /dev/null
       fi
-      exec "$PROOT" --link2symlink -0 -r "$ROOT" -b /dev -b /proc -b /sys $SHB -w /root /usr/bin/script -qfc "( [ -x /usr/local/bin/emux-winsize ] && /usr/local/bin/emux-winsize \$(tty) >/dev/null 2>&1 ) & exec /bin/sh -l" /dev/null
+      exec "$PROOT" --link2symlink -0 -r "$ROOT" -b /dev -b /proc -b /sys $SHB -w /root /usr/bin/script -qfc "_TTY=\$(/usr/bin/tty 2>/dev/null || /bin/tty 2>/dev/null); ( [ -x /usr/local/bin/emux-winsize ] && /usr/local/bin/emux-winsize \"\$_TTY\" >/dev/null 2>&1 ) & if read -r _R _C </tmp/emuxsize 2>/dev/null; then /usr/bin/stty rows \$_R cols \$_C 2>/dev/null || /bin/stty rows \$_R cols \$_C 2>/dev/null; fi; exec /bin/sh -l" /dev/null
     fi
     if [ -f "$ROOT/bin/bash" ]; then
       exec "$PROOT" --link2symlink -0 -r "$ROOT" -b /dev -b /proc -b /sys $SHB -w /root /bin/bash -l
