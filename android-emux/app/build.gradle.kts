@@ -582,8 +582,38 @@ android {
         //    missing/dead watcher still gets real geometry from the first
         //    prompt. ENV_VERSION 109 re-seeds emux-winsize + emux-init.sh
         //    onto existing rootfs trees.
-        versionCode = 240
-        versionName = "0.2.140"
+        // v0.2.141 vc241: CRASH-RESPAWN DUPLICATE XFCE SESSIONS + DOUBLE
+        // WHITE TERMINALS (field 23 Nov 2026). 1. Firefox crash -> a second
+        // xfce session beside the dead one, dead input, zoomed out: the
+        // DesktopService respawn reused the same EMUX_DESKTOP_ID, so
+        // killDesktopGuests() pass 1 skipped the old tree (pass 2's age
+        // filter skipped it too - it started during this visit) and pass 3
+        // had no xfce names; the respawn now ROTATES the desktop id before
+        // the sweep, so pass 1 reaps the old tree. 2. Self-heal rotation
+        // deleted /tmp/emux_wm_launched and relaunched start_wm even while
+        // the old session lived (the start_wm guard also required the
+        // marker): the guard is now wm_running-only, kill_dup runs before
+        // AND after start_wm on the self-heal path, and kill_dup keeps the
+        // session on the LIVE display (display from /proc/PID/environ) and
+        // kills a lone dead-display one - the oldest-first rule kept the
+        // dead-display session after a rotation. 3. The governor exited
+        // after 20 min (240 ticks), so a crash "after a bit" was
+        // unguarded: it now runs the session lifetime (8640 ticks = 12 h)
+        // and exits only when the launcher dies or no server AND no WM
+        // remain for two ticks. 4. Two WHITE terminals at every xfce
+        // start, the first unclosable under the top panel: apply_scale
+        // never set xterm colours (xterm reads X resources, not the
+        // GTK/xfce theme) - dark colours now merged, marker per-server so
+        // a rotation re-applies; the immediate, REST-pass, self-heal and
+        // main-tail forced-terminal sites all fired under a full session
+        // (their guards only checked tint2/pcmanfm, which never run under
+        // xfce) - they now skip full sessions (full_session_wm), the
+        // immediate block touches /tmp/emux_xterm_launched so the
+        // main-tail block cannot open a second one, and a legitimately
+        // forced terminal gets -geometry 96x28+60+40 so its title bar
+        // clears the top panel. ENV_VERSION 110 re-seeds emux-x11.
+        versionCode = 241
+        versionName = "0.2.141"
 
         ndk {
             abiFilters += listOf("arm64-v8a", "armeabi-v7a", "x86_64")

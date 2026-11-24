@@ -1673,7 +1673,7 @@ class DesktopService(
                 // and EMUX_SCALE (HiDPI: GTK/Qt/Xft scale factor for the guest).
                 desktopId = "d" + System.currentTimeMillis()
                 startClipboardBridge()   // v0.2.111
-                val cmd = "EMUX_DESKTOP_ID=$desktopId EMUX_SCALE=${uiScale()} emux-x11 $wm $desktopGeometry $displayNum"
+                var cmd = "EMUX_DESKTOP_ID=$desktopId EMUX_SCALE=${uiScale()} emux-x11 $wm $desktopGeometry $displayNum"
                 xRespawns = 0
                 // v0.1.80: tell the user WHERE the full log lives - the pane
                 // only shows a scrolling window; the diag file never rotates.
@@ -1736,6 +1736,19 @@ class DesktopService(
                                         "v0.2.77: x11 server died AFTER frame $frameId (rc=${xSession?.exitCode}) - " +
                                             "respawning the whole X session (#$xRespawns)")
                                     kotlinx.coroutines.delay(2_000)
+                                    // v0.2.141: rotate the desktop id BEFORE
+                                    // the sweep, so killDesktopGuests() pass 1
+                                    // can reap the OLD tree. The respawn used
+                                    // to reuse the same EMUX_DESKTOP_ID, and
+                                    // pass 1 skips the live id - so the old
+                                    // xfce session survived and a second one
+                                    // started beside it (field 2026-11-23:
+                                    // Firefox crash -> second session, dead
+                                    // input, zoomed out). Pass 2's age filter
+                                    // cannot help either: the old tree started
+                                    // during this visit, so it is too young.
+                                    desktopId = "d" + System.currentTimeMillis()
+                                    cmd = "EMUX_DESKTOP_ID=$desktopId EMUX_SCALE=${uiScale()} emux-x11 $wm $desktopGeometry $displayNum"
                                     runCatching { killDesktopGuests() }
                                     xSession = TerminalSession(9001 + xRespawns, ctx, root, cmd).also { it.start() }
                                     pumpDiag("x11", xSession!!)
@@ -1755,6 +1768,14 @@ class DesktopService(
                                 com.emux.EmuXLog.i("desktop: x11 session died before first frame - respawning (#$xRespawns)")
                                 noteInfo("x11 session died pre-frames - respawning (#$xRespawns)")
                                 kotlinx.coroutines.delay(2_000)
+                                // v0.2.141: rotate the desktop id BEFORE the
+                                // sweep, as in the post-frame respawn above:
+                                // reusing the same EMUX_DESKTOP_ID made
+                                // killDesktopGuests() pass 1 skip the old
+                                // tree, and pass 2's age filter skips it too
+                                // (it started during this visit).
+                                desktopId = "d" + System.currentTimeMillis()
+                                cmd = "EMUX_DESKTOP_ID=$desktopId EMUX_SCALE=${uiScale()} emux-x11 $wm $desktopGeometry $displayNum"
                                 // v0.1.80: host-authoritative cleanup BEFORE the
                                 // new session: proot tracees (a half-alive Xvfb
                                 // holding :0/tcp-6000) survive guest-side kills,

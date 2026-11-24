@@ -596,7 +596,15 @@ btn_watch() {
 # v0.2.108: X resources for the chosen UI scale - once per session, before
 # the first client so every toolkit reads the same DPI.
 apply_scale() {
-  [ -e /tmp/emux_scale_applied ] && return 0
+  # v0.2.141: the marker is per-SERVER, not per-launcher: a display
+  # rotation starts a new Xvfb with an empty resource database, so a
+  # marker left by the old server would skip the merge and leave every
+  # new xterm white again. Store the display in the marker and re-apply
+  # when it differs (the launcher clears the marker at start anyway).
+  if [ -e /tmp/emux_scale_applied ]; then
+    read -r _SCD < /tmp/emux_scale_applied 2>/dev/null
+    [ "$_SCD" = "$DISPLAY" ] && return 0
+  fi
   command -v xrdb >/dev/null 2>&1 || return 0
   # v0.2.111 xterm that behaves like a modern terminal (field: "on the
   # terminal inside the desktop I cannot copy nor paste"): a scalable font
@@ -609,6 +617,14 @@ apply_scale() {
   cat > /tmp/emux-xterm.ad <<'XTAD'
 XTerm*faceName: Monospace
 XTerm*faceSize: 11
+! v0.2.141 DARK xterm: xterm reads X resources, not the GTK/xfce theme,
+! and this file never set colours - so every forced terminal opened with
+! xterm's built-in white background on a dark desktop (field 2026-11-23:
+! two white terminals at every xfce start, theme dark). Dark background,
+! light text, matching cursor.
+XTerm*background: #1e1e2e
+XTerm*foreground: #d6d6d6
+XTerm*cursorColor: #d6d6d6
 XTerm*selectToClipboard: false
 XTerm*scrollBar: false
 XTerm*saveLines: 5000
@@ -634,8 +650,21 @@ XTerm*VT100.translations: #override \n\
 XTAD
   xrdb -merge /tmp/emux-xterm.ad >/dev/null 2>&1
   printf 'Xft.dpi: %s\nXcursor.size: %s\n' "$((96 * EMUX_SCALE))" "$((24 * EMUX_SCALE))" \
-    | xrdb -merge >/dev/null 2>&1 && touch /tmp/emux_scale_applied && \
+    | xrdb -merge >/dev/null 2>&1 && printf '%s\n' "$DISPLAY" > /tmp/emux_scale_applied && \
     echo "emux-x11: UI scale ${EMUX_SCALE}x (Xft.dpi $((96 * EMUX_SCALE)))" >&2
+}
+# v0.2.141: a full session (xfce/gnome/mate/lxqt) brings its own panel,
+# icons and menu - a forced xterm on top of it is the bug, not the fix.
+# Field 2026-11-23: two white terminals at every xfce start. The v0.2.45
+# guard only checked tint2/pcmanfm, which never run under a full session,
+# so the immediate, REST-pass, self-heal and main-tail launch sites ALL
+# fired under xfce. Skip the forced terminal when the requested WM is a
+# full session; the dock's Terminal icon opens one on demand.
+full_session_wm() {
+  case "$1" in
+    startxfce4|xfce4-session|gnome-session|gnome-shell|startlxqt|lxqt-session|lxsession|mate-session|mate-session-binary) return 0 ;;
+  esac
+  return 1
 }
 start_wm() {
   apply_scale
@@ -669,7 +698,16 @@ start_wm() {
   # same mistake as the governor watchdog: startxfce4 execs away into
   # xfce4-session, so the guard never fired and every call launched another
   # full session. wm_running() checks the process that actually stays alive.
-  if [ -e /tmp/emux_wm_launched ] && wm_running "$(basename "$1")"; then
+  # v0.2.141: the guard ALSO required the marker file - but the self-heal
+  # path deletes the marker on purpose, so it launched a second session
+  # even while the old one was alive (field 2026-11-23: Firefox crash ->
+  # second session). The live-process check is authoritative: if the
+  # session process is running, do not launch another one, marker or not.
+  # A session stuck on a DEAD display is removed first by
+  # kill_dup_xfce_sessions() (self-heal and the governor tick call it
+  # before any start_wm decision), so a live process here means a live
+  # session.
+  if wm_running "$(basename "$1")"; then
     echo "emux-x11: $(basename "$WM_BIN") already running - not starting a second one" >&2
     return 0
   fi
@@ -952,11 +990,36 @@ seed_if_changed() {
 # Called at the top of start_furniture() (before the full-session early
 # return) and in the governor tick before any relaunch decision, so a
 # field install heals itself on the first tick after the update.
+# v0.2.141: which display is live right now? /tmp/emux_display_num is
+# written by the launcher at (re)start; $DISPLAY is the fallback.
+live_display_num() {
+  LDN=$(tr -dc '0-9' < /tmp/emux_display_num 2>/dev/null)
+  [ -n "$LDN" ] && { echo "$LDN"; return 0; }
+  case "${DISPLAY:-}" in
+    *:*)
+      LDN=${DISPLAY##*:}
+      LDN=$(printf '%s' "$LDN" | tr -dc '0-9')
+      [ -n "$LDN" ] && { echo "$LDN"; return 0; } ;;
+  esac
+  return 1
+}
+# v0.2.141: the display number a process was started on, from its
+# environment. Empty when unreadable - callers must never kill on an
+# unknown display.
+session_display_num() {
+  [ -n "$1" ] || return 1
+  SDN=$(tr '\0' '\n' < "/proc/$1/environ" 2>/dev/null | sed -n 's/^DISPLAY=//p' | head -1)
+  [ -n "$SDN" ] || return 1
+  SDN=${SDN##*:}
+  SDN=$(printf '%s' "$SDN" | tr -dc '0-9')
+  [ -n "$SDN" ] && echo "$SDN"
+}
 kill_dup_xfce_sessions() {
   KDXOUT=$(ps -eo pid=,ppid=,stat=,etimes=,args= 2>/dev/null)
   [ -n "$KDXOUT" ] || return 0
   # Oldest live session (largest etimes) + the full kill list, in one awk.
   KDXPLAN=$(printf '%s\n' "$KDXOUT" | awk -v me="$$" '
+    BEGIN { age = -1 }
     $1 != me && $3 !~ /^Z/ {
       a = $5; sub(".*/", "", a); b = $6; sub(".*/", "", b)
       if (a == "xfce4-session" || b == "xfce4-session") {
@@ -965,15 +1028,50 @@ kill_dup_xfce_sessions() {
         list = list " " $1
       }
     }
-    END { if (n > 1) print keep, list }')
+    END { if (n >= 1) print keep, list }')
   [ -n "$KDXPLAN" ] || return 0
   set -- $KDXPLAN
   KDXKEEP="$1"
-  echo "emux-x11: killing duplicate xfce4-session(s), keeping oldest (pid $KDXKEEP)" >&2
   shift
-  # NB: the list still carries the kept pid (it is "keep + list") - the
-  # guard below is what actually spares it.
-  for KDXP in "$@"; do [ "$KDXP" != "$KDXKEEP" ] && kill "$KDXP" 2>/dev/null; done
+  KDXN=$#
+  # v0.2.141: keep the session on the LIVE display, not merely the oldest.
+  # After a display rotation the oldest session is the one on the DEAD
+  # display - keeping it killed the live one (field 2026-11-23: Firefox
+  # crash -> second session, dead input, zoomed out). Prefer a session
+  # whose DISPLAY matches the current display; fall back to the oldest
+  # when no session's display is readable or matching.
+  KDXLIVE=$(live_display_num 2>/dev/null)
+  if [ -n "$KDXLIVE" ]; then
+    for KDXP in "$@"; do
+      KDXD=$(session_display_num "$KDXP" 2>/dev/null)
+      if [ -n "$KDXD" ] && [ "$KDXD" = "$KDXLIVE" ]; then KDXKEEP="$KDXP"; break; fi
+    done
+  fi
+  KDXDEADBUS=""
+  if [ "$KDXN" -gt 1 ]; then
+    echo "emux-x11: killing duplicate xfce4-session(s), keeping pid $KDXKEEP" >&2
+    # NB: the list still carries the kept pid (it is "keep + list") - the
+    # guard below is what actually spares it.
+    for KDXP in "$@"; do [ "$KDXP" != "$KDXKEEP" ] && kill "$KDXP" 2>/dev/null; done
+  elif [ "$KDXN" = 1 ]; then
+    # v0.2.141: a SINGLE session on a dead display is a zombie the rotation
+    # left behind - kill it too. Every call site follows with a start_wm
+    # decision, so a relaunch follows. A session whose display cannot be
+    # read is never killed on display grounds.
+    KDXD=$(session_display_num "$1" 2>/dev/null)
+    if [ -n "$KDXD" ] && [ -n "$KDXLIVE" ] && [ "$KDXD" != "$KDXLIVE" ]; then
+      echo "emux-x11: killing lone xfce4-session (pid $1) on dead display :$KDXD (live :$KDXLIVE)" >&2
+      # Remember its bus first: with no kept session the xfconfd sweep
+      # below has nothing to compare against, so match the dead bus.
+      KDXDEADBUS=$(tr '\0' '\n' < "/proc/$1/environ" 2>/dev/null | grep '^DBUS_SESSION_BUS_ADDRESS=' 2>/dev/null)
+      kill "$1" 2>/dev/null
+      KDXKEEP=""
+    else
+      return 0
+    fi
+  else
+    return 0
+  fi
   sleep 1
   # TERM ignored: finish them, then sweep what the dead sessions orphaned.
   KDXOUT=$(ps -eo pid=,ppid=,stat=,args= 2>/dev/null)
@@ -987,17 +1085,31 @@ kill_dup_xfce_sessions() {
     }')
   for KDXP in $KDXORPH; do kill -9 "$KDXP" 2>/dev/null; done
   # xfconfd by session bus: the kept session's bus is the one that survives.
-  KDXBUS=$(tr '\0' '\n' < "/proc/$KDXKEEP/environ" 2>/dev/null | grep '^DBUS_SESSION_BUS_ADDRESS=' 2>/dev/null)
-  [ -n "$KDXBUS" ] || return 0
-  KDXCONF=$(printf '%s\n' "$KDXOUT" | awk -v me="$$" '
-    $1 != me && $3 !~ /^Z/ {
-      a = $4; sub(".*/", "", a); b = $5; sub(".*/", "", b)
-      if (a == "xfconfd" || b == "xfconfd") print $1
-    }')
-  for KDXP in $KDXCONF; do
-    KDXPBUS=$(tr '\0' '\n' < "/proc/$KDXP/environ" 2>/dev/null | grep '^DBUS_SESSION_BUS_ADDRESS=' 2>/dev/null)
-    [ -n "$KDXPBUS" ] && [ "$KDXPBUS" != "$KDXBUS" ] && kill "$KDXP" 2>/dev/null
-  done
+  if [ -n "$KDXKEEP" ]; then
+    KDXBUS=$(tr '\0' '\n' < "/proc/$KDXKEEP/environ" 2>/dev/null | grep '^DBUS_SESSION_BUS_ADDRESS=' 2>/dev/null)
+    [ -n "$KDXBUS" ] || return 0
+    KDXCONF=$(printf '%s\n' "$KDXOUT" | awk -v me="$$" '
+      $1 != me && $3 !~ /^Z/ {
+        a = $4; sub(".*/", "", a); b = $5; sub(".*/", "", b)
+        if (a == "xfconfd" || b == "xfconfd") print $1
+      }')
+    for KDXP in $KDXCONF; do
+      KDXPBUS=$(tr '\0' '\n' < "/proc/$KDXP/environ" 2>/dev/null | grep '^DBUS_SESSION_BUS_ADDRESS=' 2>/dev/null)
+      [ -n "$KDXPBUS" ] && [ "$KDXPBUS" != "$KDXBUS" ] && kill "$KDXP" 2>/dev/null
+    done
+  elif [ -n "$KDXDEADBUS" ]; then
+    # No kept session: kill the dead session's own settings daemon (its
+    # bus matches the dead session's; any other bus is left alone).
+    KDXCONF=$(printf '%s\n' "$KDXOUT" | awk -v me="$$" '
+      $1 != me && $3 !~ /^Z/ {
+        a = $4; sub(".*/", "", a); b = $5; sub(".*/", "", b)
+        if (a == "xfconfd" || b == "xfconfd") print $1
+      }')
+    for KDXP in $KDXCONF; do
+      KDXPBUS=$(tr '\0' '\n' < "/proc/$KDXP/environ" 2>/dev/null | grep '^DBUS_SESSION_BUS_ADDRESS=' 2>/dev/null)
+      [ -n "$KDXPBUS" ] && [ "$KDXPBUS" = "$KDXDEADBUS" ] && kill "$KDXP" 2>/dev/null
+    done
+  fi
   return 0
 }
 start_furniture() {
@@ -3126,17 +3238,43 @@ fi
 # resurrect a terminal window - the desktop could never stop looking
 # like a terminal. Now the watchdog only forces a terminal when the
 # whole desktop (WM + panel + icons) is gone.
+# v0.2.141: the governor's parent is the launcher (this script). $$ in the
+# subshell is the launcher's pid (POSIX) - record it so the governor can
+# exit when the launcher dies instead of ticking forever after a close.
+GOV_PARENT=$$
 ( trap '' HUP
   i=0
   APTTRIED=0
+  GOVDEAD=0
   # v0.2.50: ~20 min window + self-furnishing: on a fresh device the first
   # desktop open must install tint2/pcmanfm/mousepad with ZERO manual
   # terminal steps (user request: "make the apk auto do these installs -
   # I want to use it on another device"). If the binaries are missing and
   # no apt is running, the governor installs them itself (logged to
   # /tmp/emux_rest.log); start_furniture launches them the tick they land.
-  while [ "$i" -lt 240 ]; do
+  # v0.2.141: 240 ticks (20 min) left a crash "after a bit" unguarded
+  # (field 2026-11-23: Firefox crash, second session, dead input - the
+  # governor was long gone, so no dedup, no agent relaunch). The window
+  # is now the session lifetime (12 h cap) with two real exits: the
+  # launcher is gone, or the server AND every WM are gone for two ticks
+  # running (nothing left to guard - and a closed desktop stops ticking
+  # within ~10 s). Two ticks, not one: a display rotation briefly has
+  # no server and no WM, and must not kill the guard mid-rotation.
+  while [ "$i" -lt 8640 ]; do
     sleep 5
+    if ! kill -0 "$GOV_PARENT" 2>/dev/null; then
+      echo "emux-x11: governor: launcher (pid $GOV_PARENT) gone - exiting" >&2
+      break
+    fi
+    if ! x_up && ! wm_running "$WM" && ! running0 openbox && ! running0 icewm && ! running0 fluxbox && ! running0 twm; then
+      GOVDEAD=$((GOVDEAD + 1))
+      if [ "$GOVDEAD" -ge 2 ]; then
+        echo "emux-x11: governor: no server and no WM left - exiting" >&2
+        break
+      fi
+    else
+      GOVDEAD=0
+    fi
     # v0.2.67: keep the FALLBACK transport alive. The agent is the only input
     # path that does not depend on our persistent control-plane socket; if
     # Android's LMK reaps it mid-session (no root => oom protection denied),
@@ -3274,17 +3412,30 @@ fi
 # keep it as the fallback when they are not installed yet (first run,
 # while REST is still installing them).
 start_furniture
-if running0 tint2 || running0 pcmanfm; then
-  echo "emux-x11: desktop furniture up (panel/desktop) - skipping forced terminal window" >&2
+# v0.2.141: apply the X resources (incl. the dark xterm colours) BEFORE
+# the first client can launch - start_wm used to be the only caller, so
+# this terminal opened before xrdb ever ran and stayed white.
+apply_scale
+if running0 tint2 || running0 pcmanfm || full_session_wm "$WM"; then
+  echo "emux-x11: desktop furniture up (panel/desktop) or full session - skipping forced terminal window" >&2
 else
   for vc in /usr/bin/xterm /usr/bin/xclock /usr/bin/xeyes; do
     if [ -x "$vc" ]; then
       echo "emux-x11: launching visibility client $vc on $DISPLAY (immediate)" >&2
-      nohup "$vc" >/tmp/vis.log 2>&1 </dev/null &
+      # v0.2.141: geometry clears the top panel (a bare xterm opens at
+      # 0,0 with its title bar under it - field 2026-11-23: the first
+      # white terminal could not be closed), and the marker stops the
+      # main-tail launch below from opening a second one (this block
+      # never touched it - the second white terminal).
+      case "$vc" in
+        *xterm*) nohup "$vc" -geometry 96x28+60+40 >/tmp/vis.log 2>&1 </dev/null & ;;
+        *) nohup "$vc" >/tmp/vis.log 2>&1 </dev/null & ;;
+      esac
       VPID=$!
       sleep 1
       if kill -0 "$VPID" 2>/dev/null; then
         echo "emux-x11: visibility client alive (pid $VPID, $vc)" >&2
+        touch /tmp/emux_xterm_launched
       else
         echo "emux-x11: visibility client DEAD on launch ($vc); vis.log:" >&2
         tail -3 /tmp/vis.log >&2 2>/dev/null
@@ -3365,11 +3516,17 @@ if x_up && [ "$APT_BRANCH" = 1 ]; then
       # v0.2.45: only as a last resort - if start_furniture already
       # brought the panel/desktop up, a forced terminal just hides
       # the GUI desktop again.
-      if [ ! -e /tmp/emux_xterm_launched ] && ! running0 tint2 && ! running0 pcmanfm && ! running0 mate-panel; then
+      # v0.2.141: skip under a full session (full_session_wm) - the
+      # session's own panel/icons are the visible thing; and a geometry
+      # that clears the top panel when a terminal is legitimately forced.
+      if [ ! -e /tmp/emux_xterm_launched ] && ! running0 tint2 && ! running0 pcmanfm && ! running0 mate-panel && ! full_session_wm "$WM"; then
         for vc in /usr/bin/xterm /usr/bin/uxterm /usr/bin/rxvt /usr/bin/xclock /usr/bin/xeyes; do
           if [ -x "$vc" ]; then
             echo "emux-x11: launching visibility client $vc" >&2
-            "$vc" >/tmp/xterm.log 2>&1 &
+            case "$vc" in
+              *xterm*|*rxvt*) "$vc" -geometry 96x28+60+40 >/tmp/xterm.log 2>&1 & ;;
+              *) "$vc" >/tmp/xterm.log 2>&1 & ;;
+            esac
             touch /tmp/emux_xterm_launched
             break
           fi
@@ -3406,8 +3563,17 @@ if ! verify_x; then
     : > /tmp/emux_x_up 2>/dev/null
     rm -f /tmp/emux_wm_launched /tmp/emux_xterm_launched /tmp/emux_root_painted 2>/dev/null
     paint_root
+    # v0.2.141: dedup BEFORE the relaunch decision - the old session may
+    # still be alive on the dead display, and the marker was deleted above
+    # precisely so start_wm would relaunch. kill_dup keeps the session on
+    # the live display and kills dead-display ones, so start_wm (guard now
+    # wm_running-only) launches only if no live session exists. Called
+    # again after start_wm: a spurious rotation (old server actually alive)
+    # leaves two sessions, and the dedup keeps the live-display one.
+    kill_dup_xfce_sessions
     start_wm "$WM"
-    if [ -x /usr/bin/xterm ] && [ ! -e /tmp/emux_xterm_launched ]; then
+    kill_dup_xfce_sessions
+    if [ -x /usr/bin/xterm ] && [ ! -e /tmp/emux_xterm_launched ] && ! full_session_wm "$WM"; then
       nohup /usr/bin/xterm -geometry 96x28+60+40 >/tmp/xterm.log 2>&1 </dev/null &
       touch /tmp/emux_xterm_launched
     fi
@@ -3447,9 +3613,12 @@ start_wm "$WM" || {
 # v0.2.45: ...but NOT when the visual desktop is already up. Panel +
 # desktop icons are the visible thing now; a forced terminal on top
 # of them is the bug the user reported, not the fix.
+# v0.2.141: skip under a full session (full_session_wm), and give a
+# legitimately forced terminal a geometry that clears the top panel (a
+# bare xterm opens at 0,0 with its title bar under it).
 if [ -e /tmp/emux_wm_launched ] && [ ! -e /tmp/emux_xterm_launched ] \
-   && [ -x /usr/bin/xterm ] && ! running0 tint2 && ! running0 pcmanfm && ! running0 mate-panel; then
-  /usr/bin/xterm >/tmp/xterm.log 2>&1 &
+   && [ -x /usr/bin/xterm ] && ! running0 tint2 && ! running0 pcmanfm && ! running0 mate-panel && ! full_session_wm "$WM"; then
+  /usr/bin/xterm -geometry 96x28+60+40 >/tmp/xterm.log 2>&1 &
   touch /tmp/emux_xterm_launched
 fi
 # v0.2.45: report the desktop, not just the server, a few seconds in.
