@@ -612,8 +612,35 @@ android {
         // main-tail block cannot open a second one, and a legitimately
         // forced terminal gets -geometry 96x28+60+40 so its title bar
         // clears the top panel. ENV_VERSION 110 re-seeds emux-x11.
-        versionCode = 241
-        versionName = "0.2.141"
+        // v0.2.142 vc242: FIREFOX-OPEN HARDENING (field 24 Nov 2026).
+        // Opening Firefox killed the desktop EVERY time (zoom change,
+        // black screen, dead/laggy desktop): Firefox's memory spike let
+        // the Android low-memory killer take out Xvfb/xfce4-session (no
+        // oom protection without root), the respawn adopted a server at
+        // the wrong geometry and restarted twice (two black screens, a
+        // zoom jump), the capture fell back from -fbdir to GetImage and
+        // stayed there, and double-forked xfconfd/dbus-daemon survived
+        // the respawn and fought the new session over xfconf. 1. LIGHTER
+        // FIREFOX: emux-x11 seeds emux-firefox-light, which writes a
+        // low-memory user.js into every Firefox profile at seed time and
+        // at browser launch (dom.ipc.processCount 8->2,
+        // dom.ipc.processCount.webIsolated 4->1,
+        // browser.sessionstore.resume_from_crash=false so the restore
+        // set stops growing after every crash,
+        // browser.tabs.unloadOnLowMemory=true). 2. GEOMETRY MISMATCH:
+        // the restart now waits for the wrong-geometry server's port to
+        // go silent (bounded) before starting the desktop, so the new
+        // launcher cannot re-adopt the dying server, and a restart
+        // already in flight cannot be queued twice. 3. STALE DAEMONS:
+        // killDesktopGuests() gains a dead-bus/age pass that reaps the
+        // previous visit's xfconfd/dbus-daemon even when young, and
+        // kill_dup_xfce_sessions() reaps orphaned session daemons whose
+        // display has no live session. 4. FBDIR DROP: after a drop the
+        // capture retries the map (bounded, 2 tries) instead of staying
+        // on GetImage for the rest of the connection. ENV_VERSION 111
+        // re-seeds emux-x11.
+        versionCode = 242
+        versionName = "0.2.142"
 
         ndk {
             abiFilters += listOf("arm64-v8a", "armeabi-v7a", "x86_64")

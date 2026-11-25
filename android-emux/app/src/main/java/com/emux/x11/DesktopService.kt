@@ -505,19 +505,52 @@ class DesktopService(
                     // adopts the OLD server at the OLD geometry and the setting
                     // silently does nothing. Verify against the live server and
                     // fix it once, loudly, instead of never.
+                    // v0.2.142: the old fix restarted with a FIXED 2.5 s wait,
+                    // and a dying server can still answer after that - so the
+                    // new launcher re-adopted the SAME wrong-geometry server
+                    // and the mismatch fired again (two black screens and a
+                    // zoom jump per Firefox crash). Restart cleanly instead:
+                    // stop, then WAIT for the old server's port to go silent
+                    // (bounded, 10 s) before starting the desktop, so the new
+                    // launcher cannot re-adopt it and must launch fresh at
+                    // the requested geometry. If the port never goes silent
+                    // the server is unkillable - start anyway (startDesktop
+                    // adopts it; a wrong-geometry desktop beats none) and
+                    // the cap still stops any loop. One restart per
+                    // mismatch: a second capture connection cannot queue
+                    // another while one is in flight.
                     if (sessionLongSide > 0 && maxOf(w, h) != sessionLongSide &&
-                        sessionLongSide == captureLongSide() && geometryFixes < 2
+                        sessionLongSide == captureLongSide() && geometryFixes < 2 &&
+                        !geometryRestarting
                     ) {
                         geometryFixes++
+                        geometryRestarting = true
                         noteInfo(
                             "GEOMETRY MISMATCH: live server ${w}x${h} but the requested " +
                                 "long side is $sessionLongSide - the quality change did not " +
                                 "land; restarting the desktop once (fix #$geometryFixes)")
                         scope.launch {
-                            kotlinx.coroutines.delay(1_500)
-                            stop()
-                            kotlinx.coroutines.delay(2_500)
-                            startDesktop(wmCommand = lastWm)
+                            try {
+                                kotlinx.coroutines.delay(1_500)
+                                stop()
+                                // v0.2.142: wait for the wrong-geometry server
+                                // to actually die before starting the desktop
+                                // - the fixed 2.5 s wait let a still-answering
+                                // server be re-adopted at the old geometry.
+                                var silent = false
+                                var waited = 0
+                                while (!silent && waited < 20) {
+                                    silent = !portAnswering(6000 + displayNum)
+                                    if (!silent) { kotlinx.coroutines.delay(500); waited++ }
+                                }
+                                noteInfo(
+                                    "GEOMETRY MISMATCH: old server port " +
+                                        (if (silent) "silent - starting fresh at the requested geometry"
+                                         else "still answering after 10 s - starting anyway (adoption fallback)"))
+                                startDesktop(wmCommand = lastWm)
+                            } finally {
+                                geometryRestarting = false
+                            }
                         }
                     }
                     var bandRows = 64
@@ -583,6 +616,15 @@ class DesktopService(
                             "(${w}x${h}x${pB * 8}, bpl=$fbMapBpl) - damage bands read from memory, not the socket"
                         else "native capture on :$displayNum: -fbdir map unavailable - damage bands via GetImage")
                     var fbSuspect = 0
+                    // v0.2.142: re-map retries after a drop (see the drop
+                    // below). A drop is not always a stale map - a maximised
+                    // Firefox repainting continuously can trip the >75%
+                    // disagreement test by timing alone - and a dropped map
+                    // stayed dropped for the whole connection, so the
+                    // desktop stayed on GetImage (~0.5-2 fps) after every
+                    // Firefox open. Two bounded retries, 30 sweeps apart.
+                    var fbDroppedAtSweep = -1
+                    var fbRemapTries = 0
                     // v0.2.108: once two socket sweeps in a row AGREE with the
                     // map, the healer itself reads the map too; every 8th sweep
                     // still goes over the socket as the cross-check.
@@ -924,9 +966,30 @@ class DesktopService(
                                 fbSuspect++
                                 if (fbSuspect >= 2) {
                                     closeFbMap()
+                                    fbDroppedAtSweep = sweepNo
                                     noteInfo("-fbdir map DISAGREES with the server ($fbMismatch/$fbChecked bands, twice) - dropped; damage bands back on GetImage")
                                 }
                             } else { fbSuspect = 0; fbGood++ }
+                        }
+                        // v0.2.142: retry the map after a drop, bounded.
+                        // The file on disk may be a NEW server's by now (a
+                        // rotation re-creates it) or the drop may have been
+                        // repaint timing - either way a re-map either proves
+                        // itself through the fbGood>=2 cross-check gate or
+                        // disagrees again and is dropped again. Two tries
+                        // per connection, 30 sweeps apart; after that the
+                        // connection stays on GetImage, as before.
+                        if (fbMap == null && fbDroppedAtSweep >= 0 && fbRemapTries < 2 &&
+                            sweepNo - fbDroppedAtSweep >= 30
+                        ) {
+                            fbRemapTries++
+                            fbDroppedAtSweep = sweepNo
+                            if (openFbMap(w, h)) {
+                                fbSuspect = 0; fbGood = 0
+                                noteInfo("-fbdir map re-established after drop (retry #$fbRemapTries) - damage bands back on the mapped framebuffer")
+                            } else {
+                                noteInfo("-fbdir map re-establish failed (retry #$fbRemapTries) - staying on GetImage")
+                            }
                         }
                         nativeGrabMs = System.currentTimeMillis() - t0
                         // v0.2.83: a sweep that ran to completion repainted the
@@ -1155,6 +1218,11 @@ class DesktopService(
     // the native loop). Capped for the whole process lifetime on purpose: a
     // server that keeps coming up at the wrong size must not restart-loop.
     @Volatile private var geometryFixes = 0
+    /** v0.2.142: a geometry-mismatch restart is already in flight - the
+     *  check must not queue a second one for the same mismatch. Reset
+     *  when the restart is launched (a genuinely new mismatch after it
+     *  may still fire once, cap permitting). */
+    @Volatile private var geometryRestarting = false
     @Volatile private var lastWm = "openbox"
     /** v0.2.108: EMUX_DESKTOP_ID of the live session ("" = none / stopping). */
     @Volatile private var desktopId = ""
@@ -2547,6 +2615,24 @@ class DesktopService(
      * whole desktop guest family and drops the X locks.
      */
     private fun killDesktopGuests() {
+        // v0.2.142: read one NUL-separated environ entry, or null.
+        // (Pass 1's marker check below predates this helper and is
+        // left as-is; the helper is used for the bus + live-id reads.)
+        fun envValue(env: String, key: String): String? {
+            val needle = "$key="
+            var at = env.indexOf(needle)
+            while (at >= 0) {
+                if (at == 0 || env[at - 1] == '\u0000') {
+                    val end = env.indexOf('\u0000', at).let { if (it < 0) env.length else it }
+                    return env.substring(at + needle.length, end)
+                }
+                at = env.indexOf(needle, at + 1)
+            }
+            return null
+        }
+        // v0.2.142: session-bus addresses of the old tree pass 1 kills
+        // (pass 1b below matches the previous visit's daemons by them).
+        val deadBuses = mutableSetOf<String>()
         // v0.2.108 THE FORCE-STOP EQUIVALENT. Field: a desktop that went stale
         // stayed stale across "Restart desktop" and only Force stop cured it.
         // The pattern sweep below knows Xvfb/openbox/tint2 by name, but a full
@@ -2573,10 +2659,67 @@ class DesktopService(
                 val end = s.indexOf('\u0000', i).let { if (it < 0) s.length else it }
                 val id = s.substring(i + "EMUX_DESKTOP_ID=".length, end)
                 if (live.isNotEmpty() && id == live) return@forEach
+                // v0.2.142: remember the old tree's session bus before
+                // killing it - pass 1b matches the previous visit's
+                // daemons by it (they lost the marker above).
+                envValue(s, "DBUS_SESSION_BUS_ADDRESS")?.let { deadBuses += it }
                 android.os.Process.killProcess(pid)
                 killed++
             }
             if (killed > 0) com.emux.EmuXLog.i("desktop: killed $killed process(es) of previous desktop session(s) by EMUX_DESKTOP_ID")
+        }
+        // v0.2.142 PASS 1b: reap the previous visit's session daemons.
+        // xfconfd and dbus-daemon double-fork and lose EMUX_DESKTOP_ID,
+        // so pass 1 cannot key on them, and pass 2's age filter spares
+        // them - they started during THIS visit, after
+        // desktopStartUpTicks (field 2026-11-23: a Firefox crash respawn
+        // left two settings daemons fighting over xfconf). Identify them
+        // by the OLD session, never the new one: (a) their session bus
+        // is one of the buses the killed old tree carried, or (b) they
+        // started before this sweep began - the new session has not
+        // launched yet, so nothing young belongs to it. A daemon with no
+        // readable bus AND an unreadable start time is never killed.
+        // Only the two daemon names are ever matched here - never a
+        // capture, agent or shell process. (A dbus-daemon's own
+        // environment carries no bus address - dbus-launch learns the
+        // address FROM the daemon - so the age rule is what catches it;
+        // xfconfd is a session child and usually matches by bus too.)
+        runCatching {
+            val me = android.os.Process.myPid()
+            val live = desktopId
+            val sweepTicks = runCatching {
+                (java.io.File("/proc/uptime").readText().trim().split(" ")[0].toDouble() * 100).toLong()
+            }.getOrDefault(Long.MAX_VALUE)
+            var killedDaemons = 0
+            java.io.File("/proc").listFiles()?.forEach { d ->
+                val pid = d.name.toIntOrNull() ?: return@forEach
+                if (pid == me) return@forEach
+                val cmd = runCatching {
+                    java.io.File(d, "cmdline").readBytes().decodeToString()
+                        .split('\u0000').firstOrNull().orEmpty().substringAfterLast('/')
+                }.getOrDefault("")
+                if (cmd != "xfconfd" && cmd != "dbus-daemon") return@forEach
+                val env = runCatching { java.io.File(d, "environ").readBytes() }.getOrNull() ?: return@forEach
+                if (env.isEmpty()) return@forEach
+                val s = String(env, Charsets.ISO_8859_1)
+                // Never touch the live session's daemons (defensive: at
+                // every call site the new session has not started yet).
+                if (live.isNotEmpty()) {
+                    val id = envValue(s, "EMUX_DESKTOP_ID")
+                    if (id == live) return@forEach
+                }
+                val bus = envValue(s, "DBUS_SESSION_BUS_ADDRESS")
+                val busDead = bus != null && deadBuses.contains(bus)
+                val ticks = runCatching {
+                    val st = java.io.File(d, "stat").readText()
+                    st.substringAfterLast(')').trim().split(Regex("\\s+"))[19].toLong()
+                }.getOrDefault(Long.MAX_VALUE)
+                val olderThanSweep = ticks < sweepTicks
+                if (!busDead && !olderThanSweep) return@forEach
+                android.os.Process.killProcess(pid)
+                killedDaemons++
+            }
+            if (killedDaemons > 0) com.emux.EmuXLog.i("desktop: killed $killedDaemons stale session daemon(s) (xfconfd/dbus-daemon of a previous desktop session)")
         }
         // v0.1.81 FIRST: host-authoritative orphan kill. Guest-side sweeps
         // (including the proot sweep below) CANNOT signal tracees of OTHER

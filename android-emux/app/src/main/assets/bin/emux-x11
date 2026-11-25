@@ -1014,7 +1014,56 @@ session_display_num() {
   SDN=$(printf '%s' "$SDN" | tr -dc '0-9')
   [ -n "$SDN" ] && echo "$SDN"
 }
+# v0.2.142: reap orphaned session daemons (xfconfd, dbus-daemon) whose
+# display has no live session. Double-forked daemons lose EMUX_DESKTOP_ID,
+# so the host sweep cannot key on them, and the bus match in kill_dup
+# below only covers xfconfd - a dbus-daemon's own environment carries no
+# bus address (dbus-launch learns the address FROM the daemon, it does
+# not pass it in). A daemon IS attributable by its DISPLAY: it belongs
+# to the session on that display. Kill it only when its DISPLAY names a
+# display other than the live one (same trust model as the lone-session
+# kill below, which reads the same file), it is at least 10 s old (a
+# fresh daemon is the new session's, and the live-display file is
+# briefly stale mid-rotation), and its DISPLAY is readable - never kill
+# on an unknown display. The same-display respawn case (old daemon and
+# new session on one display number) cannot be told apart here; the
+# host killDesktopGuests() dead-bus/age pass owns that one. Runs on
+# every governor tick, so a rotation's stale daemons die within a tick.
+kill_orphan_session_daemons() {
+  KODOUT=$(ps -eo pid=,etimes=,args= 2>/dev/null)
+  [ -n "$KODOUT" ] || return 0
+  KODLIVE=$(live_display_num 2>/dev/null)
+  [ -n "$KODLIVE" ] || return 0
+  KODDAEM=$(printf '%s\n' "$KODOUT" | awk -v me="$$" '
+    $1 != me {
+      a = $3; sub(".*/", "", a); b = $4; sub(".*/", "", b)
+      if (a == "xfconfd" || b == "xfconfd" || a == "dbus-daemon" || b == "dbus-daemon") {
+        # etimes is DD-HH:MM:SS, HH:MM:SS or MM:SS - ($2+0) alone reads
+        # "01-..." (a day old) as 1, so convert it properly.
+        s = $2; d = 0
+        if (index(s, "-")) { d = substr(s, 1, index(s, "-") - 1) + 0; s = substr(s, index(s, "-") + 1) }
+        n = split(s, t, ":")
+        sec = d * 86400
+        if (n == 3) sec += t[1]*3600 + t[2]*60 + t[3]
+        else if (n == 2) sec += t[1]*60 + t[2]
+        else sec += t[1] + 0
+        if (sec >= 10) print $1
+      }
+    }')
+  for KODP in $KODDAEM; do
+    KODD=$(session_display_num "$KODP" 2>/dev/null)
+    [ -n "$KODD" ] || continue
+    [ "$KODD" = "$KODLIVE" ] && continue
+    echo "emux-x11: killing orphaned session daemon pid $KODP (display :$KODD, live :$KODLIVE)" >&2
+    kill "$KODP" 2>/dev/null
+  done
+  return 0
+}
 kill_dup_xfce_sessions() {
+  # v0.2.142: reap orphaned session daemons first (see above) - a
+  # rotation's stale xfconfd/dbus-daemon must not survive to fight the
+  # new session over xfconf / the session bus.
+  kill_orphan_session_daemons
   KDXOUT=$(ps -eo pid=,ppid=,stat=,etimes=,args= 2>/dev/null)
   [ -n "$KDXOUT" ] || return 0
   # Oldest live session (largest etimes) + the full kill list, in one awk.
@@ -1372,12 +1421,97 @@ for b in /opt/firefox/firefox /usr/local/bin/firefox firefox-esr chromium chromi
   case "$b" in
     firefox) grep -q snap "$(command -v firefox)" 2>/dev/null && continue ;;
   esac
+  # v0.2.142: lighten Firefox before it starts (best-effort, never blocks
+  # the launch): re-seed the low-memory user.js so this launch already
+  # runs with fewer content processes and no crash session restore.
+  case "$b" in
+    *firefox*) [ -x "$HOME/.local/bin/emux-firefox-light" ] && "$HOME/.local/bin/emux-firefox-light" 2>/dev/null || true ;;
+  esac
   exec env MOZ_DISABLE_CONTENT_SANDBOX=1 "$b" "$@"
 done
 echo "emux-browser: no browser found - install one (apt install firefox-esr) or run emux-firefox-upgrade" >&2
 exit 1
 EMUXBR
   chmod +x "$HOME/.local/bin/emux-browser" 2>/dev/null
+  # v0.2.142 FIREFOX LIGHT: seed ~/.local/bin/emux-firefox-light, which
+  # writes a low-memory user.js into every Firefox profile (2 content
+  # processes instead of 8, no crash session restore, tab unload on low
+  # memory). Firefox reads user.js at EVERY startup and applies it over
+  # prefs.js, so editing prefs.js is pointless - Firefox rewrites it.
+  # The helper runs at seed time (below) and at browser launch (from
+  # the emux-browser wrapper above), so profiles created since the last
+  # desktop start are covered too. A user.js WITHOUT our marker is the
+  # user's own - never touched. Opt out: touch
+  # ~/.config/emux/keep-firefox-prefs (same keep-* convention as the
+  # rice opt-outs, v0.2.85).
+  cat > "$HOME/.local/bin/emux-firefox-light" <<'EMUXFL'
+#!/bin/sh
+# emux-firefox-light (v0.2.142): seed EmuX's low-memory Firefox prefs.
+#   dom.ipc.processCount 8 -> 2: shared web content processes. Each one
+#     is ~100 MB; 8 of them is what spikes memory hard enough for the
+#     Android low-memory killer to take out Xvfb and kill the whole
+#     desktop (field 24 Nov 2026: opening Firefox did this EVERY time).
+#     2 keeps the browser usable with far less spike. Trade-off: less
+#     isolation - a content-process crash takes more tabs with it.
+#   dom.ipc.processCount.webIsolated 4 -> 1: Fission's per-site isolated
+#     processes. Mozilla's own low-RAM guidance is 1 here. Same trade-off.
+#   browser.sessionstore.resume_from_crash true -> false: after every
+#     crash Firefox restored the previous session, so the tab set (and
+#     the memory spike) grew after every crash until it failed every
+#     time. Manual History > Restore Previous Session still works.
+#   browser.tabs.unloadOnLowMemory true: pin on Firefox's own tab
+#     unloading (default since Fx93) so background tabs are shed when
+#     memory runs low instead of the whole browser dying.
+seed_one() {
+  # $1 = profile dir. Never touch a user.js that is not ours: only a
+  # file whose first line is our marker is (re)written; anything else
+  # is the user's own. Rewrite only when the content differs, so the
+  # launch-time call is nearly free once seeded.
+  UJS="$1/user.js"
+  if [ -f "$UJS" ] && ! grep -q "^// emux-firefox-light v0.2.142" "$UJS" 2>/dev/null; then
+    echo "emux-firefox-light: $UJS is yours, leaving it alone" >&2
+    return 0
+  fi
+  cat > "$UJS.emux-tmp" <<'EOF'
+// emux-firefox-light v0.2.142 - EmuX low-memory Firefox defaults.
+// Firefox reads this file at every startup. Delete it to go back to
+// stock Firefox prefs (or touch ~/.config/emux/keep-firefox-prefs to
+// stop EmuX re-seeding it). See emux-firefox-light for what each does.
+user_pref("dom.ipc.processCount", 2);
+user_pref("dom.ipc.processCount.webIsolated", 1);
+user_pref("browser.sessionstore.resume_from_crash", false);
+user_pref("browser.tabs.unloadOnLowMemory", true);
+EOF
+  if cmp -s "$UJS.emux-tmp" "$UJS" 2>/dev/null; then
+    rm -f "$UJS.emux-tmp" 2>/dev/null
+  else
+    mv -f "$UJS.emux-tmp" "$UJS" 2>/dev/null && echo "emux-firefox-light: seeded $UJS" >&2
+  fi
+}
+[ -e "$HOME/.config/emux/keep-firefox-prefs" ] && exit 0
+FFDIR="$HOME/.mozilla/firefox"
+[ -d "$FFDIR" ] || exit 0
+# Profiles: Path= entries in profiles.ini (relative to $FFDIR unless
+# absolute) plus any *.default* directory (default-release, default-esr).
+if [ -r "$FFDIR/profiles.ini" ]; then
+  awk -F'=' '/^Path=/ { print $2 }' "$FFDIR/profiles.ini" 2>/dev/null | while IFS= read -r P; do
+    case "$P" in
+      /*) PROF="$P" ;;
+      *) PROF="$FFDIR/$P" ;;
+    esac
+    [ -d "$PROF" ] && seed_one "$PROF"
+  done
+fi
+for PROF in "$FFDIR"/*.default*; do
+  [ -d "$PROF" ] && seed_one "$PROF"
+done
+exit 0
+EMUXFL
+  chmod +x "$HOME/.local/bin/emux-firefox-light" 2>/dev/null
+  # v0.2.142: seed the prefs NOW (desktop start), so the next Firefox
+  # launch already runs light; the wrapper re-seeds at click time for
+  # profiles created since.
+  "$HOME/.local/bin/emux-firefox-light" 2>/dev/null || true
   # v0.2.125 DISTRO-LAUNCHER FIX: the distro ships its own browser .desktop
   # (the Mozilla Team PPA firefox-esr.desktop - menu name "Firefox Web
   # Browser" - or Ubuntu firefox.desktop) whose Exec line launches Firefox
